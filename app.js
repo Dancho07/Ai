@@ -6,6 +6,7 @@ const resultSymbol = document.getElementById("result-symbol");
 const resultAction = document.getElementById("result-action");
 const resultConfidence = document.getElementById("result-confidence");
 const resultShares = document.getElementById("result-shares");
+const resultLivePrice = document.getElementById("result-live-price");
 const resultPrice = document.getElementById("result-price");
 const resultThesis = document.getElementById("result-thesis");
 const resultGenerated = document.getElementById("result-generated");
@@ -146,6 +147,11 @@ function analyzeTrade({ symbol, cash, risk }) {
   };
 }
 
+function getLivePriceForSymbol(symbol) {
+  const match = marketState.find((stock) => stock.symbol === symbol);
+  return match ? match.lastPrice : null;
+}
+
 function showErrors(messages) {
   if (messages.length === 0) {
     errors.classList.add("hidden");
@@ -165,6 +171,10 @@ function renderResult(result) {
   resultAction.className = `signal ${result.action}`;
   resultConfidence.textContent = `Confidence: ${result.confidence}`;
   resultShares.textContent = `${result.shares} shares`;
+  const livePrice = getLivePriceForSymbol(result.symbol);
+  resultLivePrice.textContent = livePrice
+    ? `Live price: $${livePrice.toFixed(2)}`
+    : "Live price: Not available";
   resultPrice.textContent = `Estimated price: $${result.estimatedPrice.toFixed(2)}`;
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
@@ -244,6 +254,12 @@ function renderMarketTable() {
 function refreshMarketBoard() {
   updateMarketPrices();
   renderMarketTable();
+  if (!resultCard.classList.contains("hidden")) {
+    const livePrice = getLivePriceForSymbol(resultSymbol.textContent);
+    resultLivePrice.textContent = livePrice
+      ? `Live price: $${livePrice.toFixed(2)}`
+      : "Live price: Not available";
+  }
 }
 
 [
