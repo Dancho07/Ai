@@ -684,9 +684,9 @@ function buildQuoteFromYahoo(quote) {
   };
 }
 
-function getMarketSessionBadge(session, source) {
-  if (source === "cache") {
-    return { label: "CACHED", className: "cached" };
+function getMarketSessionBadge(session, hasData = true) {
+  if (!hasData) {
+    return { label: "UNKNOWN", className: "delayed" };
   }
   if (session === "REGULAR") {
     return { label: "REGULAR", className: "realtime" };
@@ -703,31 +703,57 @@ function getMarketSessionBadge(session, source) {
   return { label: "CLOSED", className: "closed" };
 }
 
-function getMarketSourceBadge(source) {
+function getMarketSourceBadge(entry, hasData = true) {
+  if (!hasData) {
+    return { label: "UNAVAILABLE", className: "delayed" };
+  }
+  const source = entry?.dataSource ?? "cache";
+  const session = entry?.quoteSession ?? "UNKNOWN";
+  if (entry?.isRealtime) {
+    return { label: "REALTIME", className: "realtime" };
+  }
+  if (session === "PRE" || session === "POST") {
+    return { label: "AFTER HOURS", className: "afterhours" };
+  }
   if (source === "cache") {
     return { label: "CACHED", className: "cached" };
   }
   if (source === "historical") {
-    return { label: "HISTORICAL", className: "historical" };
+    return { label: "LAST CLOSE", className: "historical" };
   }
-  if (source === "delayed") {
+  if (source === "delayed" || session === "DELAYED") {
     return { label: "DELAYED", className: "delayed" };
   }
-  if (source === "unavailable") {
-    return { label: "UNAVAILABLE", className: "delayed" };
-  }
-  return { label: "REALTIME", className: "realtime" };
+  return { label: "UNAVAILABLE", className: "delayed" };
+}
+
+function hasMarketIndicatorData(entry) {
+  return Boolean(
+    entry &&
+      (entry.lastPrice != null ||
+        entry.quoteAsOf != null ||
+        entry.lastHistoricalTimestamp != null ||
+        entry.lastUpdatedAt != null),
+  );
 }
 
 function getMarketIndicatorData(entry, options = {}) {
-  const session = entry?.quoteSession ?? "CLOSED";
-  const source = entry?.dataSource ?? "cache";
-  const asOfTimestamp =
-    entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null;
-  const sessionBadge = getMarketSessionBadge(session, source);
-  const sourceBadge = getMarketSourceBadge(source);
-  const marketStatus = session === "CLOSED" ? "Closed" : session === "UNKNOWN" ? "Unavailable" : "Open";
-  const asOfLabel = `As of ${formatTimestamp(asOfTimestamp)} UTC`;
+  const hasData = hasMarketIndicatorData(entry);
+  const session = entry?.quoteSession ?? "UNKNOWN";
+  const asOfTimestamp = entry?.quoteAsOf ?? null;
+  const sessionBadge = getMarketSessionBadge(session, hasData);
+  const sourceBadge = getMarketSourceBadge(entry, hasData);
+  let marketStatus = "Unavailable";
+  if (hasData) {
+    if (session === "PRE" || session === "POST") {
+      marketStatus = "After hours";
+    } else if (session === "CLOSED" || entry?.dataSource === "historical") {
+      marketStatus = "Closed";
+    } else {
+      marketStatus = "Open";
+    }
+  }
+  const asOfLabel = asOfTimestamp ? `As of ${formatTimestamp(asOfTimestamp)} UTC` : "No data";
   return {
     marketStatus,
     sessionBadge,
@@ -743,6 +769,9 @@ function getLatestMarketEntry() {
   marketState.forEach((entry) => {
     const timestamp =
       entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null;
+    if (!hasMarketIndicatorData(entry)) {
+      return;
+    }
     if (timestamp != null && timestamp > latestTimestamp) {
       latestTimestamp = timestamp;
       latestEntry = entry;
@@ -751,11 +780,27 @@ function getLatestMarketEntry() {
   return latestEntry;
 }
 
+function getReferenceSymbol(symbols = getVisibleSymbols()) {
+  if (symbols?.length) {
+    return symbols[0];
+  }
+  return marketState[0]?.symbol ?? null;
+}
+
+function getMarketIndicatorEntry() {
+  const referenceSymbol = getReferenceSymbol();
+  const entry = referenceSymbol ? getStockEntry(referenceSymbol) : null;
+  if (hasMarketIndicatorData(entry)) {
+    return entry;
+  }
+  return getLatestMarketEntry();
+}
+
 function updateMarketIndicator() {
   if (!marketOpenText || !marketSessionBadge || !marketAsOf || !marketSourceBadge) {
     return;
   }
-  const entry = getLatestMarketEntry();
+  const entry = getMarketIndicatorEntry();
   const data = getMarketIndicatorData(entry, {
     usingCached: marketIndicatorState.usingCached,
   });
