@@ -249,6 +249,12 @@ tbody tr:hover {
   color: #9d2c2c;
 }
 
+.alert.info {
+  border-color: #c5dafc;
+  background: #f2f6ff;
+  color: #2c3c9d;
+}
+
 .hidden {
   display: none;
 }

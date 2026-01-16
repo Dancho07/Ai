@@ -1,26 +1,28 @@
-const form = document.getElementById("trade-form");
-const errors = document.getElementById("errors");
-const resultCard = document.getElementById("result");
+const isBrowser = typeof document !== "undefined";
+const form = isBrowser ? document.getElementById("trade-form") : null;
+const errors = isBrowser ? document.getElementById("errors") : null;
+const statusNotice = isBrowser ? document.getElementById("status") : null;
+const resultCard = isBrowser ? document.getElementById("result") : null;
 
-const resultSymbol = document.getElementById("result-symbol");
-const resultAction = document.getElementById("result-action");
-const resultConfidence = document.getElementById("result-confidence");
-const resultShares = document.getElementById("result-shares");
-const resultLivePrice = document.getElementById("result-live-price");
-const resultPrice = document.getElementById("result-price");
-const resultThesis = document.getElementById("result-thesis");
-const resultGenerated = document.getElementById("result-generated");
-const resultDisclaimer = document.getElementById("result-disclaimer");
+const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
+const resultAction = isBrowser ? document.getElementById("result-action") : null;
+const resultConfidence = isBrowser ? document.getElementById("result-confidence") : null;
+const resultShares = isBrowser ? document.getElementById("result-shares") : null;
+const resultLivePrice = isBrowser ? document.getElementById("result-live-price") : null;
+const resultPrice = isBrowser ? document.getElementById("result-price") : null;
+const resultThesis = isBrowser ? document.getElementById("result-thesis") : null;
+const resultGenerated = isBrowser ? document.getElementById("result-generated") : null;
+const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer") : null;
 
-const marketBody = document.getElementById("market-body");
-const filterSearch = document.getElementById("filter-search");
-const filterSector = document.getElementById("filter-sector");
-const filterCap = document.getElementById("filter-cap");
-const filterSignal = document.getElementById("filter-signal");
-const filterMin = document.getElementById("filter-min");
-const filterMax = document.getElementById("filter-max");
-const filterMonth = document.getElementById("filter-month");
-const filterYear = document.getElementById("filter-year");
+const marketBody = isBrowser ? document.getElementById("market-body") : null;
+const filterSearch = isBrowser ? document.getElementById("filter-search") : null;
+const filterSector = isBrowser ? document.getElementById("filter-sector") : null;
+const filterCap = isBrowser ? document.getElementById("filter-cap") : null;
+const filterSignal = isBrowser ? document.getElementById("filter-signal") : null;
+const filterMin = isBrowser ? document.getElementById("filter-min") : null;
+const filterMax = isBrowser ? document.getElementById("filter-max") : null;
+const filterMonth = isBrowser ? document.getElementById("filter-month") : null;
+const filterYear = isBrowser ? document.getElementById("filter-year") : null;
 
 const riskLimits = {
   low: 0.2,
@@ -66,6 +68,8 @@ const marketState = marketWatchlist.map((stock) => ({
   monthlyChange: null,
   yearlyChange: null,
   lastUpdated: null,
+  lastUpdatedAt: null,
+  dataSource: "live",
 }));
 const extraSymbolData = new Map();
 
@@ -78,10 +82,138 @@ const percentFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const PROVIDER = "Yahoo Finance";
+const MAX_RETRIES = 4;
+const REQUEST_TIMEOUT_MS = 8000;
+const BACKOFF_BASE_MS = 500;
+const RETRYABLE_STATUS = new Set([429, 503, 504]);
+const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
+
 const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
 const YAHOO_CHART_URL = (symbol, range) =>
   `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=1d&includePrePost=false`;
+
+class MarketDataError extends Error {
+  constructor(type, message, details = {}) {
+    super(message);
+    this.name = "MarketDataError";
+    this.type = type;
+    this.details = details;
+  }
+}
+
+function createRequestId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function logMarketDataEvent(level, payload) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    ...payload,
+  };
+  if (level === "error") {
+    console.error(JSON.stringify(entry));
+  } else if (level === "warn") {
+    console.warn(JSON.stringify(entry));
+  } else {
+    console.info(JSON.stringify(entry));
+  }
+}
+
+function isValidSymbol(symbol) {
+  const symbolPattern = /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/;
+  return symbolPattern.test(symbol);
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) {
+    return "unknown time";
+  }
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseProviderError(payload) {
+  const chartError = payload?.chart?.error;
+  const quoteError = payload?.quoteResponse?.error;
+  return chartError || quoteError || null;
+}
+
+function isInvalidSymbolPayload(quoteData, chartData) {
+  const quoteResult = quoteData?.quoteResponse?.result ?? [];
+  const chartResult = chartData?.chart?.result ?? [];
+  return quoteResult.length === 0 && chartResult.length === 0;
+}
+
+async function fetchWithTimeout(fetchFn, url, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchFn(url, { signal: controller.signal });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new MarketDataError("timeout", "Request timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchJsonWithRetry(
+  url,
+  { fetchFn = fetch, timeoutMs = REQUEST_TIMEOUT_MS, maxAttempts = MAX_RETRIES, provider, symbol },
+) {
+  const requestId = createRequestId();
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(fetchFn, url, timeoutMs);
+      if (!response.ok) {
+        const errorType = RETRYABLE_STATUS.has(response.status) ? "unavailable" : "http_error";
+        throw new MarketDataError(errorType, `Request failed: ${response.status}`, {
+          statusCode: response.status,
+        });
+      }
+      const payload = await response.json();
+      const providerError = parseProviderError(payload);
+      if (providerError) {
+        const errorType = providerError?.code === "Not Found" ? "invalid_symbol" : "provider_error";
+        throw new MarketDataError(errorType, providerError?.description || "Provider error.", {
+          providerCode: providerError?.code,
+        });
+      }
+      return payload;
+    } catch (error) {
+      const marketError =
+        error instanceof MarketDataError
+          ? error
+          : new MarketDataError("network_error", error.message || "Network error.");
+      const shouldRetry = RETRYABLE_ERRORS.has(marketError.type) && attempt < maxAttempts;
+      logMarketDataEvent(shouldRetry ? "warn" : "error", {
+        event: "market_data_fetch_failure",
+        provider,
+        symbol,
+        requestId,
+        attempt,
+        maxAttempts,
+        errorType: marketError.type,
+        statusCode: marketError.details?.statusCode ?? null,
+        message: marketError.message,
+      });
+      if (!shouldRetry) {
+        throw marketError;
+      }
+      const jitter = Math.random() * 150;
+      const delay = BACKOFF_BASE_MS * 2 ** (attempt - 1) + jitter;
+      await sleep(delay);
+    }
+  }
+  throw new MarketDataError("unavailable", "Failed to fetch market data.");
+}
 
 function calculateSignal(prices) {
   if (!prices || prices.length < 10) {
@@ -174,10 +306,18 @@ function getLivePriceForSymbol(symbol) {
 }
 
 function getStockEntry(symbol) {
-  return marketState.find((stock) => stock.symbol === symbol) ?? extraSymbolData.get(symbol);
+  const cachedExtra = extraSymbolData.get(symbol);
+  return cachedExtra ?? marketState.find((stock) => stock.symbol === symbol);
+}
+
+function resetSymbolCache() {
+  extraSymbolData.clear();
 }
 
 function showErrors(messages) {
+  if (!errors) {
+    return;
+  }
   if (messages.length === 0) {
     errors.classList.add("hidden");
     errors.innerHTML = "";
@@ -190,7 +330,23 @@ function showErrors(messages) {
     .join("")}</ul>`;
 }
 
+function showStatus(message) {
+  if (!statusNotice) {
+    return;
+  }
+  if (!message) {
+    statusNotice.classList.add("hidden");
+    statusNotice.textContent = "";
+    return;
+  }
+  statusNotice.textContent = message;
+  statusNotice.classList.remove("hidden");
+}
+
 function renderResult(result) {
+  if (!resultCard) {
+    return;
+  }
   resultSymbol.textContent = result.symbol;
   resultAction.textContent = result.action.toUpperCase();
   resultAction.className = `signal ${result.action}`;
@@ -209,15 +365,12 @@ function renderResult(result) {
   resultCard.classList.remove("hidden");
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
   const cacheBust = Date.now();
-  const response = await fetch(
+  return fetchJsonWithRetry(
     `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
+    options,
   );
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-  return response.json();
 }
 
 function calculatePercentChange(latest, previous) {
@@ -251,7 +404,10 @@ function applyChartMetrics(stock, closeSeries) {
 
 async function loadInitialMarketData() {
   const symbols = marketState.map((stock) => stock.symbol);
-  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols));
+  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
+    provider: PROVIDER,
+    symbol: symbols.join(","),
+  });
   const quoteResults = quoteData?.quoteResponse?.result ?? [];
 
   quoteResults.forEach((quote) => {
@@ -263,41 +419,82 @@ async function loadInitialMarketData() {
     stock.previousClose = quote.regularMarketPreviousClose ?? null;
     stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
     stock.lastUpdated = new Date().toLocaleTimeString();
+    stock.lastUpdatedAt = Date.now();
+    stock.dataSource = "live";
   });
 
   await Promise.all(
     marketState.map(async (stock) => {
       try {
-        const chartData = await fetchJson(YAHOO_CHART_URL(stock.symbol, "1y"));
+        const chartData = await fetchJson(YAHOO_CHART_URL(stock.symbol, "1y"), {
+          provider: PROVIDER,
+          symbol: stock.symbol,
+        });
         const chart = chartData?.chart?.result?.[0];
         const closeSeries = extractCloseSeries(chart);
         applyChartMetrics(stock, closeSeries);
       } catch (error) {
-        console.error(error);
+        logMarketDataEvent("warn", {
+          event: "market_data_chart_failure",
+          provider: PROVIDER,
+          symbol: stock.symbol,
+          errorType: error.type ?? "unknown",
+          message: error.message,
+        });
       }
     }),
   );
 }
 
-async function loadSymbolSnapshot(symbol) {
+async function loadSymbolSnapshot(symbol, options = {}) {
   const [quoteResult, chartResult] = await Promise.allSettled([
-    fetchJson(YAHOO_QUOTE_URL([symbol])),
-    fetchJson(YAHOO_CHART_URL(symbol, "1y")),
+    fetchJson(YAHOO_QUOTE_URL([symbol]), {
+      provider: PROVIDER,
+      symbol,
+      fetchFn: options.fetchFn,
+    }),
+    fetchJson(YAHOO_CHART_URL(symbol, "1y"), {
+      provider: PROVIDER,
+      symbol,
+      fetchFn: options.fetchFn,
+    }),
   ]);
   const quoteData = quoteResult.status === "fulfilled" ? quoteResult.value : null;
   const chartData = chartResult.status === "fulfilled" ? chartResult.value : null;
   const cachedEntry = getStockEntry(symbol);
   const hasCachedData = Boolean(cachedEntry?.lastPrice || cachedEntry?.history?.length);
+  if (quoteResult.status === "rejected") {
+    logMarketDataEvent("warn", {
+      event: "market_data_quote_failure",
+      provider: PROVIDER,
+      symbol,
+      errorType: quoteResult.reason?.type ?? "unknown",
+      message: quoteResult.reason?.message ?? "Quote fetch failed.",
+    });
+  }
+  if (chartResult.status === "rejected") {
+    logMarketDataEvent("warn", {
+      event: "market_data_chart_failure",
+      provider: PROVIDER,
+      symbol,
+      errorType: chartResult.reason?.type ?? "unknown",
+      message: chartResult.reason?.message ?? "Chart fetch failed.",
+    });
+  }
+
   if (!quoteData && !chartData) {
     if (hasCachedData) {
-      return;
+      return { status: "cache", entry: cachedEntry };
     }
-    throw new Error("Quote and chart requests failed.");
+    throw new MarketDataError("unavailable", "Quote and chart requests failed.");
   }
 
   const quote = quoteData?.quoteResponse?.result?.[0];
   const chart = chartData?.chart?.result?.[0];
   const closeSeries = extractCloseSeries(chart);
+  if (!quote && !closeSeries.length && isInvalidSymbolPayload(quoteData, chartData)) {
+    throw new MarketDataError("invalid_symbol", "No data returned for symbol.");
+  }
   const entry = extraSymbolData.get(symbol) ?? {
     symbol,
     name: quote?.shortName ?? symbol,
@@ -310,16 +507,30 @@ async function loadSymbolSnapshot(symbol) {
     yearlyChange: null,
     dailyChange: null,
     lastUpdated: null,
+    lastUpdatedAt: null,
+    dataSource: "live",
   };
+  let dataSource = "live";
   if (quote) {
     entry.name = quote.shortName ?? entry.name;
     entry.lastPrice = quote.regularMarketPrice ?? entry.lastPrice;
     entry.previousClose = quote.regularMarketPreviousClose ?? entry.previousClose;
     entry.dailyChange = calculatePercentChange(entry.lastPrice, entry.previousClose);
     entry.lastUpdated = new Date().toLocaleTimeString();
+    entry.lastUpdatedAt = Date.now();
+    entry.dataSource = "live";
+  } else if (closeSeries.length) {
+    entry.lastPrice = closeSeries[closeSeries.length - 1];
+    entry.previousClose = closeSeries[closeSeries.length - 2] ?? entry.previousClose;
+    entry.dailyChange = calculatePercentChange(entry.lastPrice, entry.previousClose);
+    entry.lastUpdated = new Date().toLocaleTimeString();
+    entry.lastUpdatedAt = Date.now();
+    entry.dataSource = "delayed";
+    dataSource = "delayed";
   }
   applyChartMetrics(entry, closeSeries);
   extraSymbolData.set(symbol, entry);
+  return { status: dataSource, entry, dataSource };
 }
 
 function matchesFilters(stock) {
@@ -369,6 +580,9 @@ function matchesFilters(stock) {
 }
 
 function renderMarketTable() {
+  if (!marketBody) {
+    return;
+  }
   const rows = marketState
     .filter(matchesFilters)
     .map((stock) => {
@@ -427,7 +641,10 @@ function renderMarketTable() {
 async function refreshMarketBoard() {
   const symbols = marketState.map((stock) => stock.symbol);
   try {
-    const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols));
+    const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
+      provider: PROVIDER,
+      symbol: symbols.join(","),
+    });
     const quoteResults = quoteData?.quoteResponse?.result ?? [];
     quoteResults.forEach((quote) => {
       const stock = marketState.find((entry) => entry.symbol === quote.symbol);
@@ -438,13 +655,21 @@ async function refreshMarketBoard() {
       stock.lastPrice = quote.regularMarketPrice ?? stock.lastPrice;
       stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
       stock.lastUpdated = new Date().toLocaleTimeString();
+      stock.lastUpdatedAt = Date.now();
+      stock.dataSource = "live";
     });
   } catch (error) {
-    console.error(error);
+    logMarketDataEvent("warn", {
+      event: "market_data_refresh_failure",
+      provider: PROVIDER,
+      symbol: symbols.join(","),
+      errorType: error.type ?? "unknown",
+      message: error.message,
+    });
   }
 
   renderMarketTable();
-  if (!resultCard.classList.contains("hidden")) {
+  if (resultCard && !resultCard.classList.contains("hidden")) {
     const livePrice = getLivePriceForSymbol(resultSymbol.textContent);
     resultLivePrice.textContent = livePrice
       ? `Live price: ${quoteFormatter.format(livePrice)}`
@@ -452,18 +677,18 @@ async function refreshMarketBoard() {
   }
 }
 
-form.addEventListener("submit", async (event) => {
+if (form) {
+  form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(form);
   const symbol = formData.get("symbol").toString().trim().toUpperCase();
   const cashValue = Number(formData.get("cash"));
   const risk = formData.get("risk").toString();
-  const symbolPattern = /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/;
 
   const validationErrors = [];
   if (!symbol) {
     validationErrors.push("Please enter a stock symbol.");
-  } else if (!symbolPattern.test(symbol)) {
+  } else if (!isValidSymbol(symbol)) {
     validationErrors.push("Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).");
   }
   if (!Number.isFinite(cashValue) || cashValue <= 0) {
@@ -475,22 +700,46 @@ form.addEventListener("submit", async (event) => {
 
   if (validationErrors.length > 0) {
     showErrors(validationErrors);
+    showStatus("");
     resultCard.classList.add("hidden");
     return;
   }
 
   try {
-    await loadSymbolSnapshot(symbol);
+    const snapshot = await loadSymbolSnapshot(symbol);
     showErrors([]);
+    if (snapshot?.status === "cache") {
+      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+      showStatus(`Live data unavailable — showing last known price from ${lastUpdated}.`);
+    } else if (snapshot?.dataSource === "delayed") {
+      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+      showStatus(`Live data unavailable — showing delayed price from ${lastUpdated}.`);
+    } else {
+      showStatus("");
+    }
   } catch (error) {
-    console.error(error);
-    showErrors(["Live market data is temporarily unavailable. Please try again shortly."]);
+    if (error.type === "invalid_symbol") {
+      showErrors([`We couldn't find data for ${symbol}. Double-check the symbol and try again.`]);
+      showStatus("");
+      resultCard.classList.add("hidden");
+      return;
+    }
+    logMarketDataEvent("error", {
+      event: "market_data_snapshot_failure",
+      provider: PROVIDER,
+      symbol,
+      errorType: error.type ?? "unknown",
+      message: error.message,
+    });
+    showErrors([]);
+    showStatus("Live data unavailable — please try again shortly.");
     resultCard.classList.add("hidden");
     return;
   }
   const result = analyzeTrade({ symbol, cash: cashValue, risk });
   renderResult(result);
-});
+  });
+}
 
 [
   filterSearch,
@@ -502,13 +751,34 @@ form.addEventListener("submit", async (event) => {
   filterMonth,
   filterYear,
 ].forEach((input) => {
-  input.addEventListener("input", renderMarketTable);
+  if (input) {
+    input.addEventListener("input", renderMarketTable);
+  }
 });
 
-renderMarketTable();
-loadInitialMarketData()
-  .then(renderMarketTable)
-  .catch((error) => {
-    console.error(error);
-  });
-setInterval(refreshMarketBoard, 60000);
+if (isBrowser) {
+  renderMarketTable();
+  loadInitialMarketData()
+    .then(renderMarketTable)
+    .catch((error) => {
+      logMarketDataEvent("error", {
+        event: "market_data_initial_failure",
+        provider: PROVIDER,
+        errorType: error.type ?? "unknown",
+        message: error.message,
+      });
+    });
+  setInterval(refreshMarketBoard, 60000);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    MarketDataError,
+    fetchJsonWithRetry,
+    fetchWithTimeout,
+    isValidSymbol,
+    loadSymbolSnapshot,
+    resetSymbolCache,
+    extraSymbolData,
+  };
+}
