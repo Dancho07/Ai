@@ -502,6 +502,21 @@ tbody tr:hover {
   font-weight: 600;
 }
 
+.confidence-badge.low {
+  background: #fff6db;
+  color: #786307;
+}
+
+.confidence-badge.medium {
+  background: #eef1ff;
+  color: #3945a3;
+}
+
+.confidence-badge.high {
+  background: #e7f6ed;
+  color: #1d7a4a;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -514,6 +529,25 @@ tbody tr:hover {
   border-radius: 16px;
   padding: 20px;
   border: 1px solid #e3e7ff;
+}
+
+.confidence-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.confidence-score {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1d1f2c;
+}
+
+.confidence-caution {
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+  color: #6c728d;
 }
 
 .plan-list {
