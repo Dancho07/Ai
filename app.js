@@ -129,6 +129,12 @@ const MARKET_OPEN_TTL_MS = 5 * 1000;
 const MARKET_EXTENDED_TTL_MS = 12 * 1000;
 const MARKET_CLOSED_TTL_MS = 5 * 60 * 1000;
 const HISTORICAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MARKET_DEBUG_SYMBOLS = new Set(["AAPL", "SPY"]);
+const MARKET_DEBUG_PARAM = "debug";
+const MARKET_DEBUG_ENABLED =
+  isBrowser && typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get(MARKET_DEBUG_PARAM) === "1"
+    : false;
 const REFRESH_INTERVALS = {
   REGULAR: 5 * 1000,
   PRE: 12 * 1000,
@@ -301,6 +307,81 @@ function normalizeEpochToMs(timestamp) {
     return null;
   }
   return timestamp > 1e12 ? timestamp : timestamp * 1000;
+}
+
+function deriveSessionFromYahooQuote(quote, nowMs = Date.now()) {
+  const state = quote?.marketState ?? quote?.regularMarketState ?? null;
+  if (typeof state === "string") {
+    const normalized = state.toUpperCase();
+    if (["REGULAR", "PRE", "POST", "CLOSED"].includes(normalized)) {
+      return normalized;
+    }
+  }
+  if (quote?.regularMarketTime) {
+    const regularMs = normalizeEpochToMs(quote.regularMarketTime);
+    if (regularMs && nowMs - regularMs <= 15 * 60 * 1000) {
+      return "REGULAR";
+    }
+    return "CLOSED";
+  }
+  return "UNKNOWN";
+}
+
+function getQuoteSourceForSession(session) {
+  if (session === "REGULAR") {
+    return "primary";
+  }
+  if (session === "PRE" || session === "POST") {
+    return "extended";
+  }
+  if (session === "DELAYED") {
+    return "delayed";
+  }
+  if (session === "UNKNOWN") {
+    return "unavailable";
+  }
+  return "closed";
+}
+
+function getDebugFreshnessLabel(source) {
+  if (source === "primary" || source === "extended") {
+    return "REALTIME";
+  }
+  if (source === "delayed") {
+    return "DELAYED";
+  }
+  if (source === "historical") {
+    return "HISTORICAL";
+  }
+  if (source === "cache") {
+    return "CACHED";
+  }
+  return "UNAVAILABLE";
+}
+
+function logYahooQuoteDebug(rawQuote, derivedSession, source) {
+  if (!MARKET_DEBUG_ENABLED || !rawQuote?.symbol) {
+    return;
+  }
+  const symbol = rawQuote.symbol?.toUpperCase?.() ?? rawQuote.symbol;
+  if (!MARKET_DEBUG_SYMBOLS.has(symbol)) {
+    return;
+  }
+  const payload = {
+    symbol,
+    marketState: rawQuote.marketState ?? rawQuote.regularMarketState ?? null,
+    regularMarketTime: rawQuote.regularMarketTime ?? null,
+    preMarketTime: rawQuote.preMarketTime ?? null,
+    postMarketTime: rawQuote.postMarketTime ?? null,
+    exchangeTimezoneName: rawQuote.exchangeTimezoneName ?? null,
+    exchangeTimezoneShortName: rawQuote.exchangeTimezoneShortName ?? null,
+    regularMarketPrice: rawQuote.regularMarketPrice ?? null,
+    preMarketPrice: rawQuote.preMarketPrice ?? null,
+    postMarketPrice: rawQuote.postMarketPrice ?? null,
+    derivedSession,
+    freshnessSource: getDebugFreshnessLabel(source),
+  };
+  console.info("[Market Debug]", payload);
 }
 
 function getCacheTtl(session) {
@@ -587,70 +668,50 @@ async function fetchJsonWithRetry(
   throw new MarketDataError("unavailable", "Failed to fetch market data.");
 }
 
-function resolveMarketSession(quote) {
-  const state = quote?.marketState ?? quote?.regularMarketState ?? null;
-  if (typeof state === "string") {
-    const normalized = state.toUpperCase();
-    if (["REGULAR", "PRE", "POST", "CLOSED"].includes(normalized)) {
-      return normalized;
-    }
-    return "UNKNOWN";
-  }
-  if (quote?.preMarketPrice != null) {
-    return "PRE";
-  }
-  if (quote?.postMarketPrice != null) {
-    return "POST";
-  }
-  if (quote?.regularMarketPrice != null) {
-    return "DELAYED";
-  }
-  return "UNKNOWN";
-}
-
 function buildQuoteFromYahoo(quote) {
   if (!quote) {
     return null;
   }
-  let session = resolveMarketSession(quote);
+  const session = deriveSessionFromYahooQuote(quote);
+  const regularFields = {
+    price: quote.regularMarketPrice,
+    change: quote.regularMarketChange,
+    changePct: quote.regularMarketChangePercent,
+    timestamp: quote.regularMarketTime,
+  };
+  const preFields = {
+    price: quote.preMarketPrice,
+    change: quote.preMarketChange,
+    changePct: quote.preMarketChangePercent,
+    timestamp: quote.preMarketTime,
+  };
+  const postFields = {
+    price: quote.postMarketPrice,
+    change: quote.postMarketChange,
+    changePct: quote.postMarketChangePercent,
+    timestamp: quote.postMarketTime,
+  };
   const selectFields = (sessionType) => {
     if (sessionType === "PRE") {
       return {
-        price: quote.preMarketPrice,
-        change: quote.preMarketChange,
-        changePct: quote.preMarketChangePercent,
-        timestamp: quote.preMarketTime,
+        price: preFields.price ?? regularFields.price,
+        change: preFields.change ?? regularFields.change,
+        changePct: preFields.changePct ?? regularFields.changePct,
+        timestamp: preFields.timestamp ?? regularFields.timestamp,
       };
     }
     if (sessionType === "POST") {
       return {
-        price: quote.postMarketPrice,
-        change: quote.postMarketChange,
-        changePct: quote.postMarketChangePercent,
-        timestamp: quote.postMarketTime,
+        price: postFields.price ?? regularFields.price,
+        change: postFields.change ?? regularFields.change,
+        changePct: postFields.changePct ?? regularFields.changePct,
+        timestamp: postFields.timestamp ?? regularFields.timestamp,
       };
     }
-    if (sessionType === "UNKNOWN") {
-      return {
-        price: quote.regularMarketPrice,
-        change: quote.regularMarketChange,
-        changePct: quote.regularMarketChangePercent,
-        timestamp: quote.regularMarketTime,
-      };
-    }
-    return {
-      price: quote.regularMarketPrice,
-      change: quote.regularMarketChange,
-      changePct: quote.regularMarketChangePercent,
-      timestamp: quote.regularMarketTime,
-    };
+    return regularFields;
   };
 
-  let fields = selectFields(session);
-  if (fields.price == null && session !== "REGULAR" && session !== "UNKNOWN") {
-    session = "CLOSED";
-    fields = selectFields("CLOSED");
-  }
+  const fields = selectFields(session);
   if (fields.price == null) {
     return null;
   }
@@ -747,7 +808,7 @@ function getMarketIndicatorData(entry, options = {}) {
   if (hasData) {
     if (session === "PRE" || session === "POST") {
       marketStatus = "After hours";
-    } else if (session === "CLOSED" || entry?.dataSource === "historical") {
+    } else if (session === "CLOSED") {
       marketStatus = "Closed";
     } else {
       marketStatus = "Open";
@@ -1583,7 +1644,14 @@ function updateStockWithQuote(stock, quote) {
     stock.dailyChange = quote.changePct;
   }
   stock.quoteAsOf = quote.asOfTimestamp ?? stock.quoteAsOf;
-  stock.quoteSession = quote.session ?? stock.quoteSession;
+  if (quote.session) {
+    const hasExistingSession = Boolean(stock.quoteSession);
+    const isUnavailableFallback =
+      quote.unavailable === true && ["UNKNOWN", "CLOSED"].includes(quote.session);
+    if (!isUnavailableFallback || !hasExistingSession) {
+      stock.quoteSession = quote.session;
+    }
+  }
   stock.isRealtime = quote.isRealtime ?? stock.isRealtime;
   stock.lastUpdated = formatTime(stock.quoteAsOf);
   stock.lastUpdatedAt = quote.asOfTimestamp ?? stock.lastUpdatedAt ?? Date.now();
@@ -1622,7 +1690,7 @@ function updateStockWithHistorical(stock, historyPayload) {
     stock.lastUpdated = formatTime(stock.lastUpdatedAt);
   }
   if (!stock.quoteSession) {
-    stock.quoteSession = "CLOSED";
+    stock.quoteSession = "DELAYED";
   }
   if (stock.dataSource === "live") {
     stock.dataSource = "historical";
@@ -1685,7 +1753,7 @@ async function fetchHistoricalSeries(symbol, options = {}) {
   return payload;
 }
 
-function deriveHistoricalQuote(closes, timestamps, sessionOverride = "CLOSED") {
+function deriveHistoricalQuote(closes, timestamps, sessionOverride = "DELAYED") {
   if (!closes.length) {
     return null;
   }
@@ -1771,15 +1839,19 @@ async function getQuoteInternal(symbol, options = {}) {
   if (providerQuote) {
     const builtQuote = buildQuoteFromYahoo(providerQuote);
     if (builtQuote) {
+      const session =
+        builtQuote.session === "UNKNOWN" && lastKnown?.session ? lastKnown.session : builtQuote.session;
       const source =
-        builtQuote.session === "REGULAR"
-          ? "primary"
-          : builtQuote.session === "PRE" || builtQuote.session === "POST"
-            ? "extended"
-            : builtQuote.session === "DELAYED"
-              ? "delayed"
-              : "closed";
-      const fullQuote = { ...builtQuote, source };
+        builtQuote.session === "UNKNOWN" && lastKnown?.session
+          ? "cache"
+          : getQuoteSourceForSession(session);
+      const fullQuote = {
+        ...builtQuote,
+        session,
+        isRealtime: session === "REGULAR" || session === "PRE" || session === "POST",
+        source,
+      };
+      logYahooQuoteDebug(providerQuote, session, source);
       updateQuoteCache(symbol, fullQuote);
       setLastKnownQuote(symbol, fullQuote);
       return fullQuote;
@@ -1800,17 +1872,12 @@ async function getQuoteInternal(symbol, options = {}) {
 
   try {
     const historical = await fetchHistoricalSeries(symbol, options);
-    const emptyQuote = providerError?.details?.reason === "empty_quote";
-    const derived = deriveHistoricalQuote(
-      historical.closes,
-      historical.timestamps,
-      emptyQuote ? "UNKNOWN" : "CLOSED",
-    );
+    const derived = deriveHistoricalQuote(historical.closes, historical.timestamps, "DELAYED");
     if (derived) {
       const fullQuote = {
         ...derived,
         source: "historical",
-        ...(emptyQuote ? { unavailable: true } : {}),
+        ...(providerError?.details?.reason === "empty_quote" ? { unavailable: true } : {}),
       };
       setLastKnownQuote(symbol, fullQuote);
       return fullQuote;
@@ -2571,6 +2638,7 @@ if (typeof module !== "undefined" && module.exports) {
     persistFormState,
     loadPersistedFormState,
     getQuote,
+    deriveSessionFromYahooQuote,
     loadSymbolSnapshot,
     resetSymbolCache,
     extraSymbolData,

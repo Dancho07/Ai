@@ -5,6 +5,7 @@ const {
   isValidSymbol,
   normalizeSymbolInput,
   getSymbolValidationMessage,
+  deriveSessionFromYahooQuote,
   persistFormState,
   loadPersistedFormState,
   getQuote,
@@ -272,6 +273,32 @@ const tests = [
     },
   },
   {
+    name: "derives session from Yahoo marketState values",
+    fn: async () => {
+      assert.strictEqual(
+        deriveSessionFromYahooQuote({ marketState: "REGULAR" }),
+        "REGULAR",
+      );
+      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "PRE" }), "PRE");
+      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "POST" }), "POST");
+      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "CLOSED" }), "CLOSED");
+    },
+  },
+  {
+    name: "derives regular session when regularMarketTime is recent",
+    fn: async () => {
+      const now = 1700000000000;
+      assert.strictEqual(
+        deriveSessionFromYahooQuote({ regularMarketTime: 1700000000 }, now),
+        "REGULAR",
+      );
+      assert.strictEqual(
+        deriveSessionFromYahooQuote({ regularMarketTime: 1699990000 }, now),
+        "CLOSED",
+      );
+    },
+  },
+  {
     name: "falls back to cached data on rate limit",
     fn: async () => {
       resetQuoteCache();
@@ -499,6 +526,35 @@ const tests = [
       const display = getMarketRowDisplay(stock);
       assert.strictEqual(quote.source, "cache");
       assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+    },
+  },
+  {
+    name: "keeps cached market status when unavailable quote is returned",
+    fn: async () => {
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, {
+        price: 148.1,
+        change: -0.9,
+        changePct: -0.6,
+        asOfTimestamp: Date.now() - 30000,
+        isRealtime: false,
+        session: "REGULAR",
+        source: "cache",
+      });
+      updateStockWithQuote(stock, {
+        price: 148.1,
+        change: -0.9,
+        changePct: -0.6,
+        asOfTimestamp: Date.now() - 10000,
+        isRealtime: false,
+        session: "UNKNOWN",
+        source: "cache",
+        unavailable: true,
+      });
+      const indicator = getMarketIndicatorData(stock);
+      assert.strictEqual(stock.quoteSession, "REGULAR");
+      assert.strictEqual(indicator.marketStatus, "Open");
+      assert.strictEqual(indicator.sourceBadge.label, "CACHED");
     },
   },
   {
