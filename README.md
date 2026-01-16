@@ -12,15 +12,4 @@ plain-language thesis based on live market quotes and recent price history.
 - Generates buy/sell/hold signals based on the last 10 trading sessions.
 - Lets you filter a curated market watchlist by sector, market cap, and signal.
 
-## Live page
-
-- Local: <http://localhost:8000>
-- Production: _Add your deployed URL here._
-
-## Quick start
-
-```bash
-python -m http.server 8000
-```
-
-Then open <http://localhost:8000> in your browser.
+Then open https://dancho07.github.io/Ai/ in your browser.
