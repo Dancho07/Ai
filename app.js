@@ -11,6 +11,14 @@ const resultThesis = document.getElementById("result-thesis");
 const resultGenerated = document.getElementById("result-generated");
 const resultDisclaimer = document.getElementById("result-disclaimer");
 
+const marketBody = document.getElementById("market-body");
+const filterSearch = document.getElementById("filter-search");
+const filterSector = document.getElementById("filter-sector");
+const filterCap = document.getElementById("filter-cap");
+const filterSignal = document.getElementById("filter-signal");
+const filterMin = document.getElementById("filter-min");
+const filterMax = document.getElementById("filter-max");
+
 const riskLimits = {
   low: 0.2,
   moderate: 0.4,
@@ -22,6 +30,40 @@ const confidenceLabels = {
   sell: "medium",
   hold: "low",
 };
+
+const marketWatchlist = [
+  { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
+  { symbol: "MSFT", name: "Microsoft", sector: "Technology", cap: "Large" },
+  { symbol: "NVDA", name: "NVIDIA", sector: "Technology", cap: "Large" },
+  { symbol: "TSLA", name: "Tesla", sector: "Consumer", cap: "Large" },
+  { symbol: "AMZN", name: "Amazon", sector: "Consumer", cap: "Large" },
+  { symbol: "JPM", name: "JPMorgan Chase", sector: "Finance", cap: "Large" },
+  { symbol: "V", name: "Visa", sector: "Finance", cap: "Large" },
+  { symbol: "UNH", name: "UnitedHealth", sector: "Healthcare", cap: "Large" },
+  { symbol: "PFE", name: "Pfizer", sector: "Healthcare", cap: "Large" },
+  { symbol: "XOM", name: "Exxon Mobil", sector: "Energy", cap: "Large" },
+  { symbol: "OXY", name: "Occidental", sector: "Energy", cap: "Mid" },
+  { symbol: "PLTR", name: "Palantir", sector: "Technology", cap: "Mid" },
+  { symbol: "SHOP", name: "Shopify", sector: "Technology", cap: "Mid" },
+  { symbol: "SQ", name: "Block", sector: "Finance", cap: "Mid" },
+  { symbol: "ROKU", name: "Roku", sector: "Consumer", cap: "Mid" },
+  { symbol: "F", name: "Ford", sector: "Consumer", cap: "Mid" },
+  { symbol: "DKNG", name: "DraftKings", sector: "Consumer", cap: "Small" },
+  { symbol: "ENPH", name: "Enphase", sector: "Energy", cap: "Small" },
+  { symbol: "CRSP", name: "CRISPR", sector: "Healthcare", cap: "Small" },
+  { symbol: "UPST", name: "Upstart", sector: "Finance", cap: "Small" },
+];
+
+const marketState = marketWatchlist.map((stock) => {
+  const seed = symbolSeed(stock.symbol);
+  const history = generatePrices(seed);
+  return {
+    ...stock,
+    history,
+    lastPrice: history[history.length - 1],
+    previousClose: history[history.length - 2],
+  };
+});
 
 function symbolSeed(symbol) {
   let hash = 0;
@@ -45,6 +87,18 @@ function generatePrices(seed) {
     prices.push(Number(current.toFixed(2)));
   }
   return prices;
+}
+
+function calculateSignal(prices) {
+  const recent = prices[prices.length - 1];
+  const average = prices.slice(-10).reduce((total, value) => total + value, 0) / 10;
+  if (recent > average * 1.03) {
+    return "sell";
+  }
+  if (recent < average * 0.97) {
+    return "buy";
+  }
+  return "hold";
 }
 
 function analyzeTrade({ symbol, cash, risk }) {
@@ -118,6 +172,91 @@ function renderResult(result) {
   resultCard.classList.remove("hidden");
 }
 
+function updateMarketPrices() {
+  marketState.forEach((stock) => {
+    const drift = (symbolSeed(stock.symbol) % 5) * 0.01;
+    const volatility = 0.6 + (symbolSeed(stock.symbol) % 7) * 0.1;
+    const swing = (Math.random() - 0.5) * volatility + drift;
+    const nextPrice = Math.max(2, stock.lastPrice + swing);
+    stock.history = [...stock.history.slice(1), Number(nextPrice.toFixed(2))];
+    stock.previousClose = stock.lastPrice;
+    stock.lastPrice = Number(nextPrice.toFixed(2));
+  });
+}
+
+function matchesFilters(stock) {
+  const searchValue = filterSearch.value.trim().toUpperCase();
+  const sectorValue = filterSector.value;
+  const capValue = filterCap.value;
+  const signalValue = filterSignal.value;
+  const minValue = Number(filterMin.value);
+  const maxValue = Number(filterMax.value);
+  const signal = calculateSignal(stock.history);
+
+  if (searchValue && !stock.symbol.includes(searchValue)) {
+    return false;
+  }
+  if (sectorValue !== "all" && stock.sector !== sectorValue) {
+    return false;
+  }
+  if (capValue !== "all" && stock.cap !== capValue) {
+    return false;
+  }
+  if (signalValue !== "all" && signal !== signalValue) {
+    return false;
+  }
+  if (!Number.isNaN(minValue) && minValue > 0 && stock.lastPrice < minValue) {
+    return false;
+  }
+  if (!Number.isNaN(maxValue) && maxValue > 0 && stock.lastPrice > maxValue) {
+    return false;
+  }
+  return true;
+}
+
+function renderMarketTable() {
+  const rows = marketState
+    .filter(matchesFilters)
+    .map((stock) => {
+      const signal = calculateSignal(stock.history);
+      const change = stock.lastPrice - stock.previousClose;
+      const changePercent = stock.previousClose
+        ? (change / stock.previousClose) * 100
+        : 0;
+      const changeClass = change >= 0 ? "positive" : "negative";
+      return `<tr>
+        <td>${stock.symbol}</td>
+        <td>${stock.name}</td>
+        <td>${stock.sector}</td>
+        <td>${stock.cap}</td>
+        <td><span class="signal-pill ${signal}">${signal}</span></td>
+        <td>$${stock.lastPrice.toFixed(2)}</td>
+        <td class="price-change ${changeClass}">${change >= 0 ? "+" : ""}${change.toFixed(
+          2,
+        )} (${change >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)</td>
+      </tr>`;
+    })
+    .join("");
+
+  marketBody.innerHTML = rows || `<tr><td colspan="7">No stocks match these filters.</td></tr>`;
+}
+
+function refreshMarketBoard() {
+  updateMarketPrices();
+  renderMarketTable();
+}
+
+[
+  filterSearch,
+  filterSector,
+  filterCap,
+  filterSignal,
+  filterMin,
+  filterMax,
+].forEach((input) => {
+  input.addEventListener("input", renderMarketTable);
+});
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const formData = new FormData(form);
@@ -146,3 +285,6 @@ form.addEventListener("submit", (event) => {
   const result = analyzeTrade({ symbol, cash: cashValue, risk });
   renderResult(result);
 });
+
+renderMarketTable();
+setInterval(refreshMarketBoard, 3000);
