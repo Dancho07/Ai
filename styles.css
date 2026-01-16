@@ -69,6 +69,42 @@ h1 {
   box-shadow: 0 10px 30px rgba(30, 34, 89, 0.08);
 }
 
+.market-card {
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 28px;
+  box-shadow: 0 12px 32px rgba(30, 34, 89, 0.1);
+  display: grid;
+  gap: 24px;
+}
+
+.market-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.refresh-pill {
+  background: #eff7f1;
+  color: #1d7a4a;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.refresh-pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1d7a4a;
+  box-shadow: 0 0 0 4px rgba(29, 122, 74, 0.15);
+}
+
 form {
   display: grid;
   gap: 16px;
@@ -100,6 +136,87 @@ button {
   font-weight: 600;
   cursor: pointer;
   justify-self: start;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.filters label {
+  font-weight: 600;
+  color: #30344a;
+}
+
+.filters input,
+.filters select {
+  width: 100%;
+}
+
+.market-table {
+  overflow-x: auto;
+  border-radius: 16px;
+  border: 1px solid #e4e7f7;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 1px solid #eef1ff;
+  font-size: 0.95rem;
+}
+
+th {
+  background: #f6f7ff;
+  color: #3a3f5c;
+  font-weight: 700;
+}
+
+tbody tr:hover {
+  background: #fafbff;
+}
+
+.signal-pill {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+}
+
+.signal-pill.buy {
+  background: #e7f6ed;
+  color: #1d7a4a;
+}
+
+.signal-pill.sell {
+  background: #fdecec;
+  color: #b54141;
+}
+
+.signal-pill.hold {
+  background: #fff6db;
+  color: #786307;
+}
+
+.price-change {
+  font-weight: 600;
+}
+
+.price-change.positive {
+  color: #1d7a4a;
+}
+
+.price-change.negative {
+  color: #b54141;
 }
 
 .alert {

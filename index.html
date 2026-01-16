@@ -51,6 +51,84 @@
         </form>
       </section>
 
+      <section class="market-card">
+        <div class="market-header">
+          <div>
+            <p class="eyebrow">Live prices</p>
+            <h2>Market pulse board</h2>
+            <p class="subtitle">
+              Track simulated live prices across the watchlist and refine results with
+              detailed filters.
+            </p>
+          </div>
+          <div class="refresh-pill">
+            <span class="dot"></span>
+            Updating every 3s
+          </div>
+        </div>
+
+        <div class="filters">
+          <label>
+            Search symbol
+            <input type="text" id="filter-search" placeholder="e.g. TSLA" />
+          </label>
+          <label>
+            Sector
+            <select id="filter-sector">
+              <option value="all" selected>All sectors</option>
+              <option value="Technology">Technology</option>
+              <option value="Finance">Finance</option>
+              <option value="Healthcare">Healthcare</option>
+              <option value="Consumer">Consumer</option>
+              <option value="Energy">Energy</option>
+            </select>
+          </label>
+          <label>
+            Market cap
+            <select id="filter-cap">
+              <option value="all" selected>All caps</option>
+              <option value="Large">Large</option>
+              <option value="Mid">Mid</option>
+              <option value="Small">Small</option>
+            </select>
+          </label>
+          <label>
+            Signal
+            <select id="filter-signal">
+              <option value="all" selected>All signals</option>
+              <option value="buy">Buy</option>
+              <option value="hold">Hold</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+          <label>
+            Min price
+            <input type="number" id="filter-min" min="0" step="0.01" placeholder="0" />
+          </label>
+          <label>
+            Max price
+            <input type="number" id="filter-max" min="0" step="0.01" placeholder="500" />
+          </label>
+        </div>
+
+        <div class="market-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Company</th>
+                <th>Sector</th>
+                <th>Market cap</th>
+                <th>Signal</th>
+                <th>Live price</th>
+                <th>Change</th>
+              </tr>
+            </thead>
+            <tbody id="market-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="result" class="result-card hidden">
         <div class="result-header">
           <div>
