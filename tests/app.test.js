@@ -407,19 +407,19 @@ const tests = [
         visible: true,
         backoffActive: false,
       });
-      assert.strictEqual(regularDelay, 10000);
+      assert.strictEqual(regularDelay, 5000);
       const preDelay = getNextRefreshDelay({
         symbols: ["MSFT"],
         visible: true,
         backoffActive: false,
       });
-      assert.strictEqual(preDelay, 20000);
+      assert.strictEqual(preDelay, 12000);
       const closedDelay = getNextRefreshDelay({
         symbols: ["NVDA"],
         visible: true,
         backoffActive: false,
       });
-      assert.strictEqual(closedDelay, 600000);
+      assert.strictEqual(closedDelay, 300000);
       const hiddenDelay = getNextRefreshDelay({
         symbols: ["AAPL"],
         visible: false,
@@ -448,7 +448,7 @@ const tests = [
         visible: true,
         backoffActive: true,
       });
-      assert.strictEqual(backedOff, 20000);
+      assert.strictEqual(backedOff, 10000);
     },
   },
   {

@@ -125,16 +125,16 @@ const MAX_PARALLEL_REQUESTS = 3;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
-const MARKET_OPEN_TTL_MS = 10 * 1000;
-const MARKET_EXTENDED_TTL_MS = 20 * 1000;
+const MARKET_OPEN_TTL_MS = 5 * 1000;
+const MARKET_EXTENDED_TTL_MS = 12 * 1000;
 const MARKET_CLOSED_TTL_MS = 5 * 60 * 1000;
 const HISTORICAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_INTERVALS = {
-  REGULAR: 10 * 1000,
-  PRE: 20 * 1000,
-  POST: 20 * 1000,
-  CLOSED: 10 * 60 * 1000,
-  DELAYED: 20 * 1000,
+  REGULAR: 5 * 1000,
+  PRE: 12 * 1000,
+  POST: 12 * 1000,
+  CLOSED: 5 * 60 * 1000,
+  DELAYED: 12 * 1000,
 };
 
 const YAHOO_QUOTE_URL = (symbols) =>
@@ -405,6 +405,18 @@ function isQuoteFresh(symbol, sessionOverride) {
   return Date.now() - entry.savedAt < getCacheTtl(session);
 }
 
+function isQuoteFreshForInterval(symbol, sessionOverride) {
+  const stock = getStockEntry(symbol);
+  const entry = getLastKnownEntry(symbol);
+  const session = sessionOverride ?? stock?.quoteSession ?? entry?.quote?.session ?? "CLOSED";
+  const interval = getRefreshIntervalForSession(session);
+  const timestamp = stock?.quoteAsOf ?? stock?.lastUpdatedAt ?? entry?.savedAt ?? null;
+  if (!timestamp) {
+    return false;
+  }
+  return Date.now() - timestamp < interval;
+}
+
 function getRefreshIntervalForSession(session) {
   return REFRESH_INTERVALS[session] ?? REFRESH_INTERVALS.CLOSED;
 }
@@ -433,6 +445,10 @@ function isRateLimitBackoffActive() {
 
 function applyRateLimitBackoff() {
   rateLimitBackoffUntil = Date.now() + RATE_LIMIT_BACKOFF_MS;
+}
+
+function shouldBackoffFromStatus(statusCode) {
+  return statusCode === 429 || statusCode === 503;
 }
 
 function getEffectiveRefreshInterval(symbols) {
@@ -482,6 +498,9 @@ async function fetchJsonWithRetry(
     try {
       const response = await fetchWithTimeout(fetchFn, url, timeoutMs);
       if (!response.ok) {
+        if (shouldBackoffFromStatus(response.status)) {
+          applyRateLimitBackoff();
+        }
         const errorType = RETRYABLE_STATUS.has(response.status) ? "unavailable" : "http_error";
         throw new MarketDataError(errorType, `Request failed: ${response.status}`, {
           statusCode: response.status,
@@ -1611,7 +1630,7 @@ async function getQuoteInternal(symbol, options = {}) {
       }
     } catch (error) {
       providerError = error;
-      if (error?.details?.statusCode === 429) {
+      if (shouldBackoffFromStatus(error?.details?.statusCode)) {
         applyRateLimitBackoff();
       }
     }
@@ -1862,7 +1881,14 @@ function getVisibleSymbols() {
 
 async function refreshVisibleQuotes() {
   const symbols = getVisibleSymbols();
-  const symbolsToFetch = symbols.filter((symbol) => !isQuoteFresh(symbol));
+  const symbolsToFetch = symbols.filter((symbol) => {
+    if (isQuoteFresh(symbol)) {
+      return false;
+    }
+    const stock = getStockEntry(symbol);
+    const session = stock?.quoteSession ?? getLastKnownEntry(symbol)?.quote?.session ?? "CLOSED";
+    return !isQuoteFreshForInterval(symbol, session);
+  });
   if (!symbolsToFetch.length) {
     renderMarketTable();
     return;
@@ -1904,7 +1930,7 @@ async function refreshVisibleQuotes() {
     );
   } catch (error) {
     hadQuoteFailure = true;
-    if (error?.details?.statusCode === 429) {
+    if (shouldBackoffFromStatus(error?.details?.statusCode)) {
       applyRateLimitBackoff();
     }
     logMarketDataEvent("warn", {
@@ -2083,7 +2109,7 @@ function renderMarketTable() {
       } = getMarketRowDisplay(stock);
       return `<tr class="market-row" data-symbol="${stock.symbol}" tabindex="0" role="button" aria-label="Analyze ${stock.symbol}">
         <td>${stock.symbol}</td>
-        <td>${stock.name}</td>
+        <td class="company-cell" title="${stock.name}">${stock.name}</td>
         <td>${stock.sector}</td>
         <td>${stock.cap}</td>
         <td><span class="signal-pill ${signal}">${signal}</span></td>
@@ -2158,6 +2184,9 @@ async function refreshMarketBoard() {
     );
   } catch (error) {
     hadQuoteFailure = true;
+    if (shouldBackoffFromStatus(error?.details?.statusCode)) {
+      applyRateLimitBackoff();
+    }
     logMarketDataEvent("warn", {
       event: "market_data_refresh_failure",
       provider: PROVIDER,
