@@ -82,30 +82,6 @@ const YAHOO_QUOTE_URL = (symbols) =>
 const YAHOO_CHART_URL = (symbol, range) =>
   `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=1d&includePrePost=false`;
 
-function symbolSeed(symbol) {
-  let hash = 0;
-  for (let i = 0; i < symbol.length; i += 1) {
-    hash = (hash << 5) - hash + symbol.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function generatePrices(seed) {
-  const base = 20 + (seed % 180);
-  const trend = ((Math.floor(seed / 10) % 15) - 7) * 0.05;
-  const volatility = 1 + (seed % 5);
-
-  const prices = [];
-  let current = base;
-  for (let day = 0; day < 30; day += 1) {
-    const swing = ((seed >> (day % 8)) % 7) - 3;
-    current = Math.max(2, current + trend + swing * 0.1 * volatility);
-    prices.push(Number(current.toFixed(2)));
-  }
-  return prices;
-}
-
 function calculateSignal(prices) {
   if (!prices || prices.length < 10) {
     return "hold";
@@ -123,9 +99,13 @@ function calculateSignal(prices) {
 
 function analyzeTrade({ symbol, cash, risk }) {
   const marketEntry = getStockEntry(symbol);
-  const prices = marketEntry?.history?.length ? marketEntry.history : generatePrices(symbolSeed(symbol));
-  const recent = prices[prices.length - 1];
-  const average = prices.slice(-10).reduce((a, b) => a + b, 0) / 10;
+  const prices = marketEntry?.history ?? [];
+  const livePrice = marketEntry?.lastPrice ?? null;
+  const recent = livePrice ?? prices[prices.length - 1] ?? null;
+  const hasHistory = prices.length >= 10;
+  const average = hasHistory
+    ? prices.slice(-10).reduce((a, b) => a + b, 0) / 10
+    : recent;
   const riskLimit = riskLimits[risk];
 
   let action = "hold";
@@ -135,7 +115,28 @@ function analyzeTrade({ symbol, cash, risk }) {
     "No strong edge detected for aggressive trades.",
   ];
 
-  if (recent > average * 1.03) {
+  if (!recent) {
+    return {
+      symbol,
+      action: "hold",
+      shares: 0,
+      estimatedPrice: null,
+      confidence: confidenceLabels.hold,
+      thesis: [
+        "Live pricing data is unavailable for this symbol.",
+        "Signals are paused until a fresh quote is retrieved.",
+      ],
+      disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
+      generatedAt: new Date().toLocaleString(),
+    };
+  }
+
+  if (!hasHistory) {
+    thesis = [
+      "Live pricing is available, but full 10-day history has not loaded.",
+      "Signals remain neutral until the latest history refreshes.",
+    ];
+  } else if (recent > average * 1.03) {
     action = "sell";
     allocation = riskLimit * 0.5;
     thesis = [
@@ -198,7 +199,9 @@ function renderResult(result) {
   resultLivePrice.textContent = livePrice
     ? `Live price: ${quoteFormatter.format(livePrice)}`
     : "Live price: Not available";
-  resultPrice.textContent = `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`;
+  resultPrice.textContent = result.estimatedPrice
+    ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
+    : "Estimated price: Not available";
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
@@ -206,7 +209,10 @@ function renderResult(result) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+  const cacheBust = Date.now();
+  const response = await fetch(
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
+  );
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -444,7 +450,7 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     console.error(error);
     showErrors([
-      "Live market data is temporarily unavailable. Showing the latest cached estimate instead.",
+      "Live market data is temporarily unavailable. Showing the most recent available quote instead.",
     ]);
   }
   const result = analyzeTrade({ symbol, cash: cashValue, risk });

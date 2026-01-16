@@ -50,6 +50,28 @@ h1 {
   line-height: 1.5;
 }
 
+.meta {
+  margin: 12px 0 16px;
+  color: #5d627c;
+}
+
+.hero-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: #eef1ff;
+  color: #3945a3;
+  font-weight: 600;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.hero-link:hover {
+  background: #e0e5ff;
+}
+
 .hero-card {
   background: #ffffff;
   border-radius: 18px;
