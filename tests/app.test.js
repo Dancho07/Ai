@@ -25,6 +25,7 @@ const {
   buildSignalReasons,
   formatTimestamp,
   getMarketIndicatorData,
+  handleMarketRowAction,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -402,6 +403,51 @@ const tests = [
         atrPercent: 1.5,
       });
       assert.ok(reasons.length >= 3 && reasons.length <= 5);
+    },
+  },
+  {
+    name: "fills symbol and auto-runs analysis from market row action",
+    fn: async () => {
+      let filledSymbol = null;
+      let didScroll = false;
+      let didSubmit = false;
+      const result = handleMarketRowAction({
+        symbol: " aapl ",
+        autoRun: true,
+        onFillSymbol: (value) => {
+          filledSymbol = value;
+        },
+        onScrollToForm: () => {
+          didScroll = true;
+        },
+        onSubmit: () => {
+          didSubmit = true;
+        },
+      });
+      assert.strictEqual(filledSymbol, "AAPL");
+      assert.strictEqual(didScroll, true);
+      assert.strictEqual(didSubmit, true);
+      assert.deepStrictEqual(result, { symbol: "AAPL", autoRun: true });
+    },
+  },
+  {
+    name: "fills symbol without auto-run when disabled",
+    fn: async () => {
+      let didSubmit = false;
+      let filledSymbol = null;
+      const result = handleMarketRowAction({
+        symbol: "msft",
+        autoRun: false,
+        onFillSymbol: (value) => {
+          filledSymbol = value;
+        },
+        onSubmit: () => {
+          didSubmit = true;
+        },
+      });
+      assert.strictEqual(filledSymbol, "MSFT");
+      assert.strictEqual(didSubmit, false);
+      assert.deepStrictEqual(result, { symbol: "MSFT", autoRun: false });
     },
   },
 ];
