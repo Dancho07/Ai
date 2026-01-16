@@ -246,8 +246,8 @@ const tests = [
   {
     name: "adjusts refresh delay by session and pauses when hidden",
     fn: async () => {
-      const stock = getStockEntry("AAPL");
-      updateStockWithQuote(stock, {
+      const regularStock = getStockEntry("AAPL");
+      updateStockWithQuote(regularStock, {
         price: 101,
         change: 0.5,
         changePct: 0.5,
@@ -256,12 +256,44 @@ const tests = [
         session: "REGULAR",
         source: "primary",
       });
+      const preStock = getStockEntry("MSFT");
+      updateStockWithQuote(preStock, {
+        price: 201,
+        change: 0.5,
+        changePct: 0.25,
+        asOfTimestamp: Date.now(),
+        isRealtime: true,
+        session: "PRE",
+        source: "extended",
+      });
+      const closedStock = getStockEntry("NVDA");
+      updateStockWithQuote(closedStock, {
+        price: 301,
+        change: 0.5,
+        changePct: 0.2,
+        asOfTimestamp: Date.now(),
+        isRealtime: false,
+        session: "CLOSED",
+        source: "closed",
+      });
       const regularDelay = getNextRefreshDelay({
         symbols: ["AAPL"],
         visible: true,
         backoffActive: false,
       });
       assert.strictEqual(regularDelay, 10000);
+      const preDelay = getNextRefreshDelay({
+        symbols: ["MSFT"],
+        visible: true,
+        backoffActive: false,
+      });
+      assert.strictEqual(preDelay, 20000);
+      const closedDelay = getNextRefreshDelay({
+        symbols: ["NVDA"],
+        visible: true,
+        backoffActive: false,
+      });
+      assert.strictEqual(closedDelay, 600000);
       const hiddenDelay = getNextRefreshDelay({
         symbols: ["AAPL"],
         visible: false,

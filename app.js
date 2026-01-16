@@ -115,7 +115,7 @@ const MAX_RETRIES = 4;
 const REQUEST_TIMEOUT_MS = 8000;
 const BACKOFF_BASE_MS = 500;
 const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
-const MAX_PARALLEL_REQUESTS = 4;
+const MAX_PARALLEL_REQUESTS = 3;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
@@ -127,7 +127,7 @@ const REFRESH_INTERVALS = {
   REGULAR: 10 * 1000,
   PRE: 20 * 1000,
   POST: 20 * 1000,
-  CLOSED: 5 * 60 * 1000,
+  CLOSED: 10 * 60 * 1000,
   DELAYED: 20 * 1000,
 };
 
@@ -364,7 +364,7 @@ function isPageVisible() {
   if (!isBrowser) {
     return true;
   }
-  return document.visibilityState !== "hidden";
+  return document.visibilityState === "visible";
 }
 
 function isRateLimitBackoffActive() {
@@ -1224,9 +1224,13 @@ function isHistoricalStale(symbol) {
 }
 
 async function fetchYahooQuotes(symbols, options = {}) {
-  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
+  const uniqueSymbols = [...new Set(symbols)];
+  if (!uniqueSymbols.length) {
+    return [];
+  }
+  const quoteData = await fetchJson(YAHOO_QUOTE_URL(uniqueSymbols), {
     provider: PROVIDER,
-    symbol: symbols.join(","),
+    symbol: uniqueSymbols.join(","),
     fetchFn: options.fetchFn,
     maxAttempts: options.maxAttempts,
     timeoutMs: options.timeoutMs,
