@@ -23,6 +23,11 @@ const planRiskReward = isBrowser ? document.getElementById("plan-risk-reward") :
 
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
+const marketOpenText = isBrowser ? document.getElementById("market-open-text") : null;
+const marketSessionBadge = isBrowser ? document.getElementById("market-session-badge") : null;
+const marketAsOf = isBrowser ? document.getElementById("market-as-of") : null;
+const marketSourceBadge = isBrowser ? document.getElementById("market-source-badge") : null;
+const marketCacheNote = isBrowser ? document.getElementById("market-cache-note") : null;
 const filterSearch = isBrowser ? document.getElementById("filter-search") : null;
 const filterSector = isBrowser ? document.getElementById("filter-sector") : null;
 const filterCap = isBrowser ? document.getElementById("filter-cap") : null;
@@ -135,6 +140,7 @@ const quoteCache = new Map();
 const lastKnownQuotes = new Map();
 const historicalCache = new Map();
 const inflightQuoteRequests = new Map();
+const marketIndicatorState = { usingCached: false };
 
 let refreshTimerId = null;
 let refreshInProgress = false;
@@ -204,6 +210,18 @@ function formatTime(timestamp) {
     return "unknown time";
   }
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) {
+    return "unknown";
+  }
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+    hour12: false,
+  }).format(new Date(timestamp));
 }
 
 function formatAsOf(timestamp) {
@@ -527,6 +545,86 @@ function buildQuoteFromYahoo(quote) {
     name: quote.shortName ?? quote.longName ?? null,
     currency: quote.currency ?? null,
   };
+}
+
+function getMarketSessionBadge(session, source) {
+  if (source === "cache") {
+    return { label: "CACHED", className: "cached" };
+  }
+  if (session === "REGULAR") {
+    return { label: "REGULAR", className: "realtime" };
+  }
+  if (session === "PRE" || session === "POST") {
+    return { label: session, className: "afterhours" };
+  }
+  if (session === "DELAYED") {
+    return { label: "DELAYED", className: "delayed" };
+  }
+  return { label: "CLOSED", className: "closed" };
+}
+
+function getMarketSourceBadge(source) {
+  if (source === "cache") {
+    return { label: "CACHED", className: "cached" };
+  }
+  if (source === "historical") {
+    return { label: "HISTORICAL", className: "historical" };
+  }
+  if (source === "delayed") {
+    return { label: "DELAYED", className: "delayed" };
+  }
+  return { label: "REALTIME", className: "realtime" };
+}
+
+function getMarketIndicatorData(entry, options = {}) {
+  const session = entry?.quoteSession ?? "CLOSED";
+  const source = entry?.dataSource ?? "cache";
+  const asOfTimestamp =
+    entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null;
+  const sessionBadge = getMarketSessionBadge(session, source);
+  const sourceBadge = getMarketSourceBadge(source);
+  const marketStatus = session === "CLOSED" ? "Closed" : "Open";
+  const asOfLabel = `As of ${formatTimestamp(asOfTimestamp)} UTC`;
+  return {
+    marketStatus,
+    sessionBadge,
+    sourceBadge,
+    asOfLabel,
+    usingCached: options.usingCached === true,
+  };
+}
+
+function getLatestMarketEntry() {
+  let latestEntry = null;
+  let latestTimestamp = -Infinity;
+  marketState.forEach((entry) => {
+    const timestamp =
+      entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null;
+    if (timestamp != null && timestamp > latestTimestamp) {
+      latestTimestamp = timestamp;
+      latestEntry = entry;
+    }
+  });
+  return latestEntry;
+}
+
+function updateMarketIndicator() {
+  if (!marketOpenText || !marketSessionBadge || !marketAsOf || !marketSourceBadge) {
+    return;
+  }
+  const entry = getLatestMarketEntry();
+  const data = getMarketIndicatorData(entry, {
+    usingCached: marketIndicatorState.usingCached,
+  });
+  marketOpenText.textContent = data.marketStatus;
+  marketSessionBadge.textContent = data.sessionBadge.label;
+  marketSessionBadge.className = `session-badge ${data.sessionBadge.className}`;
+  marketAsOf.textContent = data.asOfLabel;
+  marketSourceBadge.textContent = data.sourceBadge.label;
+  marketSourceBadge.className = `session-badge ${data.sourceBadge.className}`;
+  if (marketCacheNote) {
+    marketCacheNote.classList.toggle("hidden", !data.usingCached);
+  }
 }
 
 function getSessionBadge(quote, source) {
@@ -1266,7 +1364,20 @@ async function getQuote(symbol, options = {}) {
 
 async function loadInitialMarketData() {
   const symbols = marketState.map((stock) => stock.symbol);
-  const quoteResults = await fetchYahooQuotes(symbols);
+  let hadQuoteFailure = false;
+  let quoteResults = [];
+  try {
+    quoteResults = await fetchYahooQuotes(symbols);
+  } catch (error) {
+    hadQuoteFailure = true;
+    logMarketDataEvent("warn", {
+      event: "market_data_initial_failure",
+      provider: PROVIDER,
+      symbol: symbols.join(","),
+      errorType: error.type ?? "unknown",
+      message: error.message ?? "Quote fetch failed.",
+    });
+  }
   const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
 
   await Promise.all(
@@ -1276,6 +1387,7 @@ async function loadInitialMarketData() {
         const quote = await getQuote(stock.symbol, { prefetchedQuote, allowFetch: false });
         updateStockWithQuote(stock, quote);
       } catch (error) {
+        hadQuoteFailure = true;
         logMarketDataEvent("warn", {
           event: "market_data_quote_failure",
           provider: PROVIDER,
@@ -1299,6 +1411,8 @@ async function loadInitialMarketData() {
       }
     }),
   );
+
+  marketIndicatorState.usingCached = hadQuoteFailure;
 }
 
 async function loadSymbolSnapshot(symbol, options = {}) {
@@ -1438,6 +1552,7 @@ async function refreshVisibleQuotes() {
     return;
   }
 
+  let hadQuoteFailure = false;
   try {
     const quoteResults = await fetchYahooQuotes(symbolsToFetch);
     const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
@@ -1455,6 +1570,7 @@ async function refreshVisibleQuotes() {
           });
           updateStockWithQuote(stock, quote);
         } catch (error) {
+          hadQuoteFailure = true;
           logMarketDataEvent("warn", {
             event: "market_data_refresh_failure",
             provider: PROVIDER,
@@ -1466,6 +1582,7 @@ async function refreshVisibleQuotes() {
       }),
     );
   } catch (error) {
+    hadQuoteFailure = true;
     if (error?.details?.statusCode === 429) {
       applyRateLimitBackoff();
     }
@@ -1477,6 +1594,7 @@ async function refreshVisibleQuotes() {
       message: error.message,
     });
   }
+  marketIndicatorState.usingCached = hadQuoteFailure;
 
   await Promise.all(
     symbols
@@ -1682,10 +1800,12 @@ function renderMarketTable() {
     .join("");
 
   marketBody.innerHTML = rows || `<tr><td colspan="10">No stocks match these filters.</td></tr>`;
+  updateMarketIndicator();
 }
 
 async function refreshMarketBoard() {
   const symbols = marketState.map((stock) => stock.symbol);
+  let hadQuoteFailure = false;
   try {
     const quoteResults = await fetchYahooQuotes(symbols);
     const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
@@ -1699,6 +1819,7 @@ async function refreshMarketBoard() {
           });
           updateStockWithQuote(stock, quote);
         } catch (error) {
+          hadQuoteFailure = true;
           logMarketDataEvent("warn", {
             event: "market_data_refresh_failure",
             provider: PROVIDER,
@@ -1710,6 +1831,7 @@ async function refreshMarketBoard() {
       }),
     );
   } catch (error) {
+    hadQuoteFailure = true;
     logMarketDataEvent("warn", {
       event: "market_data_refresh_failure",
       provider: PROVIDER,
@@ -1718,6 +1840,7 @@ async function refreshMarketBoard() {
       message: error.message,
     });
   }
+  marketIndicatorState.usingCached = hadQuoteFailure;
 
   renderMarketTable();
   if (resultCard && !resultCard.classList.contains("hidden")) {
@@ -1759,6 +1882,8 @@ if (form) {
     if (snapshot?.status === "cache") {
       const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
       showStatus(`Live data unavailable — showing cached price from ${lastUpdated}.`);
+      marketIndicatorState.usingCached = true;
+      updateMarketIndicator();
     } else if (snapshot?.dataSource === "historical") {
       const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
       showStatus(`Live data unavailable — showing last close from ${lastUpdated}.`);
@@ -1854,5 +1979,7 @@ if (typeof module !== "undefined" && module.exports) {
     calculateAtrLike,
     calculateTradePlan,
     buildSignalReasons,
+    formatTimestamp,
+    getMarketIndicatorData,
   };
 }
