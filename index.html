@@ -86,11 +86,15 @@
               Track live prices across the watchlist and refine results with detailed
               filters.
             </p>
+            <label class="auto-run-toggle">
+              <input type="checkbox" id="auto-run-toggle" checked />
+              Auto-run analysis on click
+            </label>
           </div>
-        <div class="refresh-pill">
-          <span class="dot"></span>
-          <span id="refresh-status">Updating…</span>
-        </div>
+          <div class="refresh-pill">
+            <span class="dot"></span>
+            <span id="refresh-status">Updating…</span>
+          </div>
         </div>
         <div class="market-indicator" id="market-indicator">
           <div class="market-indicator-group">
@@ -172,6 +176,7 @@
                 <th>1D change</th>
                 <th>1M change</th>
                 <th>1Y change</th>
+                <th>Analyze</th>
               </tr>
             </thead>
             <tbody id="market-body"></tbody>

@@ -9,6 +9,7 @@ const riskInput = isBrowser ? document.querySelector('select[name="risk"]') : nu
 const symbolError = isBrowser ? document.getElementById("symbol-error") : null;
 const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
 const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
+const autoRunToggle = isBrowser ? document.getElementById("auto-run-toggle") : null;
 
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
@@ -1154,6 +1155,48 @@ function renderResult(result) {
   resultCard.classList.remove("hidden");
 }
 
+function handleMarketRowAction({ symbol, autoRun, onFillSymbol, onScrollToForm, onSubmit }) {
+  const normalized = normalizeSymbolInput(symbol ?? "");
+  if (!normalized) {
+    return { symbol: normalized, autoRun };
+  }
+  if (onFillSymbol) {
+    onFillSymbol(normalized);
+  }
+  if (onScrollToForm) {
+    onScrollToForm();
+  }
+  if (autoRun && onSubmit) {
+    onSubmit();
+  }
+  return { symbol: normalized, autoRun };
+}
+
+function handleMarketRowInteraction(symbol) {
+  handleMarketRowAction({
+    symbol,
+    autoRun: autoRunToggle?.checked ?? false,
+    onFillSymbol: (value) => {
+      if (!symbolInput) {
+        return;
+      }
+      symbolInput.value = value;
+      setSymbolError("");
+      symbolInput.focus({ preventScroll: true });
+    },
+    onScrollToForm: () => {
+      form?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+    onSubmit: () => {
+      if (form?.requestSubmit) {
+        form.requestSubmit();
+      } else if (submitButton) {
+        submitButton.click();
+      }
+    },
+  });
+}
+
 function updateResultLivePriceDisplay(symbol) {
   if (!resultLivePrice) {
     return;
@@ -1856,7 +1899,7 @@ function renderMarketTable() {
         monthClass,
         yearClass,
       } = getMarketRowDisplay(stock);
-      return `<tr>
+      return `<tr class="market-row" data-symbol="${stock.symbol}" tabindex="0" role="button" aria-label="Analyze ${stock.symbol}">
         <td>${stock.symbol}</td>
         <td>${stock.name}</td>
         <td>${stock.sector}</td>
@@ -1891,11 +1934,16 @@ function renderMarketTable() {
             ? "n/a"
             : `${stock.yearlyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.yearlyChange)}%`
         }</td>
+        <td class="analyze-cell">
+          <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
+            Analyze
+          </button>
+        </td>
       </tr>`;
     })
     .join("");
 
-  marketBody.innerHTML = rows || `<tr><td colspan="10">No stocks match these filters.</td></tr>`;
+  marketBody.innerHTML = rows || `<tr><td colspan="11">No stocks match these filters.</td></tr>`;
   updateMarketIndicator();
 }
 
@@ -1979,6 +2027,36 @@ if (symbolChips) {
   });
 }
 
+if (marketBody) {
+  marketBody.addEventListener("click", (event) => {
+    const analyzeButton = event.target.closest("button[data-action='analyze']");
+    const row = event.target.closest("tr[data-symbol]");
+    if (!row) {
+      return;
+    }
+    if (analyzeButton) {
+      event.preventDefault();
+    }
+    handleMarketRowInteraction(row.dataset.symbol);
+  });
+
+  marketBody.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    const analyzeButton = event.target.closest("button[data-action='analyze']");
+    if (analyzeButton) {
+      return;
+    }
+    const row = event.target.closest("tr[data-symbol]");
+    if (!row) {
+      return;
+    }
+    event.preventDefault();
+    handleMarketRowInteraction(row.dataset.symbol);
+  });
+}
+
 if (form) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2006,9 +2084,9 @@ if (form) {
     if (symbolMessage || validationErrors.length > 0) {
       showErrors(validationErrors);
       showStatus("");
-      resultCard.classList.add("hidden");
-      return;
-    }
+    resultCard.classList.add("hidden");
+    return;
+  }
 
     persistFormState(localStorage, {
       symbol,
@@ -2144,5 +2222,6 @@ if (typeof module !== "undefined" && module.exports) {
     buildSignalReasons,
     formatTimestamp,
     getMarketIndicatorData,
+    handleMarketRowAction,
   };
 }

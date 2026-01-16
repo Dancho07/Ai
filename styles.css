@@ -108,6 +108,21 @@ h1 {
   align-items: center;
 }
 
+.auto-run-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4a5170;
+  margin-top: 8px;
+}
+
+.auto-run-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
 .market-indicator {
   display: flex;
   flex-wrap: wrap;
@@ -307,6 +322,39 @@ th {
 
 tbody tr:hover {
   background: #fafbff;
+}
+
+.market-row {
+  cursor: pointer;
+}
+
+.market-row:focus-visible {
+  outline: 2px solid #4d5bff;
+  outline-offset: -2px;
+}
+
+.analyze-cell {
+  text-align: right;
+}
+
+.analyze-button {
+  border: 1px solid #d6d9ef;
+  background: #f7f8ff;
+  color: #3945a3;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.analyze-button:hover {
+  background: #e9ecff;
+}
+
+.analyze-button:focus-visible {
+  outline: 2px solid #4d5bff;
+  outline-offset: 2px;
 }
 
 .price-cell {
