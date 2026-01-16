@@ -274,10 +274,16 @@ async function loadInitialMarketData() {
 }
 
 async function loadSymbolSnapshot(symbol) {
-  const [quoteData, chartData] = await Promise.all([
+  const [quoteResult, chartResult] = await Promise.allSettled([
     fetchJson(YAHOO_QUOTE_URL([symbol])),
     fetchJson(YAHOO_CHART_URL(symbol, "1y")),
   ]);
+  const quoteData = quoteResult.status === "fulfilled" ? quoteResult.value : null;
+  const chartData = chartResult.status === "fulfilled" ? chartResult.value : null;
+  if (!quoteData && !chartData) {
+    throw new Error("Quote and chart requests failed.");
+  }
+
   const quote = quoteData?.quoteResponse?.result?.[0];
   const chart = chartData?.chart?.result?.[0];
   const closeSeries = extractCloseSeries(chart);
@@ -293,9 +299,12 @@ async function loadSymbolSnapshot(symbol) {
     yearlyChange: null,
     lastUpdated: null,
   };
-  entry.lastPrice = quote?.regularMarketPrice ?? entry.lastPrice;
-  entry.previousClose = quote?.regularMarketPreviousClose ?? entry.previousClose;
-  entry.lastUpdated = new Date().toLocaleTimeString();
+  if (quote) {
+    entry.name = quote.shortName ?? entry.name;
+    entry.lastPrice = quote.regularMarketPrice ?? entry.lastPrice;
+    entry.previousClose = quote.regularMarketPreviousClose ?? entry.previousClose;
+    entry.lastUpdated = new Date().toLocaleTimeString();
+  }
   applyChartMetrics(entry, closeSeries);
   extraSymbolData.set(symbol, entry);
 }
