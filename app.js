@@ -62,6 +62,7 @@ const marketState = marketWatchlist.map((stock) => ({
   history: [],
   lastPrice: null,
   previousClose: null,
+  dailyChange: null,
   monthlyChange: null,
   yearlyChange: null,
   lastUpdated: null,
@@ -240,6 +241,10 @@ function applyChartMetrics(stock, closeSeries) {
   const monthClose = closeSeries[monthIndex];
   const yearClose = closeSeries[0];
   stock.history = closeSeries;
+  stock.dailyChange =
+    closeSeries.length >= 2
+      ? calculatePercentChange(latest, closeSeries[closeSeries.length - 2])
+      : null;
   stock.monthlyChange = calculatePercentChange(latest, monthClose);
   stock.yearlyChange = calculatePercentChange(latest, yearClose);
 }
@@ -256,6 +261,7 @@ async function loadInitialMarketData() {
     }
     stock.lastPrice = quote.regularMarketPrice ?? null;
     stock.previousClose = quote.regularMarketPreviousClose ?? null;
+    stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
     stock.lastUpdated = new Date().toLocaleTimeString();
   });
 
@@ -302,12 +308,14 @@ async function loadSymbolSnapshot(symbol) {
     previousClose: null,
     monthlyChange: null,
     yearlyChange: null,
+    dailyChange: null,
     lastUpdated: null,
   };
   if (quote) {
     entry.name = quote.shortName ?? entry.name;
     entry.lastPrice = quote.regularMarketPrice ?? entry.lastPrice;
     entry.previousClose = quote.regularMarketPreviousClose ?? entry.previousClose;
+    entry.dailyChange = calculatePercentChange(entry.lastPrice, entry.previousClose);
     entry.lastUpdated = new Date().toLocaleTimeString();
   }
   applyChartMetrics(entry, closeSeries);
@@ -365,13 +373,17 @@ function renderMarketTable() {
     .filter(matchesFilters)
     .map((stock) => {
       const signal = calculateSignal(stock.history);
-      const change =
-        stock.lastPrice && stock.previousClose ? stock.lastPrice - stock.previousClose : 0;
+  const change =
+        stock.lastPrice !== null && stock.previousClose !== null
+          ? stock.lastPrice - stock.previousClose
+          : null;
       const changePercent =
-        stock.lastPrice && stock.previousClose
+        change !== null && stock.previousClose !== null
           ? (change / stock.previousClose) * 100
           : null;
-      const changeClass = changePercent === null ? "" : change >= 0 ? "positive" : "negative";
+      const changeClass = change === null ? "" : change >= 0 ? "positive" : "negative";
+      const dayClass =
+        stock.dailyChange === null ? "" : stock.dailyChange >= 0 ? "positive" : "negative";
       const monthClass =
         stock.monthlyChange === null ? "" : stock.monthlyChange >= 0 ? "positive" : "negative";
       const yearClass =
@@ -384,11 +396,16 @@ function renderMarketTable() {
         <td><span class="signal-pill ${signal}">${signal}</span></td>
         <td>${stock.lastPrice ? quoteFormatter.format(stock.lastPrice) : "—"}</td>
         <td class="price-change ${changeClass}">${
-          changePercent !== null
+          change !== null && changePercent !== null
             ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
                 changePercent,
               )}%)`
             : "—"
+        }</td>
+        <td class="price-change ${dayClass}">${
+          stock.dailyChange === null
+            ? "—"
+            : `${stock.dailyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.dailyChange)}%`
         }</td>
         <td class="price-change ${monthClass}">${
           stock.monthlyChange === null
@@ -404,7 +421,7 @@ function renderMarketTable() {
     })
     .join("");
 
-  marketBody.innerHTML = rows || `<tr><td colspan="9">No stocks match these filters.</td></tr>`;
+  marketBody.innerHTML = rows || `<tr><td colspan="10">No stocks match these filters.</td></tr>`;
 }
 
 async function refreshMarketBoard() {
@@ -419,6 +436,7 @@ async function refreshMarketBoard() {
       }
       stock.previousClose = stock.lastPrice ?? quote.regularMarketPreviousClose ?? null;
       stock.lastPrice = quote.regularMarketPrice ?? stock.lastPrice;
+      stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
       stock.lastUpdated = new Date().toLocaleTimeString();
     });
   } catch (error) {
@@ -440,12 +458,15 @@ form.addEventListener("submit", async (event) => {
   const symbol = formData.get("symbol").toString().trim().toUpperCase();
   const cashValue = Number(formData.get("cash"));
   const risk = formData.get("risk").toString();
+  const symbolPattern = /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/;
 
   const validationErrors = [];
   if (!symbol) {
     validationErrors.push("Please enter a stock symbol.");
+  } else if (!symbolPattern.test(symbol)) {
+    validationErrors.push("Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).");
   }
-  if (!cashValue || Number.isNaN(cashValue) || cashValue <= 0) {
+  if (!Number.isFinite(cashValue) || cashValue <= 0) {
     validationErrors.push("Cash balance must be greater than zero.");
   }
   if (!Object.keys(riskLimits).includes(risk)) {
@@ -464,6 +485,8 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     console.error(error);
     showErrors(["Live market data is temporarily unavailable. Please try again shortly."]);
+    resultCard.classList.add("hidden");
+    return;
   }
   const result = analyzeTrade({ symbol, cash: cashValue, risk });
   renderResult(result);
