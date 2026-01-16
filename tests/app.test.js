@@ -389,9 +389,10 @@ const tests = [
         quoteSession: "REGULAR",
         dataSource: "cache",
         quoteAsOf: Date.now(),
+        lastPrice: 101,
       });
       assert.strictEqual(indicator.sessionBadge.label, "PRE");
-      assert.strictEqual(cachedIndicator.sessionBadge.label, "CACHED");
+      assert.strictEqual(cachedIndicator.sessionBadge.label, "REGULAR");
     },
   },
   {
@@ -406,6 +407,53 @@ const tests = [
         quoteAsOf: timestamp,
       });
       assert.strictEqual(indicator.asOfLabel, "As of 12:30 UTC");
+    },
+  },
+  {
+    name: "shows open status and realtime or delayed freshness during regular session",
+    fn: async () => {
+      const realtimeIndicator = getMarketIndicatorData({
+        quoteSession: "REGULAR",
+        dataSource: "primary",
+        quoteAsOf: Date.now(),
+        isRealtime: true,
+        lastPrice: 188,
+      });
+      const delayedIndicator = getMarketIndicatorData({
+        quoteSession: "DELAYED",
+        dataSource: "delayed",
+        quoteAsOf: Date.now(),
+        isRealtime: false,
+        lastPrice: 188,
+      });
+      assert.strictEqual(realtimeIndicator.marketStatus, "Open");
+      assert.strictEqual(realtimeIndicator.sourceBadge.label, "REALTIME");
+      assert.strictEqual(delayedIndicator.marketStatus, "Open");
+      assert.strictEqual(delayedIndicator.sourceBadge.label, "DELAYED");
+    },
+  },
+  {
+    name: "uses cached data for market status when provider is unavailable",
+    fn: async () => {
+      const cachedIndicator = getMarketIndicatorData({
+        quoteSession: "REGULAR",
+        dataSource: "cache",
+        quoteAsOf: Date.now(),
+        lastPrice: 150,
+      });
+      assert.strictEqual(cachedIndicator.marketStatus, "Open");
+      assert.strictEqual(cachedIndicator.sourceBadge.label, "CACHED");
+      assert.notStrictEqual(cachedIndicator.marketStatus, "Unavailable");
+    },
+  },
+  {
+    name: "shows unavailable only when no data is present",
+    fn: async () => {
+      const indicator = getMarketIndicatorData(null);
+      assert.strictEqual(indicator.marketStatus, "Unavailable");
+      assert.strictEqual(indicator.sessionBadge.label, "UNKNOWN");
+      assert.strictEqual(indicator.sourceBadge.label, "UNAVAILABLE");
+      assert.strictEqual(indicator.asOfLabel, "No data");
     },
   },
   {
