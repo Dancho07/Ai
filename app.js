@@ -3,6 +3,12 @@ const form = isBrowser ? document.getElementById("trade-form") : null;
 const errors = isBrowser ? document.getElementById("errors") : null;
 const statusNotice = isBrowser ? document.getElementById("status") : null;
 const resultCard = isBrowser ? document.getElementById("result") : null;
+const symbolInput = isBrowser ? document.getElementById("symbol-input") : null;
+const cashInput = isBrowser ? document.querySelector('input[name="cash"]') : null;
+const riskInput = isBrowser ? document.querySelector('select[name="risk"]') : null;
+const symbolError = isBrowser ? document.getElementById("symbol-error") : null;
+const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
+const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
 
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
@@ -48,6 +54,8 @@ const riskPerTrade = {
   moderate: 0.01,
   high: 0.015,
 };
+
+const FORM_STATE_KEY = "trade_form_state_v1";
 
 const ENTRY_RANGE_PCT = 0.003;
 const ATR_LOOKBACK = 30;
@@ -145,6 +153,7 @@ const marketIndicatorState = { usingCached: false };
 let refreshTimerId = null;
 let refreshInProgress = false;
 let rateLimitBackoffUntil = 0;
+let isSubmitting = false;
 
 class MarketDataError extends Error {
   constructor(type, message, details = {}) {
@@ -203,6 +212,63 @@ const requestLimiter = createConcurrencyLimiter(MAX_PARALLEL_REQUESTS);
 function isValidSymbol(symbol) {
   const symbolPattern = /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/;
   return symbolPattern.test(symbol);
+}
+
+function normalizeSymbolInput(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim().toUpperCase();
+  const filtered = trimmed.replace(/[^A-Z.]/g, "");
+  const [rawBase = "", ...rest] = filtered.split(".");
+  const base = rawBase.slice(0, 5);
+  const suffix = rest.join("").slice(0, 2);
+  if (filtered.includes(".") && suffix) {
+    return `${base}.${suffix}`;
+  }
+  return base;
+}
+
+function getSymbolValidationMessage(symbol) {
+  if (!symbol) {
+    return "Please enter a stock symbol.";
+  }
+  if (!isValidSymbol(symbol)) {
+    return "Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).";
+  }
+  return "";
+}
+
+function persistFormState(storage, { symbol, cash, risk }) {
+  if (!storage?.setItem) {
+    return;
+  }
+  const payload = {
+    symbol: normalizeSymbolInput(symbol ?? ""),
+    cash: typeof cash === "string" ? cash : cash?.toString?.() ?? "",
+    risk: Object.keys(riskLimits).includes(risk) ? risk : "moderate",
+  };
+  storage.setItem(FORM_STATE_KEY, JSON.stringify(payload));
+}
+
+function loadPersistedFormState(storage) {
+  if (!storage?.getItem) {
+    return null;
+  }
+  const raw = storage.getItem(FORM_STATE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      symbol: normalizeSymbolInput(parsed.symbol ?? ""),
+      cash: parsed.cash ?? "",
+      risk: Object.keys(riskLimits).includes(parsed.risk) ? parsed.risk : "moderate",
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 function formatTime(timestamp) {
@@ -1009,6 +1075,19 @@ function showErrors(messages) {
     .join("")}</ul>`;
 }
 
+function setSymbolError(message) {
+  if (!symbolError) {
+    return;
+  }
+  if (!message) {
+    symbolError.textContent = "";
+    symbolError.classList.add("hidden");
+    return;
+  }
+  symbolError.textContent = message;
+  symbolError.classList.remove("hidden");
+}
+
 function showStatus(message) {
   if (!statusNotice) {
     return;
@@ -1020,6 +1099,19 @@ function showStatus(message) {
   }
   statusNotice.textContent = message;
   statusNotice.classList.remove("hidden");
+}
+
+function setFormLoadingState(isLoading) {
+  if (!submitButton) {
+    return;
+  }
+  submitButton.disabled = isLoading;
+  submitButton.classList.toggle("is-loading", isLoading);
+  if (isLoading) {
+    submitButton.setAttribute("aria-busy", "true");
+  } else {
+    submitButton.removeAttribute("aria-busy");
+  }
 }
 
 function renderResult(result) {
@@ -1852,72 +1944,123 @@ async function refreshMarketBoard() {
   }
 }
 
+if (symbolInput) {
+  symbolInput.addEventListener("input", () => {
+    const normalized = normalizeSymbolInput(symbolInput.value);
+    if (symbolInput.value !== normalized) {
+      symbolInput.value = normalized;
+    }
+    const message = normalized ? getSymbolValidationMessage(normalized) : "";
+    if (message && normalized) {
+      setSymbolError(message);
+    } else if (!normalized) {
+      setSymbolError("");
+    }
+  });
+  symbolInput.addEventListener("blur", () => {
+    const normalized = normalizeSymbolInput(symbolInput.value);
+    symbolInput.value = normalized;
+    setSymbolError(getSymbolValidationMessage(normalized));
+  });
+}
+
+if (symbolChips) {
+  symbolChips.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-symbol]");
+    if (!button) {
+      return;
+    }
+    const symbol = button.dataset.symbol ?? "";
+    if (symbolInput) {
+      symbolInput.value = symbol;
+      symbolInput.focus();
+    }
+    setSymbolError("");
+  });
+}
+
 if (form) {
   form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const formData = new FormData(form);
-  const symbol = formData.get("symbol").toString().trim().toUpperCase();
-  const cashValue = Number(formData.get("cash"));
-  const risk = formData.get("risk").toString();
-
-  const validationErrors = [];
-  if (!symbol) {
-    validationErrors.push("Please enter a stock symbol.");
-  } else if (!isValidSymbol(symbol)) {
-    validationErrors.push("Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).");
-  }
-  if (!Number.isFinite(cashValue) || cashValue <= 0) {
-    validationErrors.push("Cash balance must be greater than zero.");
-  }
-  if (!Object.keys(riskLimits).includes(risk)) {
-    validationErrors.push("Risk tolerance must be low, moderate, or high.");
-  }
-
-  if (validationErrors.length > 0) {
-    showErrors(validationErrors);
-    showStatus("");
-    resultCard.classList.add("hidden");
-    return;
-  }
-
-  try {
-    const snapshot = await loadSymbolSnapshot(symbol);
-    showErrors([]);
-    if (snapshot?.status === "cache") {
-      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-      showStatus(`Live data unavailable — showing cached price from ${lastUpdated}.`);
-      marketIndicatorState.usingCached = true;
-      updateMarketIndicator();
-    } else if (snapshot?.dataSource === "historical") {
-      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-      showStatus(`Live data unavailable — showing last close from ${lastUpdated}.`);
-    } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
-      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-      showStatus(`Market closed — showing last close from ${lastUpdated}.`);
-    } else {
-      showStatus("");
+    event.preventDefault();
+    if (isSubmitting) {
+      return;
     }
-  } catch (error) {
-    if (error.type === "invalid_symbol") {
-      showErrors([`We couldn't find data for ${symbol}. Double-check the symbol and try again.`]);
+    const formData = new FormData(form);
+    const symbol = normalizeSymbolInput(formData.get("symbol").toString());
+    if (symbolInput) {
+      symbolInput.value = symbol;
+    }
+    const cashValue = Number(formData.get("cash"));
+    const risk = formData.get("risk").toString();
+
+    const validationErrors = [];
+    const symbolMessage = getSymbolValidationMessage(symbol);
+    setSymbolError(symbolMessage);
+    if (!Number.isFinite(cashValue) || cashValue <= 0) {
+      validationErrors.push("Cash balance must be greater than zero.");
+    }
+    if (!Object.keys(riskLimits).includes(risk)) {
+      validationErrors.push("Risk tolerance must be low, moderate, or high.");
+    }
+
+    if (symbolMessage || validationErrors.length > 0) {
+      showErrors(validationErrors);
       showStatus("");
       resultCard.classList.add("hidden");
       return;
     }
-    logMarketDataEvent("error", {
-      event: "market_data_snapshot_failure",
-      provider: PROVIDER,
+
+    persistFormState(localStorage, {
       symbol,
-      errorType: error.type ?? "unknown",
-      message: error.message,
+      cash: formData.get("cash").toString(),
+      risk,
     });
-    showErrors([]);
-    showStatus("Live data unavailable — please try again shortly.");
-    resultCard.classList.add("hidden");
-    return;
-  }
-  const result = analyzeTrade({ symbol, cash: cashValue, risk });
-  renderResult(result);
+
+    isSubmitting = true;
+    setFormLoadingState(true);
+    try {
+      const snapshot = await loadSymbolSnapshot(symbol);
+      showErrors([]);
+      setSymbolError("");
+      if (snapshot?.status === "cache") {
+        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+        showStatus(`Live data unavailable — showing cached price from ${lastUpdated}.`);
+        marketIndicatorState.usingCached = true;
+        updateMarketIndicator();
+      } else if (snapshot?.dataSource === "historical") {
+        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+        showStatus(`Live data unavailable — showing last close from ${lastUpdated}.`);
+      } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
+        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+        showStatus(`Market closed — showing last close from ${lastUpdated}.`);
+      } else {
+        showStatus("");
+      }
+    } catch (error) {
+      if (error.type === "invalid_symbol") {
+        setSymbolError(`We couldn't find data for ${symbol}. Double-check the symbol and try again.`);
+        showErrors([]);
+        showStatus("");
+        resultCard.classList.add("hidden");
+        return;
+      }
+      logMarketDataEvent("error", {
+        event: "market_data_snapshot_failure",
+        provider: PROVIDER,
+        symbol,
+        errorType: error.type ?? "unknown",
+        message: error.message,
+      });
+      showErrors([]);
+      showStatus("Live data unavailable — please try again shortly.");
+      resultCard.classList.add("hidden");
+      return;
+    } finally {
+      isSubmitting = false;
+      setFormLoadingState(false);
+    }
+    const result = analyzeTrade({ symbol, cash: cashValue, risk });
+    renderResult(result);
   });
 }
 
@@ -1941,6 +2084,18 @@ if (form) {
 });
 
 if (isBrowser) {
+  const restoredState = loadPersistedFormState(localStorage);
+  if (restoredState) {
+    if (symbolInput) {
+      symbolInput.value = restoredState.symbol;
+    }
+    if (cashInput) {
+      cashInput.value = restoredState.cash;
+    }
+    if (riskInput) {
+      riskInput.value = restoredState.risk;
+    }
+  }
   loadPersistentQuoteCache();
   hydrateMarketStateFromCache();
   renderMarketTable();
@@ -1966,6 +2121,10 @@ if (typeof module !== "undefined" && module.exports) {
     fetchJsonWithRetry,
     fetchWithTimeout,
     isValidSymbol,
+    normalizeSymbolInput,
+    getSymbolValidationMessage,
+    persistFormState,
+    loadPersistedFormState,
     getQuote,
     loadSymbolSnapshot,
     resetSymbolCache,

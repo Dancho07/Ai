@@ -3,6 +3,10 @@ const {
   MarketDataError,
   fetchJsonWithRetry,
   isValidSymbol,
+  normalizeSymbolInput,
+  getSymbolValidationMessage,
+  persistFormState,
+  loadPersistedFormState,
   getQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
@@ -45,6 +49,19 @@ function createFetchSequence(responses) {
   return fetchFn;
 }
 
+function createStorage() {
+  const store = {};
+  return {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => {
+      store[key] = value;
+    },
+    removeItem: (key) => {
+      delete store[key];
+    },
+  };
+}
+
 async function runTest(name, testFn) {
   try {
     await testFn();
@@ -63,6 +80,28 @@ const tests = [
       assert.strictEqual(isValidSymbol("AAPL"), true);
       assert.strictEqual(isValidSymbol("BRK.B"), true);
       assert.strictEqual(isValidSymbol("123"), false);
+    },
+  },
+  {
+    name: "normalizes and validates symbol input messages",
+    fn: async () => {
+      assert.strictEqual(normalizeSymbolInput("  brk.b "), "BRK.B");
+      assert.strictEqual(normalizeSymbolInput("aapl!"), "AAPL");
+      assert.strictEqual(getSymbolValidationMessage(""), "Please enter a stock symbol.");
+      assert.strictEqual(getSymbolValidationMessage("AAPL"), "");
+      assert.strictEqual(
+        getSymbolValidationMessage("AAPL1"),
+        "Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).",
+      );
+    },
+  },
+  {
+    name: "restores persisted form state from storage",
+    fn: async () => {
+      const storage = createStorage();
+      persistFormState(storage, { symbol: " msft ", cash: "2500", risk: "high" });
+      const restored = loadPersistedFormState(storage);
+      assert.deepStrictEqual(restored, { symbol: "MSFT", cash: "2500", risk: "high" });
     },
   },
   {

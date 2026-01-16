@@ -39,7 +39,23 @@
         <form id="trade-form">
           <label>
             Stock symbol
-            <input type="text" name="symbol" placeholder="e.g. AAPL" required />
+            <input
+              type="text"
+              id="symbol-input"
+              name="symbol"
+              placeholder="e.g. AAPL"
+              autocomplete="off"
+              aria-describedby="symbol-error"
+              required
+            />
+            <div class="symbol-chips" id="symbol-chips" aria-label="Popular symbols">
+              <button type="button" class="symbol-chip" data-symbol="AAPL">AAPL</button>
+              <button type="button" class="symbol-chip" data-symbol="MSFT">MSFT</button>
+              <button type="button" class="symbol-chip" data-symbol="NVDA">NVDA</button>
+              <button type="button" class="symbol-chip" data-symbol="TSLA">TSLA</button>
+              <button type="button" class="symbol-chip" data-symbol="AMZN">AMZN</button>
+            </div>
+            <p class="field-error hidden" id="symbol-error" role="status" aria-live="polite"></p>
           </label>
           <label>
             Available cash ($)
@@ -53,7 +69,11 @@
               <option value="high">High</option>
             </select>
           </label>
-          <button type="submit">Generate AI Signal</button>
+          <button type="submit">
+            <span class="button-label">Generate AI Signal</span>
+            <span class="button-spinner" aria-hidden="true"></span>
+            <span class="button-progress">Analyzing…</span>
+          </button>
         </form>
       </section>
 
