@@ -81,6 +81,8 @@ const tests = [
     fn: async () => {
       assert.strictEqual(isValidSymbol("AAPL"), true);
       assert.strictEqual(isValidSymbol("BRK.B"), true);
+      assert.strictEqual(isValidSymbol("BRK-B"), true);
+      assert.strictEqual(isValidSymbol("AAPL1"), true);
       assert.strictEqual(isValidSymbol("123"), false);
     },
   },
@@ -88,12 +90,12 @@ const tests = [
     name: "normalizes and validates symbol input messages",
     fn: async () => {
       assert.strictEqual(normalizeSymbolInput("  brk.b "), "BRK.B");
-      assert.strictEqual(normalizeSymbolInput("aapl!"), "AAPL");
+      assert.strictEqual(normalizeSymbolInput("aapl!"), "AAPL!");
       assert.strictEqual(getSymbolValidationMessage(""), "Please enter a stock symbol.");
       assert.strictEqual(getSymbolValidationMessage("AAPL"), "");
       assert.strictEqual(
-        getSymbolValidationMessage("AAPL1"),
-        "Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).",
+        getSymbolValidationMessage("NVDA!!!"),
+        "Stock symbols must start with a letter and include up to 10 letters, numbers, dots, or hyphens (e.g. BRK.B).",
       );
     },
   },
@@ -175,15 +177,98 @@ const tests = [
     },
   },
   {
-    name: "throws invalid symbol error when provider returns no data",
+    name: "returns quote for valid symbol",
+    fn: async () => {
+      resetQuoteCache();
+      const fetchFn = createFetchSequence([
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: {
+              result: [
+                {
+                  symbol: "NVDA",
+                  regularMarketState: "REGULAR",
+                  regularMarketPrice: 123.45,
+                  regularMarketPreviousClose: 120,
+                  regularMarketChange: 3.45,
+                  regularMarketChangePercent: 2.88,
+                  regularMarketTime: 1700000000,
+                  shortName: "NVIDIA",
+                  currency: "USD",
+                },
+              ],
+            },
+          },
+        }),
+      ]);
+
+      const quote = await getQuote("NVDA", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(quote.price, 123.45);
+      assert.strictEqual(quote.session, "REGULAR");
+    },
+  },
+  {
+    name: "falls back to cached data on rate limit",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("AAPL", {
+        price: 160,
+        change: 0.5,
+        changePct: 0.3,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
+      });
+      const fetchFn = createFetchSequence([
+        createResponse({ ok: false, status: 429, json: {} }),
+      ]);
+      const result = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(result.source, "cache");
+    },
+  },
+  {
+    name: "falls back to cached data on timeout",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("MSFT", {
+        price: 310,
+        change: -1,
+        changePct: -0.32,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
+      });
+      const fetchFn = (url, { signal }) =>
+        new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("Aborted");
+            error.name = "AbortError";
+            reject(error);
+          });
+        });
+      const result = await getQuote("MSFT", { fetchFn, maxAttempts: 1, timeoutMs: 5 });
+      assert.strictEqual(result.source, "cache");
+    },
+  },
+  {
+    name: "throws invalid symbol error when provider reports not found",
     fn: async () => {
       resetQuoteCache();
       const fetchFn = createFetchSequence([
         createResponse({ ok: true, status: 200, json: { quoteResponse: { result: [] } } }),
+        createResponse({
+          ok: true,
+          status: 200,
+          json: { chart: { error: { code: "Not Found", description: "No data found." } } },
+        }),
       ]);
 
       await assert.rejects(
-        () => getQuote("ZZZZ", { fetchFn, maxAttempts: 1 }),
+        () => getQuote("NOTAREAL", { fetchFn, maxAttempts: 1 }),
         (error) => error instanceof MarketDataError && error.type === "invalid_symbol",
       );
     },

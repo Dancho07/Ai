@@ -208,7 +208,7 @@ function createConcurrencyLimiter(limit) {
 const requestLimiter = createConcurrencyLimiter(MAX_PARALLEL_REQUESTS);
 
 function isValidSymbol(symbol) {
-  const symbolPattern = /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/;
+  const symbolPattern = /^[A-Z][A-Z0-9.-]{0,9}$/;
   return symbolPattern.test(symbol);
 }
 
@@ -216,15 +216,11 @@ function normalizeSymbolInput(value) {
   if (typeof value !== "string") {
     return "";
   }
-  const trimmed = value.trim().toUpperCase();
-  const filtered = trimmed.replace(/[^A-Z.]/g, "");
-  const [rawBase = "", ...rest] = filtered.split(".");
-  const base = rawBase.slice(0, 5);
-  const suffix = rest.join("").slice(0, 2);
-  if (filtered.includes(".") && suffix) {
-    return `${base}.${suffix}`;
-  }
-  return base;
+  const withoutWhitespace = value.replace(
+    /[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g,
+    "",
+  );
+  return withoutWhitespace.toUpperCase();
 }
 
 function getSymbolValidationMessage(symbol) {
@@ -232,7 +228,7 @@ function getSymbolValidationMessage(symbol) {
     return "Please enter a stock symbol.";
   }
   if (!isValidSymbol(symbol)) {
-    return "Stock symbols can include 1-5 letters and an optional suffix (e.g. BRK.B).";
+    return "Stock symbols must start with a letter and include up to 10 letters, numbers, dots, or hyphens (e.g. BRK.B).";
   }
   return "";
 }
@@ -492,11 +488,17 @@ async function fetchJsonWithRetry(
         });
       }
       const payload = await response.json();
+      if (!payload || typeof payload !== "object") {
+        throw new MarketDataError("provider_error", "Unexpected response payload.", {
+          payloadType: typeof payload,
+        });
+      }
       const providerError = parseProviderError(payload);
       if (providerError) {
         const errorType = providerError?.code === "Not Found" ? "invalid_symbol" : "provider_error";
         throw new MarketDataError(errorType, providerError?.description || "Provider error.", {
           providerCode: providerError?.code,
+          providerMessage: providerError?.description ?? null,
         });
       }
       return payload;
@@ -510,11 +512,13 @@ async function fetchJsonWithRetry(
         event: "market_data_fetch_failure",
         provider,
         symbol,
+        endpoint: url,
         requestId,
         attempt,
         maxAttempts,
         errorType: marketError.type,
         statusCode: marketError.details?.statusCode ?? null,
+        providerMessage: marketError.details?.providerMessage ?? null,
         message: marketError.message,
       });
       if (!shouldRetry) {
@@ -1592,7 +1596,19 @@ async function getQuoteInternal(symbol, options = {}) {
   if (!providerQuote && options.allowFetch !== false) {
     try {
       const quotes = await fetchYahooQuotes([symbol], options);
-      providerQuote = quotes.find((entry) => entry.symbol === symbol) ?? null;
+      providerQuote =
+        quotes.find((entry) => entry.symbol?.toUpperCase?.() === symbol) ??
+        quotes.find((entry) => entry.symbol === symbol) ??
+        null;
+      if (!providerQuote && quotes.length === 0) {
+        providerError = new MarketDataError("unavailable", "Empty quote response.");
+        logMarketDataEvent("warn", {
+          event: "market_data_quote_empty",
+          provider: PROVIDER,
+          symbol,
+          endpoint: YAHOO_QUOTE_URL([symbol]),
+        });
+      }
     } catch (error) {
       providerError = error;
       if (error?.details?.statusCode === 429) {
@@ -1602,7 +1618,7 @@ async function getQuoteInternal(symbol, options = {}) {
   }
 
   if (!providerQuote && !providerError && options.allowFetch !== false) {
-    providerError = new MarketDataError("invalid_symbol", "No data returned for symbol.");
+    providerError = new MarketDataError("unavailable", "No quote data returned for symbol.");
   }
 
   if (providerQuote) {
