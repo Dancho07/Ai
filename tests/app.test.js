@@ -9,6 +9,13 @@ const {
   extraSymbolData,
   resetQuoteCache,
   setLastKnownQuote,
+  hydrateMarketStateFromCache,
+  getMarketRowDisplay,
+  getNextRefreshDelay,
+  applyRateLimitBackoff,
+  isRateLimitBackoffActive,
+  updateStockWithQuote,
+  getStockEntry,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -153,6 +160,101 @@ const tests = [
       });
       assert.strictEqual(quote.session, "CLOSED");
       assert.strictEqual(quote.isRealtime, false);
+    },
+  },
+  {
+    name: "hydrates cached quotes for immediate table display",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("AAPL", {
+        price: 150.25,
+        change: 1.75,
+        changePct: 1.18,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
+      });
+      hydrateMarketStateFromCache();
+      const stock = getStockEntry("AAPL");
+      const display = getMarketRowDisplay(stock);
+      assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+      assert.notStrictEqual(display.changeDisplay, "n/a");
+      assert.strictEqual(display.badge.label, "CACHED");
+    },
+  },
+  {
+    name: "keeps cached values when live quote fetch fails",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("AAPL", {
+        price: 148.1,
+        change: -0.9,
+        changePct: -0.6,
+        asOfTimestamp: Date.now() - 30000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
+      });
+      const fetchFn = createFetchSequence([
+        createResponse({ ok: false, status: 503, json: {} }),
+      ]);
+      const quote = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, quote);
+      const display = getMarketRowDisplay(stock);
+      assert.strictEqual(quote.source, "cache");
+      assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+    },
+  },
+  {
+    name: "adjusts refresh delay by session and pauses when hidden",
+    fn: async () => {
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, {
+        price: 101,
+        change: 0.5,
+        changePct: 0.5,
+        asOfTimestamp: Date.now(),
+        isRealtime: true,
+        session: "REGULAR",
+        source: "primary",
+      });
+      const regularDelay = getNextRefreshDelay({
+        symbols: ["AAPL"],
+        visible: true,
+        backoffActive: false,
+      });
+      assert.strictEqual(regularDelay, 10000);
+      const hiddenDelay = getNextRefreshDelay({
+        symbols: ["AAPL"],
+        visible: false,
+        backoffActive: false,
+      });
+      assert.strictEqual(hiddenDelay, null);
+    },
+  },
+  {
+    name: "backs off refresh interval after rate limit",
+    fn: async () => {
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, {
+        price: 99,
+        change: 0.1,
+        changePct: 0.1,
+        asOfTimestamp: Date.now(),
+        isRealtime: true,
+        session: "REGULAR",
+        source: "primary",
+      });
+      applyRateLimitBackoff();
+      assert.strictEqual(isRateLimitBackoffActive(), true);
+      const backedOff = getNextRefreshDelay({
+        symbols: ["AAPL"],
+        visible: true,
+        backoffActive: true,
+      });
+      assert.strictEqual(backedOff, 20000);
     },
   },
 ];
