@@ -19,6 +19,8 @@ const {
   calculateAtrLike,
   calculateTradePlan,
   buildSignalReasons,
+  formatTimestamp,
+  getMarketIndicatorData,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -163,6 +165,37 @@ const tests = [
       });
       assert.strictEqual(quote.session, "CLOSED");
       assert.strictEqual(quote.isRealtime, false);
+    },
+  },
+  {
+    name: "labels session badge for market indicator",
+    fn: async () => {
+      const indicator = getMarketIndicatorData({
+        quoteSession: "PRE",
+        dataSource: "primary",
+        quoteAsOf: Date.now(),
+      });
+      const cachedIndicator = getMarketIndicatorData({
+        quoteSession: "REGULAR",
+        dataSource: "cache",
+        quoteAsOf: Date.now(),
+      });
+      assert.strictEqual(indicator.sessionBadge.label, "PRE");
+      assert.strictEqual(cachedIndicator.sessionBadge.label, "CACHED");
+    },
+  },
+  {
+    name: "renders as-of label in UTC",
+    fn: async () => {
+      const timestamp = Date.UTC(2024, 0, 1, 12, 30, 0);
+      const asOf = `As of ${formatTimestamp(timestamp)} UTC`;
+      assert.strictEqual(asOf, "As of 12:30 UTC");
+      const indicator = getMarketIndicatorData({
+        quoteSession: "REGULAR",
+        dataSource: "primary",
+        quoteAsOf: timestamp,
+      });
+      assert.strictEqual(indicator.asOfLabel, "As of 12:30 UTC");
     },
   },
   {
