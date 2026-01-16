@@ -174,6 +174,38 @@ label {
   color: #30344a;
 }
 
+.symbol-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.symbol-chip {
+  border: 1px solid #d6d9ef;
+  background: #f7f8ff;
+  color: #3945a3;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.symbol-chip:hover {
+  background: #e9ecff;
+}
+
+.symbol-chip:focus-visible {
+  outline: 2px solid #4d5bff;
+  outline-offset: 2px;
+}
+
+.field-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b54141;
+}
+
 input,
 select {
   padding: 12px 14px;
@@ -192,6 +224,43 @@ button {
   font-weight: 600;
   cursor: pointer;
   justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.button-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
+  animation: spin 0.8s linear infinite;
+  display: none;
+}
+
+.button-progress {
+  display: none;
+}
+
+button.is-loading .button-label {
+  display: none;
+}
+
+button.is-loading .button-spinner,
+button.is-loading .button-progress {
+  display: inline-flex;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .filters {
