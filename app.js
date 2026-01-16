@@ -280,7 +280,12 @@ async function loadSymbolSnapshot(symbol) {
   ]);
   const quoteData = quoteResult.status === "fulfilled" ? quoteResult.value : null;
   const chartData = chartResult.status === "fulfilled" ? chartResult.value : null;
+  const cachedEntry = getStockEntry(symbol);
+  const hasCachedData = Boolean(cachedEntry?.lastPrice || cachedEntry?.history?.length);
   if (!quoteData && !chartData) {
+    if (hasCachedData) {
+      return;
+    }
     throw new Error("Quote and chart requests failed.");
   }
 
@@ -458,9 +463,7 @@ form.addEventListener("submit", async (event) => {
     showErrors([]);
   } catch (error) {
     console.error(error);
-    showErrors([
-      "Live market data is temporarily unavailable. Showing the most recent available quote instead.",
-    ]);
+    showErrors(["Live market data is temporarily unavailable. Please try again shortly."]);
   }
   const result = analyzeTrade({ symbol, cash: cashValue, risk });
   renderResult(result);
