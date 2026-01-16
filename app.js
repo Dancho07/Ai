@@ -13,6 +13,13 @@ const resultPrice = isBrowser ? document.getElementById("result-price") : null;
 const resultThesis = isBrowser ? document.getElementById("result-thesis") : null;
 const resultGenerated = isBrowser ? document.getElementById("result-generated") : null;
 const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer") : null;
+const resultWhy = isBrowser ? document.getElementById("result-why") : null;
+const planEntry = isBrowser ? document.getElementById("plan-entry") : null;
+const planEntryMeta = isBrowser ? document.getElementById("plan-entry-meta") : null;
+const planStopLoss = isBrowser ? document.getElementById("plan-stop-loss") : null;
+const planTakeProfit = isBrowser ? document.getElementById("plan-take-profit") : null;
+const planPosition = isBrowser ? document.getElementById("plan-position") : null;
+const planRiskReward = isBrowser ? document.getElementById("plan-risk-reward") : null;
 
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
@@ -30,6 +37,16 @@ const riskLimits = {
   moderate: 0.4,
   high: 0.6,
 };
+
+const riskPerTrade = {
+  low: 0.005,
+  moderate: 0.01,
+  high: 0.015,
+};
+
+const ENTRY_RANGE_PCT = 0.003;
+const ATR_LOOKBACK = 30;
+const SWING_LOOKBACK = 10;
 
 const confidenceLabels = {
   buy: "medium",
@@ -546,19 +563,217 @@ function calculateSignal(prices) {
   return "hold";
 }
 
+function formatPercent(value) {
+  if (value == null || Number.isNaN(value)) {
+    return "n/a";
+  }
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${percentFormatter.format(value)}%`;
+}
+
+function calculateAtrLike(prices, lookback = ATR_LOOKBACK) {
+  if (!prices || prices.length < 2) {
+    return null;
+  }
+  const sliceStart = Math.max(prices.length - (lookback + 1), 0);
+  const slice = prices.slice(sliceStart);
+  const ranges = slice.slice(1).map((price, index) => Math.abs(price - slice[index]));
+  if (!ranges.length) {
+    return null;
+  }
+  const total = ranges.reduce((sum, value) => sum + value, 0);
+  return total / ranges.length;
+}
+
+function getSwingLevels(prices, lookback = SWING_LOOKBACK) {
+  if (!prices || !prices.length) {
+    return { low: null, high: null };
+  }
+  const slice = prices.slice(-lookback);
+  return {
+    low: Math.min(...slice),
+    high: Math.max(...slice),
+  };
+}
+
+function resolvePriceContext(marketEntry) {
+  const history = marketEntry?.history ?? [];
+  const historyPrice = history.length ? history[history.length - 1] : null;
+  const livePrice = marketEntry?.lastPrice ?? null;
+  const price = livePrice ?? historyPrice ?? null;
+  if (price == null) {
+    return {
+      price: null,
+      label: "Price unavailable",
+      asOf: null,
+      isLive: false,
+    };
+  }
+  const isLive = marketEntry?.isRealtime || marketEntry?.quoteSession === "REGULAR";
+  const dataSource = marketEntry?.dataSource ?? "historical";
+  let label = "Live quote";
+  if (!isLive) {
+    if (["cache", "closed", "delayed", "extended"].includes(dataSource)) {
+      label = "Cached quote";
+    } else {
+      label = "Last close";
+    }
+  }
+  return {
+    price,
+    label,
+    asOf: marketEntry?.quoteAsOf ?? marketEntry?.lastHistoricalTimestamp ?? null,
+    isLive,
+  };
+}
+
+function buildSignalReasons({
+  action,
+  recent,
+  average,
+  dailyChange,
+  monthlyChange,
+  yearlyChange,
+  atrPercent,
+}) {
+  const reasons = [];
+  if (recent != null && average != null) {
+    const diffPct = ((recent - average) / average) * 100;
+    reasons.push(
+      `Price is ${Math.abs(diffPct).toFixed(2)}% ${diffPct >= 0 ? "above" : "below"} the 10-day average.`,
+    );
+  }
+  if (dailyChange != null) {
+    reasons.push(`Latest session move: ${formatPercent(dailyChange)}.`);
+  }
+  if (monthlyChange != null) {
+    reasons.push(`1-month trend: ${formatPercent(monthlyChange)}.`);
+  }
+  if (yearlyChange != null) {
+    reasons.push(`1-year trend: ${formatPercent(yearlyChange)}.`);
+  }
+  if (atrPercent != null) {
+    reasons.push(`30-day volatility avg: ${formatPercent(atrPercent)}.`);
+  }
+  if (action === "buy") {
+    reasons.push("Signal favors a mean-reversion entry after a short-term pullback.");
+  } else if (action === "sell") {
+    reasons.push("Signal flags an overextended move versus recent averages.");
+  } else {
+    reasons.push("Signal sits near the short-term mean with no clear edge.");
+  }
+  const unique = [...new Set(reasons)];
+  const trimmed = unique.slice(0, 5);
+  while (trimmed.length < 3) {
+    trimmed.push("Signal uses the last 30 sessions of pricing history for context.");
+  }
+  return trimmed;
+}
+
+function calculateTradePlan({
+  action,
+  entryPrice,
+  priceLabel,
+  priceAsOf,
+  prices,
+  cash,
+  risk,
+}) {
+  const entryMeta = priceLabel
+    ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf)})` : ""}`
+    : "";
+  if (!entryPrice) {
+    return {
+      entryDisplay: "Not available",
+      entryMeta,
+      stopLossDisplay: "n/a",
+      takeProfitDisplay: "n/a",
+      positionSizeDisplay: "0 shares",
+      riskRewardDisplay: "n/a",
+      positionSize: 0,
+    };
+  }
+
+  if (action === "hold") {
+    return {
+      entryDisplay: "Market",
+      entryMeta,
+      stopLossDisplay: "n/a",
+      takeProfitDisplay: "n/a",
+      positionSizeDisplay: "0 shares",
+      riskRewardDisplay: "n/a",
+      positionSize: 0,
+    };
+  }
+
+  const entryRangeLow = entryPrice * (1 - ENTRY_RANGE_PCT);
+  const entryRangeHigh = entryPrice * (1 + ENTRY_RANGE_PCT);
+  const atrLike = calculateAtrLike(prices);
+  const fallbackAtr = entryPrice * 0.02;
+  const atrValue = atrLike ?? fallbackAtr;
+  const swingLevels = getSwingLevels(prices);
+  let stopLoss = null;
+  if (action === "buy") {
+    const atrStop = entryPrice - atrValue * 1.2;
+    const candidates = [atrStop, swingLevels.low].filter(
+      (value) => value != null && value < entryPrice,
+    );
+    stopLoss = candidates.length ? Math.max(...candidates) : entryPrice * 0.97;
+  } else if (action === "sell") {
+    const atrStop = entryPrice + atrValue * 1.2;
+    const candidates = [atrStop, swingLevels.high].filter(
+      (value) => value != null && value > entryPrice,
+    );
+    stopLoss = candidates.length ? Math.min(...candidates) : entryPrice * 1.03;
+  }
+
+  const riskPerShare = stopLoss != null ? Math.abs(entryPrice - stopLoss) : null;
+  const riskBudget = cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
+  const maxShares = Math.max(Math.floor(cash / entryPrice), 0);
+  const positionSize =
+    riskPerShare && riskPerShare > 0
+      ? Math.min(Math.floor(riskBudget / riskPerShare), maxShares)
+      : 0;
+
+  let takeProfit = null;
+  let riskReward = null;
+  if (stopLoss != null) {
+    if (action === "buy") {
+      takeProfit = entryPrice + 2 * (entryPrice - stopLoss);
+      riskReward = (takeProfit - entryPrice) / (entryPrice - stopLoss);
+    } else if (action === "sell") {
+      takeProfit = entryPrice - 2 * (stopLoss - entryPrice);
+      riskReward = (entryPrice - takeProfit) / (stopLoss - entryPrice);
+    }
+  }
+
+  return {
+    entryDisplay: `${quoteFormatter.format(entryRangeLow)} - ${quoteFormatter.format(entryRangeHigh)}`,
+    entryMeta,
+    stopLossDisplay: stopLoss != null ? quoteFormatter.format(stopLoss) : "n/a",
+    takeProfitDisplay: takeProfit != null ? quoteFormatter.format(takeProfit) : "n/a",
+    positionSizeDisplay:
+      positionSize > 0
+        ? `${positionSize} shares (risk ${quoteFormatter.format(riskBudget)})`
+        : "0 shares",
+    riskRewardDisplay: riskReward != null ? `${riskReward.toFixed(2)}:1` : "n/a",
+    positionSize,
+    stopLoss,
+    takeProfit,
+    riskReward,
+  };
+}
+
 function analyzeTrade({ symbol, cash, risk }) {
   const marketEntry = getStockEntry(symbol);
   const prices = marketEntry?.history ?? [];
-  const livePrice = marketEntry?.lastPrice ?? null;
-  const recent = livePrice ?? prices[prices.length - 1] ?? null;
+  const priceContext = resolvePriceContext(marketEntry);
+  const recent = priceContext.price;
   const hasHistory = prices.length >= 10;
   const average = hasHistory
     ? prices.slice(-10).reduce((a, b) => a + b, 0) / 10
     : recent;
-  const riskLimit = riskLimits[risk];
-
   let action = "hold";
-  let allocation = riskLimit * 0.25;
   let thesis = [
     "Price is near the short-term average.",
     "No strong edge detected for aggressive trades.",
@@ -575,6 +790,24 @@ function analyzeTrade({ symbol, cash, risk }) {
         "Live pricing data is unavailable for this symbol.",
         "Signals are paused until a fresh quote is retrieved.",
       ],
+      tradePlan: calculateTradePlan({
+        action: "hold",
+        entryPrice: null,
+        priceLabel: priceContext.label,
+        priceAsOf: priceContext.asOf,
+        prices,
+        cash,
+        risk,
+      }),
+      signalReasons: buildSignalReasons({
+        action: "hold",
+        recent,
+        average,
+        dailyChange: marketEntry?.dailyChange ?? null,
+        monthlyChange: marketEntry?.monthlyChange ?? null,
+        yearlyChange: marketEntry?.yearlyChange ?? null,
+        atrPercent: null,
+      }),
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
     };
@@ -587,22 +820,30 @@ function analyzeTrade({ symbol, cash, risk }) {
     ];
   } else if (recent > average * 1.03) {
     action = "sell";
-    allocation = riskLimit * 0.5;
     thesis = [
       "Price is extended above the short-term average.",
       "Momentum suggests trimming exposure.",
     ];
   } else if (recent < average * 0.97) {
     action = "buy";
-    allocation = riskLimit;
     thesis = [
       "Price is below the short-term average.",
       "Mean reversion offers a potential entry.",
     ];
   }
 
-  const budget = cash * allocation;
-  const shares = Math.max(Math.floor(budget / recent), 0);
+  const atrLike = calculateAtrLike(prices);
+  const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
+  const tradePlan = calculateTradePlan({
+    action,
+    entryPrice: recent,
+    priceLabel: priceContext.label,
+    priceAsOf: priceContext.asOf,
+    prices,
+    cash,
+    risk,
+  });
+  const shares = tradePlan.positionSize;
 
   return {
     symbol,
@@ -611,6 +852,16 @@ function analyzeTrade({ symbol, cash, risk }) {
     estimatedPrice: recent,
     confidence: confidenceLabels[action],
     thesis,
+    tradePlan,
+    signalReasons: buildSignalReasons({
+      action,
+      recent,
+      average,
+      dailyChange: marketEntry?.dailyChange ?? null,
+      monthlyChange: marketEntry?.monthlyChange ?? null,
+      yearlyChange: marketEntry?.yearlyChange ?? null,
+      atrPercent,
+    }),
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
     generatedAt: new Date().toLocaleString(),
   };
@@ -687,6 +938,27 @@ function renderResult(result) {
     ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
     : "Estimated price: Not available";
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
+  if (resultWhy) {
+    resultWhy.innerHTML = result.signalReasons.map((line) => `<li>${line}</li>`).join("");
+  }
+  if (planEntry) {
+    planEntry.textContent = result.tradePlan.entryDisplay;
+  }
+  if (planEntryMeta) {
+    planEntryMeta.textContent = result.tradePlan.entryMeta;
+  }
+  if (planStopLoss) {
+    planStopLoss.textContent = result.tradePlan.stopLossDisplay;
+  }
+  if (planTakeProfit) {
+    planTakeProfit.textContent = result.tradePlan.takeProfitDisplay;
+  }
+  if (planPosition) {
+    planPosition.textContent = result.tradePlan.positionSizeDisplay;
+  }
+  if (planRiskReward) {
+    planRiskReward.textContent = result.tradePlan.riskRewardDisplay;
+  }
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
   resultCard.classList.remove("hidden");
@@ -1579,5 +1851,8 @@ if (typeof module !== "undefined" && module.exports) {
     isRateLimitBackoffActive,
     updateStockWithQuote,
     getStockEntry,
+    calculateAtrLike,
+    calculateTradePlan,
+    buildSignalReasons,
   };
 }

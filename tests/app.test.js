@@ -16,6 +16,9 @@ const {
   isRateLimitBackoffActive,
   updateStockWithQuote,
   getStockEntry,
+  calculateAtrLike,
+  calculateTradePlan,
+  buildSignalReasons,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -255,6 +258,46 @@ const tests = [
         backoffActive: true,
       });
       assert.strictEqual(backedOff, 20000);
+    },
+  },
+  {
+    name: "calculates ATR-like volatility from price history",
+    fn: async () => {
+      const atr = calculateAtrLike([100, 102, 104], 2);
+      assert.strictEqual(atr, 2);
+    },
+  },
+  {
+    name: "builds a trade plan with 2R take-profit and risk sizing",
+    fn: async () => {
+      const plan = calculateTradePlan({
+        action: "buy",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices: [100, 102, 99, 101, 100, 98, 99, 101, 100, 99],
+        cash: 10000,
+        risk: "moderate",
+      });
+      assert.ok(plan.stopLoss < 100);
+      assert.strictEqual(plan.takeProfit, 100 + 2 * (100 - plan.stopLoss));
+      assert.strictEqual(plan.riskReward.toFixed(2), "2.00");
+      assert.ok(plan.positionSize > 0);
+    },
+  },
+  {
+    name: "creates 3-5 signal reasons",
+    fn: async () => {
+      const reasons = buildSignalReasons({
+        action: "buy",
+        recent: 100,
+        average: 102,
+        dailyChange: -1,
+        monthlyChange: 3,
+        yearlyChange: 8,
+        atrPercent: 1.5,
+      });
+      assert.ok(reasons.length >= 3 && reasons.length <= 5);
     },
   },
 ];

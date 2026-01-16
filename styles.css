@@ -353,6 +353,41 @@ tbody tr:hover {
   margin-top: 16px;
 }
 
+.plan-card {
+  background: #f7f8ff;
+  border-radius: 16px;
+  padding: 20px;
+  border: 1px solid #e3e7ff;
+}
+
+.plan-list {
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.plan-list div {
+  display: grid;
+  gap: 4px;
+}
+
+.plan-list dt {
+  font-weight: 600;
+  color: #30344a;
+}
+
+.plan-list dd {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #1d1f2c;
+}
+
+.plan-meta {
+  font-size: 0.8rem;
+  color: #6c728d;
+}
+
 .stat {
   font-size: 2rem;
   margin: 8px 0;
