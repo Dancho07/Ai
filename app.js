@@ -154,6 +154,7 @@ const lastKnownQuotes = new Map();
 const historicalCache = new Map();
 const inflightQuoteRequests = new Map();
 const marketIndicatorState = { usingCached: false };
+const lastQuoteRequestStatus = new Map();
 
 let refreshTimerId = null;
 let refreshInProgress = false;
@@ -309,17 +310,24 @@ function normalizeEpochToMs(timestamp) {
   return timestamp > 1e12 ? timestamp : timestamp * 1000;
 }
 
-function deriveSessionFromYahooQuote(quote, nowMs = Date.now()) {
-  const state = quote?.marketState ?? quote?.regularMarketState ?? null;
+function getEpochUnit(timestamp) {
+  if (!timestamp || Number.isNaN(timestamp)) {
+    return "unknown";
+  }
+  return timestamp > 1e12 ? "ms" : "s";
+}
+
+function deriveMarketSession(rawQuote, nowMs = Date.now()) {
+  const state = rawQuote?.marketState ?? rawQuote?.regularMarketState ?? null;
   if (typeof state === "string") {
     const normalized = state.toUpperCase();
     if (["REGULAR", "PRE", "POST", "CLOSED"].includes(normalized)) {
       return normalized;
     }
   }
-  if (quote?.regularMarketTime) {
-    const regularMs = normalizeEpochToMs(quote.regularMarketTime);
-    if (regularMs && nowMs - regularMs <= 15 * 60 * 1000) {
+  if (rawQuote?.regularMarketTime) {
+    const regularMs = rawQuote.regularMarketTime * 1000;
+    if (nowMs - regularMs <= 20 * 60 * 1000) {
       return "REGULAR";
     }
     return "CLOSED";
@@ -367,12 +375,25 @@ function logYahooQuoteDebug(rawQuote, derivedSession, source) {
   if (!MARKET_DEBUG_SYMBOLS.has(symbol)) {
     return;
   }
+  const requestStatus = lastQuoteRequestStatus.get(symbol) ?? null;
+  const now = new Date();
+  const nowUtc = now.toISOString();
+  const nowNy = now.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+  });
   const payload = {
     symbol,
+    quoteRequestStatus: requestStatus?.status ?? null,
+    quoteRequestOk: requestStatus?.ok ?? null,
+    quoteRequestAt: requestStatus?.timestamp ?? null,
     marketState: rawQuote.marketState ?? rawQuote.regularMarketState ?? null,
     regularMarketTime: rawQuote.regularMarketTime ?? null,
     preMarketTime: rawQuote.preMarketTime ?? null,
     postMarketTime: rawQuote.postMarketTime ?? null,
+    regularMarketTimeUnit: getEpochUnit(rawQuote.regularMarketTime),
+    preMarketTimeUnit: getEpochUnit(rawQuote.preMarketTime),
+    postMarketTimeUnit: getEpochUnit(rawQuote.postMarketTime),
     exchangeTimezoneName: rawQuote.exchangeTimezoneName ?? null,
     exchangeTimezoneShortName: rawQuote.exchangeTimezoneShortName ?? null,
     regularMarketPrice: rawQuote.regularMarketPrice ?? null,
@@ -380,6 +401,11 @@ function logYahooQuoteDebug(rawQuote, derivedSession, source) {
     postMarketPrice: rawQuote.postMarketPrice ?? null,
     derivedSession,
     freshnessSource: getDebugFreshnessLabel(source),
+    nowUtc,
+    nowNy,
+    regularMarketTimeMs: normalizeEpochToMs(rawQuote.regularMarketTime),
+    preMarketTimeMs: normalizeEpochToMs(rawQuote.preMarketTime),
+    postMarketTimeMs: normalizeEpochToMs(rawQuote.postMarketTime),
   };
   console.info("[Market Debug]", payload);
 }
@@ -438,7 +464,7 @@ function normalizeQuoteForCache(quote) {
     change: quote.change ?? null,
     changePct: quote.changePct ?? null,
     asOfTimestamp: quote.asOfTimestamp ?? null,
-    session: quote.session ?? "CLOSED",
+    session: quote.session ?? "UNKNOWN",
     source: quote.source ?? "cache",
     currency: quote.currency ?? null,
     previousClose: quote.previousClose ?? null,
@@ -597,12 +623,22 @@ async function fetchWithTimeout(fetchFn, url, timeoutMs) {
 
 async function fetchJsonWithRetry(
   url,
-  { fetchFn = fetch, timeoutMs = REQUEST_TIMEOUT_MS, maxAttempts = MAX_RETRIES, provider, symbol },
+  {
+    fetchFn = fetch,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    maxAttempts = MAX_RETRIES,
+    provider,
+    symbol,
+    onStatus,
+  },
 ) {
   const requestId = createRequestId();
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await fetchWithTimeout(fetchFn, url, timeoutMs);
+      if (onStatus) {
+        onStatus({ status: response.status, ok: response.ok });
+      }
       if (!response.ok) {
         if (shouldBackoffFromStatus(response.status)) {
           applyRateLimitBackoff();
@@ -618,6 +654,11 @@ async function fetchJsonWithRetry(
       } catch (error) {
         if (typeof response.text === "function") {
           const raw = await response.text();
+          if (typeof raw === "string" && raw.trim().startsWith("<")) {
+            throw new MarketDataError("provider_error", "HTML response received.", {
+              responseSnippet: raw.slice(0, 120),
+            });
+          }
           payload = parseJsonPayload(raw);
           if (payload?.contents && typeof payload.contents === "string") {
             payload = parseJsonPayload(payload.contents);
@@ -672,7 +713,7 @@ function buildQuoteFromYahoo(quote) {
   if (!quote) {
     return null;
   }
-  const session = deriveSessionFromYahooQuote(quote);
+  const session = deriveMarketSession(quote);
   const regularFields = {
     price: quote.regularMarketPrice,
     change: quote.regularMarketChange,
@@ -1724,14 +1765,27 @@ async function fetchYahooQuotes(symbols, options = {}) {
   if (!uniqueSymbols.length) {
     return [];
   }
+  const recordStatus = ({ status, ok }) => {
+    const timestamp = Date.now();
+    uniqueSymbols.forEach((symbol) => {
+      lastQuoteRequestStatus.set(symbol, { status, ok, timestamp });
+    });
+  };
   const quoteData = await fetchJson(YAHOO_QUOTE_URL(uniqueSymbols), {
     provider: PROVIDER,
     symbol: uniqueSymbols.join(","),
     fetchFn: options.fetchFn,
     maxAttempts: options.maxAttempts,
     timeoutMs: options.timeoutMs,
+    onStatus: recordStatus,
   });
-  return quoteData?.quoteResponse?.result ?? [];
+  const quoteResponse = quoteData?.quoteResponse;
+  if (!quoteResponse || !Array.isArray(quoteResponse.result)) {
+    throw new MarketDataError("provider_error", "Malformed quote response.", {
+      hasQuoteResponse: Boolean(quoteResponse),
+    });
+  }
+  return quoteResponse.result;
 }
 
 async function fetchHistoricalSeries(symbol, options = {}) {
@@ -1917,6 +1971,9 @@ async function loadInitialMarketData() {
   try {
     quoteResults = await fetchYahooQuotes(symbols);
     forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
+    if (forceUnavailable) {
+      hadQuoteFailure = true;
+    }
   } catch (error) {
     hadQuoteFailure = true;
     logMarketDataEvent("warn", {
@@ -2116,6 +2173,9 @@ async function refreshVisibleQuotes() {
   try {
     const quoteResults = await fetchYahooQuotes(symbolsToFetch);
     const forceUnavailable = quoteResults.length === 0 && symbolsToFetch.length > 0;
+    if (forceUnavailable) {
+      hadQuoteFailure = true;
+    }
     const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
     await Promise.all(
       symbolsToFetch.map(async (symbol) => {
@@ -2375,7 +2435,11 @@ async function refreshMarketBoard() {
   let hadQuoteFailure = false;
   try {
     const quoteResults = await fetchYahooQuotes(symbols);
+    const forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
     const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+    if (forceUnavailable) {
+      hadQuoteFailure = true;
+    }
     await Promise.all(
       marketState.map(async (stock) => {
         const prefetchedQuote = quoteMap.get(stock.symbol);
@@ -2383,6 +2447,7 @@ async function refreshMarketBoard() {
           const quote = await getQuote(stock.symbol, {
             prefetchedQuote,
             allowFetch: false,
+            forceUnavailable,
           });
           updateStockWithQuote(stock, quote);
         } catch (error) {
@@ -2638,7 +2703,7 @@ if (typeof module !== "undefined" && module.exports) {
     persistFormState,
     loadPersistedFormState,
     getQuote,
-    deriveSessionFromYahooQuote,
+    deriveMarketSession,
     loadSymbolSnapshot,
     resetSymbolCache,
     extraSymbolData,

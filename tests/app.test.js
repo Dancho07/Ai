@@ -5,7 +5,7 @@ const {
   isValidSymbol,
   normalizeSymbolInput,
   getSymbolValidationMessage,
-  deriveSessionFromYahooQuote,
+  deriveMarketSession,
   persistFormState,
   loadPersistedFormState,
   getQuote,
@@ -276,12 +276,12 @@ const tests = [
     name: "derives session from Yahoo marketState values",
     fn: async () => {
       assert.strictEqual(
-        deriveSessionFromYahooQuote({ marketState: "REGULAR" }),
+        deriveMarketSession({ marketState: "REGULAR" }),
         "REGULAR",
       );
-      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "PRE" }), "PRE");
-      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "POST" }), "POST");
-      assert.strictEqual(deriveSessionFromYahooQuote({ marketState: "CLOSED" }), "CLOSED");
+      assert.strictEqual(deriveMarketSession({ marketState: "PRE" }), "PRE");
+      assert.strictEqual(deriveMarketSession({ marketState: "POST" }), "POST");
+      assert.strictEqual(deriveMarketSession({ marketState: "CLOSED" }), "CLOSED");
     },
   },
   {
@@ -289,11 +289,11 @@ const tests = [
     fn: async () => {
       const now = 1700000000000;
       assert.strictEqual(
-        deriveSessionFromYahooQuote({ regularMarketTime: 1700000000 }, now),
+        deriveMarketSession({ regularMarketTime: 1700000000 }, now),
         "REGULAR",
       );
       assert.strictEqual(
-        deriveSessionFromYahooQuote({ regularMarketTime: 1699990000 }, now),
+        deriveMarketSession({ regularMarketTime: 1699998500 }, now),
         "CLOSED",
       );
     },
@@ -551,6 +551,29 @@ const tests = [
         source: "cache",
         unavailable: true,
       });
+      const indicator = getMarketIndicatorData(stock);
+      assert.strictEqual(stock.quoteSession, "REGULAR");
+      assert.strictEqual(indicator.marketStatus, "Open");
+      assert.strictEqual(indicator.sourceBadge.label, "CACHED");
+    },
+  },
+  {
+    name: "keeps cached session open after live quote fetch failure",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("AAPL", {
+        price: 445.2,
+        change: 1.1,
+        changePct: 0.25,
+        asOfTimestamp: Date.now() - 30000,
+        isRealtime: true,
+        session: "REGULAR",
+        source: "cache",
+      });
+      const fetchFn = createFetchSequence([createResponse({ ok: false, status: 503, json: {} })]);
+      const quote = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, quote);
       const indicator = getMarketIndicatorData(stock);
       assert.strictEqual(stock.quoteSession, "REGULAR");
       assert.strictEqual(indicator.marketStatus, "Open");
