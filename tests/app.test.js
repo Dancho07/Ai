@@ -21,6 +21,7 @@ const {
   updateStockWithQuote,
   getStockEntry,
   calculateAtrLike,
+  getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
   formatTimestamp,
@@ -403,6 +404,17 @@ const tests = [
         atrPercent: 1.5,
       });
       assert.ok(reasons.length >= 3 && reasons.length <= 5);
+    },
+  },
+  {
+    name: "maps confidence score to label thresholds",
+    fn: async () => {
+      assert.strictEqual(getConfidenceLabel(0), "Low");
+      assert.strictEqual(getConfidenceLabel(39), "Low");
+      assert.strictEqual(getConfidenceLabel(40), "Medium");
+      assert.strictEqual(getConfidenceLabel(69), "Medium");
+      assert.strictEqual(getConfidenceLabel(70), "High");
+      assert.strictEqual(getConfidenceLabel(100), "High");
     },
   },
   {

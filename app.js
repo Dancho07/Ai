@@ -14,13 +14,16 @@ const autoRunToggle = isBrowser ? document.getElementById("auto-run-toggle") : n
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
 const resultConfidence = isBrowser ? document.getElementById("result-confidence") : null;
+const resultConfidenceBadge = isBrowser ? document.getElementById("result-confidence-badge") : null;
+const resultConfidenceScore = isBrowser ? document.getElementById("result-confidence-score") : null;
+const resultConfidenceCaution = isBrowser ? document.getElementById("result-confidence-caution") : null;
 const resultShares = isBrowser ? document.getElementById("result-shares") : null;
 const resultLivePrice = isBrowser ? document.getElementById("result-live-price") : null;
 const resultPrice = isBrowser ? document.getElementById("result-price") : null;
 const resultThesis = isBrowser ? document.getElementById("result-thesis") : null;
 const resultGenerated = isBrowser ? document.getElementById("result-generated") : null;
 const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer") : null;
-const resultWhy = isBrowser ? document.getElementById("result-why") : null;
+const resultReasoning = isBrowser ? document.getElementById("result-reasoning") : null;
 const planEntry = isBrowser ? document.getElementById("plan-entry") : null;
 const planEntryMeta = isBrowser ? document.getElementById("plan-entry-meta") : null;
 const planStopLoss = isBrowser ? document.getElementById("plan-stop-loss") : null;
@@ -61,12 +64,6 @@ const FORM_STATE_KEY = "trade_form_state_v1";
 const ENTRY_RANGE_PCT = 0.003;
 const ATR_LOOKBACK = 30;
 const SWING_LOOKBACK = 10;
-
-const confidenceLabels = {
-  buy: "medium",
-  sell: "medium",
-  hold: "low",
-};
 
 const marketWatchlist = [
   { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
@@ -835,6 +832,139 @@ function buildSignalReasons({
   return trimmed;
 }
 
+function getConfidenceLabel(score) {
+  if (score >= 70) {
+    return "High";
+  }
+  if (score >= 40) {
+    return "Medium";
+  }
+  return "Low";
+}
+
+function calculateMomentumDirection(changes) {
+  const valid = changes.filter((value) => typeof value === "number");
+  if (!valid.length) {
+    return 0;
+  }
+  const average = valid.reduce((sum, value) => sum + value, 0) / valid.length;
+  if (Math.abs(average) < 0.15) {
+    return 0;
+  }
+  return average > 0 ? 1 : -1;
+}
+
+function getVolatilityRegime(atrPercent) {
+  if (atrPercent == null) {
+    return { label: "Unknown", score: 12, caution: "Volatility data limited: manage risk conservatively." };
+  }
+  if (atrPercent <= 2) {
+    return {
+      label: "Low",
+      score: 25,
+      caution: "Low volatility: avoid overly tight stops and confirm the move.",
+    };
+  }
+  if (atrPercent <= 4) {
+    return {
+      label: "Moderate",
+      score: 18,
+      caution: "Moderate volatility: keep sizing balanced and stops at planned levels.",
+    };
+  }
+  if (atrPercent <= 6) {
+    return {
+      label: "High",
+      score: 10,
+      caution: "High volatility: widen stop or reduce position size.",
+    };
+  }
+  return {
+    label: "Very High",
+    score: 5,
+    caution: "Very high volatility: reduce size and wait for calmer price action.",
+  };
+}
+
+function calculateSignalConfidence({
+  action,
+  recent,
+  average,
+  dailyChange,
+  monthlyChange,
+  yearlyChange,
+  atrPercent,
+  prices,
+}) {
+  if (recent == null || average == null) {
+    return {
+      score: 25,
+      label: "Low",
+      reasons: [
+        "Price history is incomplete, limiting signal strength.",
+        "Trend alignment cannot be fully confirmed.",
+        "Volatility regime is unclear, so confidence stays low.",
+      ],
+      caution: "Limited data: keep size small until fresh history loads.",
+    };
+  }
+
+  const diffPct = ((recent - average) / average) * 100;
+  const trendAligned =
+    action === "buy"
+      ? diffPct <= -0.7
+      : action === "sell"
+        ? diffPct >= 0.7
+        : Math.abs(diffPct) < 0.7;
+  const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange, yearlyChange]);
+  const momentumAligned =
+    action === "buy"
+      ? momentumDirection <= 0
+      : action === "sell"
+        ? momentumDirection >= 0
+        : momentumDirection === 0;
+  const volatilityAgreement = atrPercent != null ? atrPercent <= 3.5 : false;
+  const alignmentScore =
+    ((trendAligned ? 1 : 0) + (momentumAligned ? 1 : 0) + (volatilityAgreement ? 1 : 0)) * (40 / 3);
+
+  const baseStrength = Math.min(Math.abs(diffPct) / 5, 1);
+  const swingLevels = getSwingLevels(prices ?? []);
+  let breakoutBoost = 0;
+  if (swingLevels.low != null && swingLevels.high != null) {
+    if (action === "buy" && recent <= swingLevels.low * 1.01) {
+      breakoutBoost = 0.2;
+    }
+    if (action === "sell" && recent >= swingLevels.high * 0.99) {
+      breakoutBoost = 0.2;
+    }
+  }
+  const strengthScore = (baseStrength * 0.8 + breakoutBoost) * 35;
+
+  const volatility = getVolatilityRegime(atrPercent);
+  const totalScore = Math.round(Math.min(100, alignmentScore + strengthScore + volatility.score));
+  const label = getConfidenceLabel(totalScore);
+
+  const reasons = [
+    `Trend alignment: price is ${Math.abs(diffPct).toFixed(2)}% ${diffPct >= 0 ? "above" : "below"} the 10-day average.`,
+    `Momentum bias: ${momentumDirection === 0 ? "mixed" : momentumDirection > 0 ? "upward" : "downward"} recent moves.`,
+    `Signal strength: ${Math.abs(diffPct).toFixed(2)}% from the short-term average.`,
+    `Volatility regime: ${volatility.label.toLowerCase()} (${atrPercent != null ? `${atrPercent.toFixed(2)}%` : "n/a"}).`,
+  ];
+
+  const unique = [...new Set(reasons)];
+  const trimmed = unique.slice(0, 5);
+  while (trimmed.length < 3) {
+    trimmed.push("Multiple indicators are blended to confirm the signal.");
+  }
+
+  return {
+    score: totalScore,
+    label,
+    reasons: trimmed,
+    caution: volatility.caution,
+  };
+}
+
 function calculateTradePlan({
   action,
   entryPrice,
@@ -945,12 +1075,25 @@ function analyzeTrade({ symbol, cash, risk }) {
   ];
 
   if (!recent) {
+    const confidence = calculateSignalConfidence({
+      action: "hold",
+      recent: null,
+      average: null,
+      dailyChange: marketEntry?.dailyChange ?? null,
+      monthlyChange: marketEntry?.monthlyChange ?? null,
+      yearlyChange: marketEntry?.yearlyChange ?? null,
+      atrPercent: null,
+      prices,
+    });
     return {
       symbol,
       action: "hold",
       shares: 0,
       estimatedPrice: null,
-      confidence: confidenceLabels.hold,
+      confidenceLabel: confidence.label,
+      confidenceScore: confidence.score,
+      confidenceReasons: confidence.reasons,
+      confidenceCaution: confidence.caution,
       thesis: [
         "Live pricing data is unavailable for this symbol.",
         "Signals are paused until a fresh quote is retrieved.",
@@ -999,6 +1142,16 @@ function analyzeTrade({ symbol, cash, risk }) {
 
   const atrLike = calculateAtrLike(prices);
   const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
+  const confidence = calculateSignalConfidence({
+    action,
+    recent,
+    average,
+    dailyChange: marketEntry?.dailyChange ?? null,
+    monthlyChange: marketEntry?.monthlyChange ?? null,
+    yearlyChange: marketEntry?.yearlyChange ?? null,
+    atrPercent,
+    prices,
+  });
   const tradePlan = calculateTradePlan({
     action,
     entryPrice: recent,
@@ -1015,7 +1168,10 @@ function analyzeTrade({ symbol, cash, risk }) {
     action,
     shares,
     estimatedPrice: recent,
-    confidence: confidenceLabels[action],
+    confidenceLabel: confidence.label,
+    confidenceScore: confidence.score,
+    confidenceReasons: confidence.reasons,
+    confidenceCaution: confidence.caution,
     thesis,
     tradePlan,
     signalReasons: buildSignalReasons({
@@ -1122,15 +1278,25 @@ function renderResult(result) {
   resultSymbol.textContent = result.symbol;
   resultAction.textContent = result.action.toUpperCase();
   resultAction.className = `signal ${result.action}`;
-  resultConfidence.textContent = `Confidence: ${result.confidence}`;
+  resultConfidence.textContent = `AI Confidence: ${result.confidenceLabel} (${result.confidenceScore}%)`;
+  if (resultConfidenceBadge) {
+    resultConfidenceBadge.textContent = result.confidenceLabel;
+    resultConfidenceBadge.className = `badge confidence-badge ${result.confidenceLabel.toLowerCase()}`;
+  }
+  if (resultConfidenceScore) {
+    resultConfidenceScore.textContent = `${result.confidenceScore}%`;
+  }
   resultShares.textContent = `${result.shares} shares`;
   updateResultLivePriceDisplay(result.symbol);
   resultPrice.textContent = result.estimatedPrice
     ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
     : "Estimated price: Not available";
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
-  if (resultWhy) {
-    resultWhy.innerHTML = result.signalReasons.map((line) => `<li>${line}</li>`).join("");
+  if (resultReasoning) {
+    resultReasoning.innerHTML = result.confidenceReasons.map((line) => `<li>${line}</li>`).join("");
+  }
+  if (resultConfidenceCaution) {
+    resultConfidenceCaution.textContent = result.confidenceCaution;
   }
   if (planEntry) {
     planEntry.textContent = result.tradePlan.entryDisplay;
@@ -2218,6 +2384,8 @@ if (typeof module !== "undefined" && module.exports) {
     updateStockWithQuote,
     getStockEntry,
     calculateAtrLike,
+    calculateSignalConfidence,
+    getConfidenceLabel,
     calculateTradePlan,
     buildSignalReasons,
     formatTimestamp,
