@@ -19,6 +19,8 @@ const filterCap = document.getElementById("filter-cap");
 const filterSignal = document.getElementById("filter-signal");
 const filterMin = document.getElementById("filter-min");
 const filterMax = document.getElementById("filter-max");
+const filterMonth = document.getElementById("filter-month");
+const filterYear = document.getElementById("filter-year");
 
 const riskLimits = {
   low: 0.2,
@@ -55,16 +57,30 @@ const marketWatchlist = [
   { symbol: "UPST", name: "Upstart", sector: "Finance", cap: "Small" },
 ];
 
-const marketState = marketWatchlist.map((stock) => {
-  const seed = symbolSeed(stock.symbol);
-  const history = generatePrices(seed);
-  return {
-    ...stock,
-    history,
-    lastPrice: history[history.length - 1],
-    previousClose: history[history.length - 2],
-  };
+const marketState = marketWatchlist.map((stock) => ({
+  ...stock,
+  history: [],
+  lastPrice: null,
+  previousClose: null,
+  monthlyChange: null,
+  yearlyChange: null,
+  lastUpdated: null,
+}));
+const extraSymbolData = new Map();
+
+const quoteFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 2,
 });
+const percentFormatter = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 2,
+});
+
+const YAHOO_QUOTE_URL = (symbols) =>
+  `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
+const YAHOO_CHART_URL = (symbol, range) =>
+  `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=1d&includePrePost=false`;
 
 function symbolSeed(symbol) {
   let hash = 0;
@@ -91,6 +107,9 @@ function generatePrices(seed) {
 }
 
 function calculateSignal(prices) {
+  if (!prices || prices.length < 10) {
+    return "hold";
+  }
   const recent = prices[prices.length - 1];
   const average = prices.slice(-10).reduce((total, value) => total + value, 0) / 10;
   if (recent > average * 1.03) {
@@ -103,8 +122,8 @@ function calculateSignal(prices) {
 }
 
 function analyzeTrade({ symbol, cash, risk }) {
-  const seed = symbolSeed(symbol);
-  const prices = generatePrices(seed);
+  const marketEntry = getStockEntry(symbol);
+  const prices = marketEntry?.history?.length ? marketEntry.history : generatePrices(symbolSeed(symbol));
   const recent = prices[prices.length - 1];
   const average = prices.slice(-10).reduce((a, b) => a + b, 0) / 10;
   const riskLimit = riskLimits[risk];
@@ -148,8 +167,12 @@ function analyzeTrade({ symbol, cash, risk }) {
 }
 
 function getLivePriceForSymbol(symbol) {
-  const match = marketState.find((stock) => stock.symbol === symbol);
+  const match = getStockEntry(symbol);
   return match ? match.lastPrice : null;
+}
+
+function getStockEntry(symbol) {
+  return marketState.find((stock) => stock.symbol === symbol) ?? extraSymbolData.get(symbol);
 }
 
 function showErrors(messages) {
@@ -173,25 +196,102 @@ function renderResult(result) {
   resultShares.textContent = `${result.shares} shares`;
   const livePrice = getLivePriceForSymbol(result.symbol);
   resultLivePrice.textContent = livePrice
-    ? `Live price: $${livePrice.toFixed(2)}`
+    ? `Live price: ${quoteFormatter.format(livePrice)}`
     : "Live price: Not available";
-  resultPrice.textContent = `Estimated price: $${result.estimatedPrice.toFixed(2)}`;
+  resultPrice.textContent = `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`;
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
   resultCard.classList.remove("hidden");
 }
 
-function updateMarketPrices() {
-  marketState.forEach((stock) => {
-    const drift = (symbolSeed(stock.symbol) % 5) * 0.01;
-    const volatility = 0.6 + (symbolSeed(stock.symbol) % 7) * 0.1;
-    const swing = (Math.random() - 0.5) * volatility + drift;
-    const nextPrice = Math.max(2, stock.lastPrice + swing);
-    stock.history = [...stock.history.slice(1), Number(nextPrice.toFixed(2))];
-    stock.previousClose = stock.lastPrice;
-    stock.lastPrice = Number(nextPrice.toFixed(2));
+async function fetchJson(url) {
+  const response = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+function calculatePercentChange(latest, previous) {
+  if (!latest || !previous) {
+    return null;
+  }
+  return ((latest - previous) / previous) * 100;
+}
+
+function extractCloseSeries(chart) {
+  const closes = chart?.indicators?.quote?.[0]?.close ?? [];
+  return closes.filter((value) => typeof value === "number");
+}
+
+function applyChartMetrics(stock, closeSeries) {
+  if (!closeSeries.length) {
+    return;
+  }
+  const latest = closeSeries[closeSeries.length - 1];
+  const monthIndex = Math.max(closeSeries.length - 22, 0);
+  const monthClose = closeSeries[monthIndex];
+  const yearClose = closeSeries[0];
+  stock.history = closeSeries;
+  stock.monthlyChange = calculatePercentChange(latest, monthClose);
+  stock.yearlyChange = calculatePercentChange(latest, yearClose);
+}
+
+async function loadInitialMarketData() {
+  const symbols = marketState.map((stock) => stock.symbol);
+  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols));
+  const quoteResults = quoteData?.quoteResponse?.result ?? [];
+
+  quoteResults.forEach((quote) => {
+    const stock = marketState.find((entry) => entry.symbol === quote.symbol);
+    if (!stock) {
+      return;
+    }
+    stock.lastPrice = quote.regularMarketPrice ?? null;
+    stock.previousClose = quote.regularMarketPreviousClose ?? null;
+    stock.lastUpdated = new Date().toLocaleTimeString();
   });
+
+  await Promise.all(
+    marketState.map(async (stock) => {
+      try {
+        const chartData = await fetchJson(YAHOO_CHART_URL(stock.symbol, "1y"));
+        const chart = chartData?.chart?.result?.[0];
+        const closeSeries = extractCloseSeries(chart);
+        applyChartMetrics(stock, closeSeries);
+      } catch (error) {
+        console.error(error);
+      }
+    }),
+  );
+}
+
+async function loadSymbolSnapshot(symbol) {
+  const [quoteData, chartData] = await Promise.all([
+    fetchJson(YAHOO_QUOTE_URL([symbol])),
+    fetchJson(YAHOO_CHART_URL(symbol, "1y")),
+  ]);
+  const quote = quoteData?.quoteResponse?.result?.[0];
+  const chart = chartData?.chart?.result?.[0];
+  const closeSeries = extractCloseSeries(chart);
+  const entry = extraSymbolData.get(symbol) ?? {
+    symbol,
+    name: quote?.shortName ?? symbol,
+    sector: "Unknown",
+    cap: "—",
+    history: [],
+    lastPrice: null,
+    previousClose: null,
+    monthlyChange: null,
+    yearlyChange: null,
+    lastUpdated: null,
+  };
+  entry.lastPrice = quote?.regularMarketPrice ?? entry.lastPrice;
+  entry.previousClose = quote?.regularMarketPreviousClose ?? entry.previousClose;
+  entry.lastUpdated = new Date().toLocaleTimeString();
+  applyChartMetrics(entry, closeSeries);
+  extraSymbolData.set(symbol, entry);
 }
 
 function matchesFilters(stock) {
@@ -201,6 +301,8 @@ function matchesFilters(stock) {
   const signalValue = filterSignal.value;
   const minValue = Number(filterMin.value);
   const maxValue = Number(filterMax.value);
+  const minMonthValue = Number(filterMonth.value);
+  const minYearValue = Number(filterYear.value);
   const signal = calculateSignal(stock.history);
 
   if (searchValue && !stock.symbol.includes(searchValue)) {
@@ -221,6 +323,20 @@ function matchesFilters(stock) {
   if (!Number.isNaN(maxValue) && maxValue > 0 && stock.lastPrice > maxValue) {
     return false;
   }
+  if (
+    !Number.isNaN(minMonthValue) &&
+    minMonthValue !== 0 &&
+    (stock.monthlyChange === null || stock.monthlyChange < minMonthValue)
+  ) {
+    return false;
+  }
+  if (
+    !Number.isNaN(minYearValue) &&
+    minYearValue !== 0 &&
+    (stock.yearlyChange === null || stock.yearlyChange < minYearValue)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -229,51 +345,76 @@ function renderMarketTable() {
     .filter(matchesFilters)
     .map((stock) => {
       const signal = calculateSignal(stock.history);
-      const change = stock.lastPrice - stock.previousClose;
-      const changePercent = stock.previousClose
-        ? (change / stock.previousClose) * 100
-        : 0;
-      const changeClass = change >= 0 ? "positive" : "negative";
+      const change =
+        stock.lastPrice && stock.previousClose ? stock.lastPrice - stock.previousClose : 0;
+      const changePercent =
+        stock.lastPrice && stock.previousClose
+          ? (change / stock.previousClose) * 100
+          : null;
+      const changeClass = changePercent === null ? "" : change >= 0 ? "positive" : "negative";
+      const monthClass =
+        stock.monthlyChange === null ? "" : stock.monthlyChange >= 0 ? "positive" : "negative";
+      const yearClass =
+        stock.yearlyChange === null ? "" : stock.yearlyChange >= 0 ? "positive" : "negative";
       return `<tr>
         <td>${stock.symbol}</td>
         <td>${stock.name}</td>
         <td>${stock.sector}</td>
         <td>${stock.cap}</td>
         <td><span class="signal-pill ${signal}">${signal}</span></td>
-        <td>$${stock.lastPrice.toFixed(2)}</td>
-        <td class="price-change ${changeClass}">${change >= 0 ? "+" : ""}${change.toFixed(
-          2,
-        )} (${change >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)</td>
+        <td>${stock.lastPrice ? quoteFormatter.format(stock.lastPrice) : "—"}</td>
+        <td class="price-change ${changeClass}">${
+          changePercent !== null
+            ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
+                changePercent,
+              )}%)`
+            : "—"
+        }</td>
+        <td class="price-change ${monthClass}">${
+          stock.monthlyChange === null
+            ? "—"
+            : `${stock.monthlyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.monthlyChange)}%`
+        }</td>
+        <td class="price-change ${yearClass}">${
+          stock.yearlyChange === null
+            ? "—"
+            : `${stock.yearlyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.yearlyChange)}%`
+        }</td>
       </tr>`;
     })
     .join("");
 
-  marketBody.innerHTML = rows || `<tr><td colspan="7">No stocks match these filters.</td></tr>`;
+  marketBody.innerHTML = rows || `<tr><td colspan="9">No stocks match these filters.</td></tr>`;
 }
 
-function refreshMarketBoard() {
-  updateMarketPrices();
+async function refreshMarketBoard() {
+  const symbols = marketState.map((stock) => stock.symbol);
+  try {
+    const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols));
+    const quoteResults = quoteData?.quoteResponse?.result ?? [];
+    quoteResults.forEach((quote) => {
+      const stock = marketState.find((entry) => entry.symbol === quote.symbol);
+      if (!stock) {
+        return;
+      }
+      stock.previousClose = stock.lastPrice ?? quote.regularMarketPreviousClose ?? null;
+      stock.lastPrice = quote.regularMarketPrice ?? stock.lastPrice;
+      stock.lastUpdated = new Date().toLocaleTimeString();
+    });
+  } catch (error) {
+    console.error(error);
+  }
+
   renderMarketTable();
   if (!resultCard.classList.contains("hidden")) {
     const livePrice = getLivePriceForSymbol(resultSymbol.textContent);
     resultLivePrice.textContent = livePrice
-      ? `Live price: $${livePrice.toFixed(2)}`
+      ? `Live price: ${quoteFormatter.format(livePrice)}`
       : "Live price: Not available";
   }
 }
 
-[
-  filterSearch,
-  filterSector,
-  filterCap,
-  filterSignal,
-  filterMin,
-  filterMax,
-].forEach((input) => {
-  input.addEventListener("input", renderMarketTable);
-});
-
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(form);
   const symbol = formData.get("symbol").toString().trim().toUpperCase();
@@ -297,10 +438,36 @@ form.addEventListener("submit", (event) => {
     return;
   }
 
-  showErrors([]);
+  try {
+    await loadSymbolSnapshot(symbol);
+    showErrors([]);
+  } catch (error) {
+    console.error(error);
+    showErrors([
+      "Live market data is temporarily unavailable. Showing the latest cached estimate instead.",
+    ]);
+  }
   const result = analyzeTrade({ symbol, cash: cashValue, risk });
   renderResult(result);
 });
 
+[
+  filterSearch,
+  filterSector,
+  filterCap,
+  filterSignal,
+  filterMin,
+  filterMax,
+  filterMonth,
+  filterYear,
+].forEach((input) => {
+  input.addEventListener("input", renderMarketTable);
+});
+
 renderMarketTable();
-setInterval(refreshMarketBoard, 3000);
+loadInitialMarketData()
+  .then(renderMarketTable)
+  .catch((error) => {
+    console.error(error);
+  });
+setInterval(refreshMarketBoard, 60000);

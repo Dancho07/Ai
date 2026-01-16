@@ -13,14 +13,14 @@
           <p class="eyebrow">AI Automated Trader</p>
           <h1>Stock Signal Studio</h1>
           <p class="subtitle">
-            Generate a simulated trade recommendation powered by a lightweight AI-style
-            strategy engine.
+            Generate a trade recommendation powered by a lightweight AI-style strategy
+            engine using live market data.
           </p>
         </div>
         <div class="hero-card">
           <h2>How it works</h2>
           <ul>
-            <li>Analyzes a 30-day synthetic price history.</li>
+            <li>Analyzes a recent 30-day price history.</li>
             <li>Matches signals to your risk tolerance.</li>
             <li>Summarizes buy/sell/hold guidance.</li>
           </ul>
@@ -57,13 +57,13 @@
             <p class="eyebrow">Live prices</p>
             <h2>Market pulse board</h2>
             <p class="subtitle">
-              Track simulated live prices across the watchlist and refine results with
-              detailed filters.
+              Track live prices across the watchlist and refine results with detailed
+              filters.
             </p>
           </div>
           <div class="refresh-pill">
             <span class="dot"></span>
-            Updating every 3s
+            Updating every 60s
           </div>
         </div>
 
@@ -109,6 +109,14 @@
             Max price
             <input type="number" id="filter-max" min="0" step="0.01" placeholder="500" />
           </label>
+          <label>
+            Min 1M change %
+            <input type="number" id="filter-month" step="0.1" placeholder="0" />
+          </label>
+          <label>
+            Min 1Y change %
+            <input type="number" id="filter-year" step="0.1" placeholder="0" />
+          </label>
         </div>
 
         <div class="market-table">
@@ -122,6 +130,8 @@
                 <th>Signal</th>
                 <th>Live price</th>
                 <th>Change</th>
+                <th>1M change</th>
+                <th>1Y change</th>
               </tr>
             </thead>
             <tbody id="market-body"></tbody>
