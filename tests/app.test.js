@@ -3,9 +3,12 @@ const {
   MarketDataError,
   fetchJsonWithRetry,
   isValidSymbol,
+  getQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
   extraSymbolData,
+  resetQuoteCache,
+  setLastKnownQuote,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -96,19 +99,15 @@ const tests = [
   {
     name: "falls back to cached data on provider outage",
     fn: async () => {
-      resetSymbolCache();
-      extraSymbolData.set("AAPL", {
-        symbol: "AAPL",
-        name: "Apple",
-        history: [150, 152, 151, 153, 154, 156, 155, 157, 158, 159],
-        lastPrice: 159,
-        previousClose: 158,
-        dailyChange: 0.63,
-        monthlyChange: null,
-        yearlyChange: null,
-        lastUpdated: "10:00 AM",
-        lastUpdatedAt: Date.now() - 60000,
-        dataSource: "live",
+      resetQuoteCache();
+      setLastKnownQuote("AAPL", {
+        price: 159,
+        change: 1,
+        changePct: 0.63,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
       });
 
       const fetchFn = createFetchSequence([
@@ -118,32 +117,42 @@ const tests = [
         createResponse({ ok: false, status: 503, json: {} }),
       ]);
 
-      const result = await loadSymbolSnapshot("AAPL", { fetchFn });
-      assert.strictEqual(result.status, "cache");
+      const result = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(result.source, "cache");
     },
   },
   {
     name: "throws invalid symbol error when provider returns no data",
     fn: async () => {
-      resetSymbolCache();
+      resetQuoteCache();
       const fetchFn = createFetchSequence([
         createResponse({ ok: true, status: 200, json: { quoteResponse: { result: [] } } }),
       ]);
-      const fetchFnChart = createFetchSequence([
-        createResponse({ ok: true, status: 200, json: { chart: { result: [] } } }),
-      ]);
-
-      const combinedFetch = async (url, options) => {
-        if (url.includes("quote")) {
-          return fetchFn(url, options);
-        }
-        return fetchFnChart(url, options);
-      };
 
       await assert.rejects(
-        () => loadSymbolSnapshot("ZZZZ", { fetchFn: combinedFetch }),
+        () => getQuote("ZZZZ", { fetchFn, maxAttempts: 1 }),
         (error) => error instanceof MarketDataError && error.type === "invalid_symbol",
       );
+    },
+  },
+  {
+    name: "returns closed session quote when market is closed",
+    fn: async () => {
+      const quote = await getQuote("AAPL", {
+        allowFetch: false,
+        prefetchedQuote: {
+          symbol: "AAPL",
+          regularMarketState: "CLOSED",
+          regularMarketPrice: 180,
+          regularMarketPreviousClose: 178,
+          regularMarketChange: 2,
+          regularMarketChangePercent: 1.12,
+          regularMarketTime: 1700000000,
+          shortName: "Apple",
+        },
+      });
+      assert.strictEqual(quote.session, "CLOSED");
+      assert.strictEqual(quote.isRealtime, false);
     },
   },
 ];

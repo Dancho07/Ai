@@ -206,6 +206,60 @@ tbody tr:hover {
   background: #fafbff;
 }
 
+.price-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.price-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.price-meta {
+  font-size: 0.8rem;
+  color: #6c728d;
+}
+
+.session-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.session-badge.realtime {
+  background: #e7f6ed;
+  color: #1d7a4a;
+}
+
+.session-badge.afterhours {
+  background: #eef1ff;
+  color: #3945a3;
+}
+
+.session-badge.delayed {
+  background: #fff6db;
+  color: #786307;
+}
+
+.session-badge.cached {
+  background: #fdecec;
+  color: #b54141;
+}
+
+.session-badge.closed {
+  background: #f1f2f9;
+  color: #5d627c;
+}
+
 .signal-pill {
   padding: 6px 12px;
   border-radius: 999px;

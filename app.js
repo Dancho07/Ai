@@ -69,6 +69,9 @@ const marketState = marketWatchlist.map((stock) => ({
   yearlyChange: null,
   lastUpdated: null,
   lastUpdatedAt: null,
+  quoteAsOf: null,
+  quoteSession: null,
+  isRealtime: false,
   dataSource: "live",
 }));
 const extraSymbolData = new Map();
@@ -88,11 +91,19 @@ const REQUEST_TIMEOUT_MS = 8000;
 const BACKOFF_BASE_MS = 500;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
+const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
+const MARKET_OPEN_TTL_MS = 30 * 1000;
+const MARKET_CLOSED_TTL_MS = 5 * 60 * 1000;
+const HISTORICAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
 const YAHOO_CHART_URL = (symbol, range) =>
   `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=1d&includePrePost=false`;
+
+const quoteCache = new Map();
+const lastKnownQuotes = new Map();
+const historicalCache = new Map();
 
 class MarketDataError extends Error {
   constructor(type, message, details = {}) {
@@ -133,6 +144,86 @@ function formatTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString();
 }
 
+function formatAsOf(timestamp) {
+  if (!timestamp) {
+    return "unknown time";
+  }
+  return new Date(timestamp).toLocaleString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function getCacheTtl(session) {
+  if (session === "REGULAR" || session === "PRE" || session === "POST") {
+    return MARKET_OPEN_TTL_MS;
+  }
+  return MARKET_CLOSED_TTL_MS;
+}
+
+function loadPersistentQuoteCache() {
+  if (!isBrowser || typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    const raw = localStorage.getItem(LAST_KNOWN_CACHE_KEY);
+    if (!raw) {
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    Object.entries(parsed).forEach(([symbol, entry]) => {
+      if (entry?.quote?.price !== null) {
+        lastKnownQuotes.set(symbol, entry);
+      }
+    });
+  } catch (error) {
+    console.warn("Unable to read cached quotes.", error);
+  }
+}
+
+function persistLastKnownQuotes() {
+  if (!isBrowser || typeof localStorage === "undefined") {
+    return;
+  }
+  const payload = {};
+  lastKnownQuotes.forEach((value, symbol) => {
+    payload[symbol] = value;
+  });
+  try {
+    localStorage.setItem(LAST_KNOWN_CACHE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Unable to persist cached quotes.", error);
+  }
+}
+
+function setLastKnownQuote(symbol, quote) {
+  lastKnownQuotes.set(symbol, { quote, savedAt: Date.now() });
+  persistLastKnownQuotes();
+}
+
+function resetQuoteCache() {
+  quoteCache.clear();
+  lastKnownQuotes.clear();
+  historicalCache.clear();
+  if (isBrowser && typeof localStorage !== "undefined") {
+    localStorage.removeItem(LAST_KNOWN_CACHE_KEY);
+  }
+}
+
+function getCachedQuote(symbol) {
+  const entry = quoteCache.get(symbol);
+  if (entry && entry.expiresAt > Date.now()) {
+    return entry.quote;
+  }
+  return null;
+}
+
+function getLastKnownQuote(symbol) {
+  const entry = lastKnownQuotes.get(symbol);
+  return entry?.quote ?? null;
+}
+
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -141,12 +232,6 @@ function parseProviderError(payload) {
   const chartError = payload?.chart?.error;
   const quoteError = payload?.quoteResponse?.error;
   return chartError || quoteError || null;
-}
-
-function isInvalidSymbolPayload(quoteData, chartData) {
-  const quoteResult = quoteData?.quoteResponse?.result ?? [];
-  const chartResult = chartData?.chart?.result ?? [];
-  return quoteResult.length === 0 && chartResult.length === 0;
 }
 
 async function fetchWithTimeout(fetchFn, url, timeoutMs) {
@@ -213,6 +298,107 @@ async function fetchJsonWithRetry(
     }
   }
   throw new MarketDataError("unavailable", "Failed to fetch market data.");
+}
+
+function resolveMarketSession(quote) {
+  const state = quote?.regularMarketState;
+  if (["REGULAR", "PRE", "POST", "CLOSED"].includes(state)) {
+    return state;
+  }
+  if (quote?.preMarketPrice != null) {
+    return "PRE";
+  }
+  if (quote?.postMarketPrice != null) {
+    return "POST";
+  }
+  if (quote?.regularMarketPrice != null) {
+    return "DELAYED";
+  }
+  return "CLOSED";
+}
+
+function buildQuoteFromYahoo(quote) {
+  if (!quote) {
+    return null;
+  }
+  let session = resolveMarketSession(quote);
+  const selectFields = (sessionType) => {
+    if (sessionType === "PRE") {
+      return {
+        price: quote.preMarketPrice,
+        change: quote.preMarketChange,
+        changePct: quote.preMarketChangePercent,
+        timestamp: quote.preMarketTime,
+      };
+    }
+    if (sessionType === "POST") {
+      return {
+        price: quote.postMarketPrice,
+        change: quote.postMarketChange,
+        changePct: quote.postMarketChangePercent,
+        timestamp: quote.postMarketTime,
+      };
+    }
+    return {
+      price: quote.regularMarketPrice,
+      change: quote.regularMarketChange,
+      changePct: quote.regularMarketChangePercent,
+      timestamp: quote.regularMarketTime,
+    };
+  };
+
+  let fields = selectFields(session);
+  if (fields.price == null && session !== "REGULAR") {
+    session = "CLOSED";
+    fields = selectFields("CLOSED");
+  }
+  if (fields.price == null) {
+    return null;
+  }
+
+  const previousClose = quote.regularMarketPreviousClose ?? null;
+  const computedChange =
+    fields.change != null
+      ? fields.change
+      : previousClose != null
+        ? fields.price - previousClose
+        : null;
+  const computedChangePct =
+    fields.changePct != null
+      ? fields.changePct
+      : previousClose != null && computedChange != null
+        ? (computedChange / previousClose) * 100
+        : null;
+
+  return {
+    price: fields.price,
+    change: computedChange,
+    changePct: computedChangePct,
+    asOfTimestamp: fields.timestamp ? fields.timestamp * 1000 : null,
+    isRealtime: session === "REGULAR" || session === "PRE" || session === "POST",
+    session,
+    previousClose,
+    name: quote.shortName ?? quote.longName ?? null,
+  };
+}
+
+function getSessionBadge(quote, source) {
+  if (source === "cache") {
+    return { label: "CACHED", className: "cached", tooltip: "Cached last-known quote." };
+  }
+  if (source === "historical") {
+    return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from historical data." };
+  }
+  if (quote.session === "REGULAR") {
+    return { label: "REALTIME", className: "realtime", tooltip: "Regular trading session." };
+  }
+  if (quote.session === "PRE" || quote.session === "POST") {
+    return { label: "AFTER HOURS", className: "afterhours", tooltip: "Extended-hours session." };
+  }
+  if (quote.session === "DELAYED") {
+    return { label: "DELAYED", className: "delayed", tooltip: "Delayed quote." };
+  }
+  return { label: "MARKET CLOSED", className: "closed", tooltip: "Market closed quote." };
 }
 
 function calculateSignal(prices) {
@@ -352,10 +538,7 @@ function renderResult(result) {
   resultAction.className = `signal ${result.action}`;
   resultConfidence.textContent = `Confidence: ${result.confidence}`;
   resultShares.textContent = `${result.shares} shares`;
-  const livePrice = getLivePriceForSymbol(result.symbol);
-  resultLivePrice.textContent = livePrice
-    ? `Live price: ${quoteFormatter.format(livePrice)}`
-    : "Live price: Not available";
+  updateResultLivePriceDisplay(result.symbol);
   resultPrice.textContent = result.estimatedPrice
     ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
     : "Estimated price: Not available";
@@ -363,6 +546,26 @@ function renderResult(result) {
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
   resultCard.classList.remove("hidden");
+}
+
+function updateResultLivePriceDisplay(symbol) {
+  if (!resultLivePrice) {
+    return;
+  }
+  const marketEntry = getStockEntry(symbol);
+  const livePrice = marketEntry?.lastPrice ?? null;
+  const badge = livePrice
+    ? getSessionBadge(
+        { session: marketEntry?.quoteSession ?? "CLOSED" },
+        marketEntry?.dataSource ?? "cache",
+      )
+    : null;
+  const asOf = livePrice
+    ? `as of ${formatAsOf(marketEntry?.quoteAsOf || marketEntry?.lastUpdatedAt)}`
+    : "awaiting quote";
+  resultLivePrice.innerHTML = livePrice
+    ? `Live price: ${quoteFormatter.format(livePrice)} <span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span> <span class="price-meta">${asOf}</span>`
+    : "Live price: Not available";
 }
 
 async function fetchJson(url, options = {}) {
@@ -382,10 +585,20 @@ function calculatePercentChange(latest, previous) {
 
 function extractCloseSeries(chart) {
   const closes = chart?.indicators?.quote?.[0]?.close ?? [];
-  return closes.filter((value) => typeof value === "number");
+  const timestamps = chart?.timestamp ?? [];
+  const paired = closes
+    .map((value, index) => ({
+      value,
+      timestamp: timestamps[index] ? timestamps[index] * 1000 : null,
+    }))
+    .filter((entry) => typeof entry.value === "number");
+  return {
+    closes: paired.map((entry) => entry.value),
+    timestamps: paired.map((entry) => entry.timestamp),
+  };
 }
 
-function applyChartMetrics(stock, closeSeries) {
+function applyChartMetrics(stock, closeSeries, timestamps) {
   if (!closeSeries.length) {
     return;
   }
@@ -400,39 +613,217 @@ function applyChartMetrics(stock, closeSeries) {
       : null;
   stock.monthlyChange = calculatePercentChange(latest, monthClose);
   stock.yearlyChange = calculatePercentChange(latest, yearClose);
+  stock.lastHistoricalTimestamp = timestamps?.[timestamps.length - 1] ?? stock.lastHistoricalTimestamp;
+}
+
+function updateStockWithQuote(stock, quote) {
+  if (!quote) {
+    return;
+  }
+  if (quote.name) {
+    stock.name = quote.name;
+  }
+  stock.lastPrice = quote.price ?? stock.lastPrice;
+  if (quote.previousClose != null) {
+    stock.previousClose = quote.previousClose;
+  } else if (quote.change != null && quote.price != null) {
+    stock.previousClose = quote.price - quote.change;
+  }
+  if (quote.changePct != null && (quote.isRealtime || stock.dailyChange == null)) {
+    stock.dailyChange = quote.changePct;
+  }
+  stock.quoteAsOf = quote.asOfTimestamp ?? stock.quoteAsOf;
+  stock.quoteSession = quote.session ?? stock.quoteSession;
+  stock.isRealtime = quote.isRealtime ?? stock.isRealtime;
+  stock.lastUpdated = formatTime(stock.quoteAsOf);
+  stock.lastUpdatedAt = quote.asOfTimestamp ?? stock.lastUpdatedAt ?? Date.now();
+  stock.dataSource = quote.source ?? stock.dataSource;
+}
+
+function updateStockWithHistorical(stock, historyPayload) {
+  if (!historyPayload?.closes?.length) {
+    return;
+  }
+  applyChartMetrics(stock, historyPayload.closes, historyPayload.timestamps);
+  const latestClose = historyPayload.closes[historyPayload.closes.length - 1];
+  const previousClose =
+    historyPayload.closes.length >= 2 ? historyPayload.closes[historyPayload.closes.length - 2] : null;
+  if (!stock.lastPrice) {
+    stock.lastPrice = latestClose;
+  }
+  if (!stock.previousClose && previousClose != null) {
+    stock.previousClose = previousClose;
+  }
+  if (!stock.dailyChange && latestClose != null && previousClose != null) {
+    stock.dailyChange = calculatePercentChange(latestClose, previousClose);
+  }
+}
+
+function updateQuoteCache(symbol, quote) {
+  const ttl = getCacheTtl(quote.session);
+  quoteCache.set(symbol, { quote, expiresAt: Date.now() + ttl });
+}
+
+function cacheHistorical(symbol, payload) {
+  historicalCache.set(symbol, { payload, storedAt: Date.now() });
+}
+
+function getCachedHistorical(symbol) {
+  const entry = historicalCache.get(symbol);
+  if (entry && Date.now() - entry.storedAt < HISTORICAL_CACHE_TTL_MS) {
+    return entry.payload;
+  }
+  return null;
+}
+
+function isHistoricalStale(symbol) {
+  const entry = historicalCache.get(symbol);
+  return !entry || Date.now() - entry.storedAt >= HISTORICAL_CACHE_TTL_MS;
+}
+
+async function fetchYahooQuotes(symbols, options = {}) {
+  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
+    provider: PROVIDER,
+    symbol: symbols.join(","),
+    fetchFn: options.fetchFn,
+    maxAttempts: options.maxAttempts,
+    timeoutMs: options.timeoutMs,
+  });
+  return quoteData?.quoteResponse?.result ?? [];
+}
+
+async function fetchHistoricalSeries(symbol, options = {}) {
+  const cached = getCachedHistorical(symbol);
+  if (cached) {
+    return cached;
+  }
+  const chartData = await fetchJson(YAHOO_CHART_URL(symbol, "1y"), {
+    provider: PROVIDER,
+    symbol,
+    fetchFn: options.fetchFn,
+    maxAttempts: options.maxAttempts,
+    timeoutMs: options.timeoutMs,
+  });
+  const chart = chartData?.chart?.result?.[0];
+  const { closes, timestamps } = extractCloseSeries(chart);
+  const payload = { closes, timestamps };
+  cacheHistorical(symbol, payload);
+  return payload;
+}
+
+function deriveHistoricalQuote(closes, timestamps) {
+  if (!closes.length) {
+    return null;
+  }
+  const latest = closes[closes.length - 1];
+  const previous = closes.length >= 2 ? closes[closes.length - 2] : null;
+  const change = previous != null ? latest - previous : null;
+  const changePct = previous != null ? (change / previous) * 100 : null;
+  const asOfTimestamp = timestamps?.[timestamps.length - 1] ?? null;
+  return {
+    price: latest,
+    change,
+    changePct,
+    asOfTimestamp,
+    isRealtime: false,
+    session: "CLOSED",
+    previousClose: previous,
+  };
+}
+
+async function getQuote(symbol, options = {}) {
+  if (!isValidSymbol(symbol)) {
+    throw new MarketDataError("invalid_symbol", "Invalid symbol format.");
+  }
+  const cachedQuote = getCachedQuote(symbol);
+  if (cachedQuote && options.useCache !== false) {
+    return { ...cachedQuote, source: cachedQuote.source ?? "cache" };
+  }
+
+  let providerQuote = options.prefetchedQuote ?? null;
+  let providerError = null;
+  if (!providerQuote && options.allowFetch !== false) {
+    try {
+      const quotes = await fetchYahooQuotes([symbol], options);
+      providerQuote = quotes.find((entry) => entry.symbol === symbol) ?? null;
+    } catch (error) {
+      providerError = error;
+    }
+  }
+
+  if (!providerQuote && !providerError && options.allowFetch !== false) {
+    providerError = new MarketDataError("invalid_symbol", "No data returned for symbol.");
+  }
+
+  if (providerQuote) {
+    const builtQuote = buildQuoteFromYahoo(providerQuote);
+    if (builtQuote) {
+      const source =
+        builtQuote.session === "REGULAR"
+          ? "primary"
+          : builtQuote.session === "PRE" || builtQuote.session === "POST"
+            ? "extended"
+            : builtQuote.session === "DELAYED"
+              ? "delayed"
+              : "closed";
+      const fullQuote = { ...builtQuote, source };
+      updateQuoteCache(symbol, fullQuote);
+      setLastKnownQuote(symbol, fullQuote);
+      return fullQuote;
+    }
+  }
+
+  if (providerError instanceof MarketDataError && providerError.type === "invalid_symbol") {
+    throw providerError;
+  }
+
+  const lastKnown = getLastKnownQuote(symbol);
+  if (lastKnown) {
+    return { ...lastKnown, source: "cache" };
+  }
+
+  try {
+    const historical = await fetchHistoricalSeries(symbol, options);
+    const derived = deriveHistoricalQuote(historical.closes, historical.timestamps);
+    if (derived) {
+      const fullQuote = { ...derived, source: "historical" };
+      setLastKnownQuote(symbol, fullQuote);
+      return fullQuote;
+    }
+  } catch (error) {
+    if (error instanceof MarketDataError && error.type === "invalid_symbol") {
+      throw error;
+    }
+    providerError = providerError ?? error;
+  }
+
+  throw providerError ?? new MarketDataError("unavailable", "Quote unavailable.");
 }
 
 async function loadInitialMarketData() {
   const symbols = marketState.map((stock) => stock.symbol);
-  const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
-    provider: PROVIDER,
-    symbol: symbols.join(","),
-  });
-  const quoteResults = quoteData?.quoteResponse?.result ?? [];
-
-  quoteResults.forEach((quote) => {
-    const stock = marketState.find((entry) => entry.symbol === quote.symbol);
-    if (!stock) {
-      return;
-    }
-    stock.lastPrice = quote.regularMarketPrice ?? null;
-    stock.previousClose = quote.regularMarketPreviousClose ?? null;
-    stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
-    stock.lastUpdated = new Date().toLocaleTimeString();
-    stock.lastUpdatedAt = Date.now();
-    stock.dataSource = "live";
-  });
+  const quoteResults = await fetchYahooQuotes(symbols);
+  const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
 
   await Promise.all(
     marketState.map(async (stock) => {
+      const prefetchedQuote = quoteMap.get(stock.symbol);
       try {
-        const chartData = await fetchJson(YAHOO_CHART_URL(stock.symbol, "1y"), {
+        const quote = await getQuote(stock.symbol, { prefetchedQuote, allowFetch: false });
+        updateStockWithQuote(stock, quote);
+      } catch (error) {
+        logMarketDataEvent("warn", {
+          event: "market_data_quote_failure",
           provider: PROVIDER,
           symbol: stock.symbol,
+          errorType: error.type ?? "unknown",
+          message: error.message,
         });
-        const chart = chartData?.chart?.result?.[0];
-        const closeSeries = extractCloseSeries(chart);
-        applyChartMetrics(stock, closeSeries);
+      }
+
+      try {
+        const historyPayload = await fetchHistoricalSeries(stock.symbol);
+        updateStockWithHistorical(stock, historyPayload);
       } catch (error) {
         logMarketDataEvent("warn", {
           event: "market_data_chart_failure",
@@ -447,57 +838,48 @@ async function loadInitialMarketData() {
 }
 
 async function loadSymbolSnapshot(symbol, options = {}) {
-  const [quoteResult, chartResult] = await Promise.allSettled([
-    fetchJson(YAHOO_QUOTE_URL([symbol]), {
-      provider: PROVIDER,
-      symbol,
-      fetchFn: options.fetchFn,
-    }),
-    fetchJson(YAHOO_CHART_URL(symbol, "1y"), {
-      provider: PROVIDER,
-      symbol,
-      fetchFn: options.fetchFn,
-    }),
-  ]);
-  const quoteData = quoteResult.status === "fulfilled" ? quoteResult.value : null;
-  const chartData = chartResult.status === "fulfilled" ? chartResult.value : null;
+  let quote = null;
+  let historyPayload = null;
   const cachedEntry = getStockEntry(symbol);
   const hasCachedData = Boolean(cachedEntry?.lastPrice || cachedEntry?.history?.length);
-  if (quoteResult.status === "rejected") {
+
+  try {
+    quote = await getQuote(symbol, options);
+  } catch (error) {
+    if (error.type === "invalid_symbol") {
+      throw error;
+    }
     logMarketDataEvent("warn", {
       event: "market_data_quote_failure",
       provider: PROVIDER,
       symbol,
-      errorType: quoteResult.reason?.type ?? "unknown",
-      message: quoteResult.reason?.message ?? "Quote fetch failed.",
+      errorType: error.type ?? "unknown",
+      message: error.message ?? "Quote fetch failed.",
     });
   }
-  if (chartResult.status === "rejected") {
+
+  try {
+    historyPayload = await fetchHistoricalSeries(symbol, options);
+  } catch (error) {
     logMarketDataEvent("warn", {
       event: "market_data_chart_failure",
       provider: PROVIDER,
       symbol,
-      errorType: chartResult.reason?.type ?? "unknown",
-      message: chartResult.reason?.message ?? "Chart fetch failed.",
+      errorType: error.type ?? "unknown",
+      message: error.message ?? "Chart fetch failed.",
     });
   }
 
-  if (!quoteData && !chartData) {
+  if (!quote && !historyPayload) {
     if (hasCachedData) {
       return { status: "cache", entry: cachedEntry };
     }
     throw new MarketDataError("unavailable", "Quote and chart requests failed.");
   }
 
-  const quote = quoteData?.quoteResponse?.result?.[0];
-  const chart = chartData?.chart?.result?.[0];
-  const closeSeries = extractCloseSeries(chart);
-  if (!quote && !closeSeries.length && isInvalidSymbolPayload(quoteData, chartData)) {
-    throw new MarketDataError("invalid_symbol", "No data returned for symbol.");
-  }
   const entry = extraSymbolData.get(symbol) ?? {
     symbol,
-    name: quote?.shortName ?? symbol,
+    name: quote?.name ?? symbol,
     sector: "Unknown",
     cap: "—",
     history: [],
@@ -508,29 +890,22 @@ async function loadSymbolSnapshot(symbol, options = {}) {
     dailyChange: null,
     lastUpdated: null,
     lastUpdatedAt: null,
+    quoteAsOf: null,
+    quoteSession: null,
+    isRealtime: false,
     dataSource: "live",
   };
-  let dataSource = "live";
+
   if (quote) {
-    entry.name = quote.shortName ?? entry.name;
-    entry.lastPrice = quote.regularMarketPrice ?? entry.lastPrice;
-    entry.previousClose = quote.regularMarketPreviousClose ?? entry.previousClose;
-    entry.dailyChange = calculatePercentChange(entry.lastPrice, entry.previousClose);
-    entry.lastUpdated = new Date().toLocaleTimeString();
-    entry.lastUpdatedAt = Date.now();
-    entry.dataSource = "live";
-  } else if (closeSeries.length) {
-    entry.lastPrice = closeSeries[closeSeries.length - 1];
-    entry.previousClose = closeSeries[closeSeries.length - 2] ?? entry.previousClose;
-    entry.dailyChange = calculatePercentChange(entry.lastPrice, entry.previousClose);
-    entry.lastUpdated = new Date().toLocaleTimeString();
-    entry.lastUpdatedAt = Date.now();
-    entry.dataSource = "delayed";
-    dataSource = "delayed";
+    updateStockWithQuote(entry, quote);
   }
-  applyChartMetrics(entry, closeSeries);
+  if (historyPayload) {
+    updateStockWithHistorical(entry, historyPayload);
+  }
+
   extraSymbolData.set(symbol, entry);
-  return { status: dataSource, entry, dataSource };
+  const status = quote?.source ?? entry.dataSource ?? "cache";
+  return { status, entry, dataSource: status };
 }
 
 function matchesFilters(stock) {
@@ -579,6 +954,84 @@ function matchesFilters(stock) {
   return true;
 }
 
+function getVisibleSymbols() {
+  const filtered = marketState.filter(matchesFilters);
+  return filtered.length ? filtered.map((stock) => stock.symbol) : marketState.map((stock) => stock.symbol);
+}
+
+async function refreshVisibleQuotes() {
+  const symbols = getVisibleSymbols();
+  const symbolsToFetch = symbols.filter((symbol) => !getCachedQuote(symbol));
+  if (!symbolsToFetch.length) {
+    renderMarketTable();
+    return;
+  }
+
+  try {
+    const quoteResults = await fetchYahooQuotes(symbolsToFetch);
+    const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+    await Promise.all(
+      symbolsToFetch.map(async (symbol) => {
+        const stock = getStockEntry(symbol);
+        if (!stock) {
+          return;
+        }
+        const prefetchedQuote = quoteMap.get(symbol);
+        try {
+          const quote = await getQuote(symbol, {
+            prefetchedQuote,
+            allowFetch: false,
+          });
+          updateStockWithQuote(stock, quote);
+        } catch (error) {
+          logMarketDataEvent("warn", {
+            event: "market_data_refresh_failure",
+            provider: PROVIDER,
+            symbol,
+            errorType: error.type ?? "unknown",
+            message: error.message,
+          });
+        }
+      }),
+    );
+  } catch (error) {
+    logMarketDataEvent("warn", {
+      event: "market_data_refresh_failure",
+      provider: PROVIDER,
+      symbol: symbolsToFetch.join(","),
+      errorType: error.type ?? "unknown",
+      message: error.message,
+    });
+  }
+
+  await Promise.all(
+    symbols
+      .filter((symbol) => isHistoricalStale(symbol))
+      .map(async (symbol) => {
+        try {
+          const historyPayload = await fetchHistoricalSeries(symbol);
+          const stock = getStockEntry(symbol);
+          if (stock) {
+            updateStockWithHistorical(stock, historyPayload);
+          }
+        } catch (error) {
+          logMarketDataEvent("warn", {
+            event: "market_data_chart_failure",
+            provider: PROVIDER,
+            symbol,
+            errorType: error.type ?? "unknown",
+            message: error.message,
+          });
+        }
+      }),
+  );
+
+  renderMarketTable();
+  if (resultCard && !resultCard.classList.contains("hidden")) {
+    updateResultLivePriceDisplay(resultSymbol.textContent);
+  }
+}
+
 function renderMarketTable() {
   if (!marketBody) {
     return;
@@ -587,7 +1040,7 @@ function renderMarketTable() {
     .filter(matchesFilters)
     .map((stock) => {
       const signal = calculateSignal(stock.history);
-  const change =
+      const change =
         stock.lastPrice !== null && stock.previousClose !== null
           ? stock.lastPrice - stock.previousClose
           : null;
@@ -602,33 +1055,57 @@ function renderMarketTable() {
         stock.monthlyChange === null ? "" : stock.monthlyChange >= 0 ? "positive" : "negative";
       const yearClass =
         stock.yearlyChange === null ? "" : stock.yearlyChange >= 0 ? "positive" : "negative";
+      const priceDisplay = stock.lastPrice ? quoteFormatter.format(stock.lastPrice) : "Price unavailable";
+      const badge = stock.lastPrice
+        ? getSessionBadge(
+            {
+              session: stock.quoteSession ?? "CLOSED",
+            },
+            stock.dataSource,
+          )
+        : null;
+      const meta = stock.lastPrice
+        ? `As of ${formatAsOf(stock.quoteAsOf || stock.lastUpdatedAt)}`
+        : "Awaiting quote";
       return `<tr>
         <td>${stock.symbol}</td>
         <td>${stock.name}</td>
         <td>${stock.sector}</td>
         <td>${stock.cap}</td>
         <td><span class="signal-pill ${signal}">${signal}</span></td>
-        <td>${stock.lastPrice ? quoteFormatter.format(stock.lastPrice) : "—"}</td>
+        <td>
+          <div class="price-cell">
+            <div class="price-main">
+              <span>${priceDisplay}</span>
+              ${
+                badge
+                  ? `<span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span>`
+                  : ""
+              }
+            </div>
+            <div class="price-meta">${meta}</div>
+          </div>
+        </td>
         <td class="price-change ${changeClass}">${
           change !== null && changePercent !== null
             ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
                 changePercent,
               )}%)`
-            : "—"
+            : "n/a"
         }</td>
         <td class="price-change ${dayClass}">${
           stock.dailyChange === null
-            ? "—"
+            ? "n/a"
             : `${stock.dailyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.dailyChange)}%`
         }</td>
         <td class="price-change ${monthClass}">${
           stock.monthlyChange === null
-            ? "—"
+            ? "n/a"
             : `${stock.monthlyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.monthlyChange)}%`
         }</td>
         <td class="price-change ${yearClass}">${
           stock.yearlyChange === null
-            ? "—"
+            ? "n/a"
             : `${stock.yearlyChange >= 0 ? "+" : ""}${percentFormatter.format(stock.yearlyChange)}%`
         }</td>
       </tr>`;
@@ -641,23 +1118,28 @@ function renderMarketTable() {
 async function refreshMarketBoard() {
   const symbols = marketState.map((stock) => stock.symbol);
   try {
-    const quoteData = await fetchJson(YAHOO_QUOTE_URL(symbols), {
-      provider: PROVIDER,
-      symbol: symbols.join(","),
-    });
-    const quoteResults = quoteData?.quoteResponse?.result ?? [];
-    quoteResults.forEach((quote) => {
-      const stock = marketState.find((entry) => entry.symbol === quote.symbol);
-      if (!stock) {
-        return;
-      }
-      stock.previousClose = stock.lastPrice ?? quote.regularMarketPreviousClose ?? null;
-      stock.lastPrice = quote.regularMarketPrice ?? stock.lastPrice;
-      stock.dailyChange = calculatePercentChange(stock.lastPrice, stock.previousClose);
-      stock.lastUpdated = new Date().toLocaleTimeString();
-      stock.lastUpdatedAt = Date.now();
-      stock.dataSource = "live";
-    });
+    const quoteResults = await fetchYahooQuotes(symbols);
+    const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+    await Promise.all(
+      marketState.map(async (stock) => {
+        const prefetchedQuote = quoteMap.get(stock.symbol);
+        try {
+          const quote = await getQuote(stock.symbol, {
+            prefetchedQuote,
+            allowFetch: false,
+          });
+          updateStockWithQuote(stock, quote);
+        } catch (error) {
+          logMarketDataEvent("warn", {
+            event: "market_data_refresh_failure",
+            provider: PROVIDER,
+            symbol: stock.symbol,
+            errorType: error.type ?? "unknown",
+            message: error.message,
+          });
+        }
+      }),
+    );
   } catch (error) {
     logMarketDataEvent("warn", {
       event: "market_data_refresh_failure",
@@ -670,10 +1152,7 @@ async function refreshMarketBoard() {
 
   renderMarketTable();
   if (resultCard && !resultCard.classList.contains("hidden")) {
-    const livePrice = getLivePriceForSymbol(resultSymbol.textContent);
-    resultLivePrice.textContent = livePrice
-      ? `Live price: ${quoteFormatter.format(livePrice)}`
-      : "Live price: Not available";
+    updateResultLivePriceDisplay(resultSymbol.textContent);
   }
 }
 
@@ -710,10 +1189,13 @@ if (form) {
     showErrors([]);
     if (snapshot?.status === "cache") {
       const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-      showStatus(`Live data unavailable — showing last known price from ${lastUpdated}.`);
-    } else if (snapshot?.dataSource === "delayed") {
+      showStatus(`Live data unavailable — showing cached price from ${lastUpdated}.`);
+    } else if (snapshot?.dataSource === "historical") {
       const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-      showStatus(`Live data unavailable — showing delayed price from ${lastUpdated}.`);
+      showStatus(`Live data unavailable — showing last close from ${lastUpdated}.`);
+    } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
+      const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+      showStatus(`Market closed — showing last close from ${lastUpdated}.`);
     } else {
       showStatus("");
     }
@@ -757,6 +1239,7 @@ if (form) {
 });
 
 if (isBrowser) {
+  loadPersistentQuoteCache();
   renderMarketTable();
   loadInitialMarketData()
     .then(renderMarketTable)
@@ -768,7 +1251,7 @@ if (isBrowser) {
         message: error.message,
       });
     });
-  setInterval(refreshMarketBoard, 60000);
+  setInterval(refreshVisibleQuotes, 30000);
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -777,8 +1260,11 @@ if (typeof module !== "undefined" && module.exports) {
     fetchJsonWithRetry,
     fetchWithTimeout,
     isValidSymbol,
+    getQuote,
     loadSymbolSnapshot,
     resetSymbolCache,
     extraSymbolData,
+    resetQuoteCache,
+    setLastKnownQuote,
   };
 }
