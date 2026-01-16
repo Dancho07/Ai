@@ -189,7 +189,7 @@ const tests = [
               result: [
                 {
                   symbol: "NVDA",
-                  regularMarketState: "REGULAR",
+                  marketState: "REGULAR",
                   regularMarketPrice: 123.45,
                   regularMarketPreviousClose: 120,
                   regularMarketChange: 3.45,
@@ -207,6 +207,68 @@ const tests = [
       const quote = await getQuote("NVDA", { fetchFn, maxAttempts: 1 });
       assert.strictEqual(quote.price, 123.45);
       assert.strictEqual(quote.session, "REGULAR");
+    },
+  },
+  {
+    name: "maps pre and post market states from provider",
+    fn: async () => {
+      const preQuote = await getQuote("AAPL", {
+        allowFetch: false,
+        useCache: false,
+        prefetchedQuote: {
+          symbol: "AAPL",
+          marketState: "PRE",
+          preMarketPrice: 181,
+          preMarketTime: 1700000100,
+          shortName: "Apple",
+        },
+      });
+      const postQuote = await getQuote("AAPL", {
+        allowFetch: false,
+        useCache: false,
+        prefetchedQuote: {
+          symbol: "AAPL",
+          marketState: "POST",
+          postMarketPrice: 179,
+          postMarketTime: 1700000200,
+          shortName: "Apple",
+        },
+      });
+      assert.strictEqual(preQuote.session, "PRE");
+      assert.strictEqual(postQuote.session, "POST");
+      assert.strictEqual(preQuote.isRealtime, true);
+      assert.strictEqual(postQuote.isRealtime, true);
+    },
+  },
+  {
+    name: "normalizes epoch timestamps to milliseconds",
+    fn: async () => {
+      const secondsQuote = await getQuote("MSFT", {
+        allowFetch: false,
+        prefetchedQuote: {
+          symbol: "MSFT",
+          marketState: "REGULAR",
+          regularMarketPrice: 310,
+          regularMarketPreviousClose: 305,
+          regularMarketChange: 5,
+          regularMarketChangePercent: 1.64,
+          regularMarketTime: 1700000000,
+        },
+      });
+      const millisQuote = await getQuote("MSFT", {
+        allowFetch: false,
+        prefetchedQuote: {
+          symbol: "MSFT",
+          marketState: "REGULAR",
+          regularMarketPrice: 311,
+          regularMarketPreviousClose: 305,
+          regularMarketChange: 6,
+          regularMarketChangePercent: 1.97,
+          regularMarketTime: 1700000000000,
+        },
+      });
+      assert.strictEqual(secondsQuote.asOfTimestamp, 1700000000000);
+      assert.strictEqual(millisQuote.asOfTimestamp, 1700000000000);
     },
   },
   {
@@ -280,7 +342,7 @@ const tests = [
         allowFetch: false,
         prefetchedQuote: {
           symbol: "AAPL",
-          regularMarketState: "CLOSED",
+          marketState: "CLOSED",
           regularMarketPrice: 180,
           regularMarketPreviousClose: 178,
           regularMarketChange: 2,
@@ -291,6 +353,28 @@ const tests = [
       });
       assert.strictEqual(quote.session, "CLOSED");
       assert.strictEqual(quote.isRealtime, false);
+    },
+  },
+  {
+    name: "marks quotes as unavailable when provider returns empty results",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("TSLA", {
+        price: 245,
+        change: 2,
+        changePct: 0.82,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: true,
+        session: "REGULAR",
+        source: "cache",
+      });
+      const fetchFn = createFetchSequence([
+        createResponse({ ok: true, status: 200, json: { quoteResponse: { result: [] } } }),
+      ]);
+      const quote = await getQuote("TSLA", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(quote.session, "REGULAR");
+      assert.strictEqual(quote.unavailable, true);
+      assert.strictEqual(quote.source, "cache");
     },
   },
   {
