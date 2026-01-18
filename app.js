@@ -69,6 +69,7 @@ const filterSignal = isBrowser ? document.getElementById("filter-signal") : null
 const filterMin = isBrowser ? document.getElementById("filter-min") : null;
 const filterMax = isBrowser ? document.getElementById("filter-max") : null;
 const filterMonth = isBrowser ? document.getElementById("filter-month") : null;
+let sortBySelect = isBrowser ? document.getElementById("sort-by") : null;
 
 const riskLimits = {
   low: 0.2,
@@ -81,6 +82,15 @@ const riskPerTrade = {
   moderate: 0.01,
   high: 0.015,
 };
+
+const MARKET_SORT_OPTIONS = [
+  { value: "signal", label: "Signal strength (score)" },
+  { value: "change1d", label: "1D change" },
+  { value: "change1m", label: "1M change" },
+  { value: "change1y", label: "1Y change" },
+  { value: "liveChange", label: "Live change (%)" },
+];
+const DEFAULT_SORT_KEY = "signal";
 
 const FORM_STATE_KEY = "trade_form_state_v1";
 const POSITION_SIZING_MODES = {
@@ -131,6 +141,7 @@ const marketState = marketWatchlist.map((stock) => ({
   lastChangePct: null,
   dailyChange: null,
   monthlyChange: null,
+  yearlyChange: null,
   lastUpdated: null,
   lastUpdatedAt: null,
   quoteAsOf: null,
@@ -2600,13 +2611,16 @@ function applyChartMetrics(stock, closeSeries, timestamps) {
   }
   const latest = closeSeries[closeSeries.length - 1];
   const monthIndex = Math.max(closeSeries.length - 22, 0);
+  const yearIndex = closeSeries.length >= 252 ? closeSeries.length - 252 : null;
   const monthClose = closeSeries[monthIndex];
+  const yearClose = yearIndex != null ? closeSeries[yearIndex] : null;
   stock.history = closeSeries;
   stock.dailyChange =
     closeSeries.length >= 2
       ? calculatePercentChange(latest, closeSeries[closeSeries.length - 2])
       : null;
   stock.monthlyChange = calculatePercentChange(latest, monthClose);
+  stock.yearlyChange = yearClose != null ? calculatePercentChange(latest, yearClose) : null;
   stock.lastHistoricalTimestamp = timestamps?.[timestamps.length - 1] ?? stock.lastHistoricalTimestamp;
 }
 
@@ -3478,6 +3492,112 @@ function getMarketRowDisplay(stock) {
   };
 }
 
+function ensureSortControl() {
+  if (!isBrowser || sortBySelect) {
+    return sortBySelect;
+  }
+  const filters = document.querySelector(".filters");
+  if (!filters) {
+    return null;
+  }
+  const label = document.createElement("label");
+  label.className = "sort-control";
+  const options = MARKET_SORT_OPTIONS.map(
+    (option) => `<option value="${option.value}">${option.label}</option>`,
+  ).join("");
+  label.innerHTML = `
+    Sort by
+    <select id="sort-by">${options}</select>
+  `;
+  filters.appendChild(label);
+  sortBySelect = label.querySelector("select");
+  if (sortBySelect) {
+    sortBySelect.value = DEFAULT_SORT_KEY;
+  }
+  return sortBySelect;
+}
+
+function getLiveChangePercent(stock) {
+  if (!stock) {
+    return null;
+  }
+  if (typeof stock.lastChangePct === "number") {
+    return stock.lastChangePct;
+  }
+  if (stock.lastPrice != null && stock.previousClose != null) {
+    return ((stock.lastPrice - stock.previousClose) / stock.previousClose) * 100;
+  }
+  return null;
+}
+
+function getSignalScoreForStock(stock) {
+  if (!stock) {
+    return null;
+  }
+  const prices = stock.history ?? [];
+  const recent = stock.lastPrice ?? (prices.length ? prices[prices.length - 1] : null);
+  if (recent == null) {
+    return null;
+  }
+  const average =
+    prices.length >= 10
+      ? prices.slice(-10).reduce((sum, value) => sum + value, 0) / 10
+      : recent;
+  const atrLike = calculateAtrLike(prices);
+  const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
+  return calculateSignalScore({
+    recent,
+    average,
+    dailyChange: stock.dailyChange ?? null,
+    monthlyChange: stock.monthlyChange ?? null,
+    atrPercent,
+    prices,
+    atrLike,
+  });
+}
+
+function getSortValue(stock, sortKey) {
+  switch (sortKey) {
+    case "change1d":
+      return stock.dailyChange ?? null;
+    case "change1m":
+      return stock.monthlyChange ?? null;
+    case "change1y":
+      return stock.yearlyChange ?? null;
+    case "liveChange":
+      return getLiveChangePercent(stock);
+    case "signal":
+    default:
+      return getSignalScoreForStock(stock);
+  }
+}
+
+function sortMarketEntries(entries, sortKey = DEFAULT_SORT_KEY) {
+  const keyed = entries.map((stock, index) => ({
+    stock,
+    index,
+    value: getSortValue(stock, sortKey),
+  }));
+  keyed.sort((a, b) => {
+    const aMissing = a.value == null || Number.isNaN(a.value);
+    const bMissing = b.value == null || Number.isNaN(b.value);
+    if (aMissing && bMissing) {
+      return a.index - b.index;
+    }
+    if (aMissing) {
+      return 1;
+    }
+    if (bMissing) {
+      return -1;
+    }
+    if (b.value !== a.value) {
+      return b.value - a.value;
+    }
+    return a.index - b.index;
+  });
+  return keyed.map((entry) => entry.stock);
+}
+
 function createMarketRowSkeleton(stock) {
   if (!isBrowser) {
     return null;
@@ -3604,6 +3724,7 @@ function renderMarketTable() {
   if (!marketBody) {
     return;
   }
+  ensureSortControl();
   const filtered = marketState.filter(matchesFilters);
   if (!filtered.length) {
     marketBody.innerHTML = `<tr><td colspan="11">No stocks match these filters.</td></tr>`;
@@ -3611,13 +3732,15 @@ function renderMarketTable() {
     return;
   }
 
+  const sortKey = sortBySelect?.value ?? DEFAULT_SORT_KEY;
+  const sorted = sortMarketEntries(filtered, sortKey);
   const existingRows = new Map();
   marketBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
     existingRows.set(row.dataset.symbol, row);
   });
 
   marketBody.innerHTML = "";
-  filtered.forEach((stock) => {
+  sorted.forEach((stock) => {
     const row = existingRows.get(stock.symbol) ?? createMarketRowSkeleton(stock);
     if (!row) {
       return;
@@ -3910,6 +4033,7 @@ if (form) {
   });
 }
 
+sortBySelect = ensureSortControl() ?? sortBySelect;
 [
   filterSearch,
   filterSector,
@@ -3918,6 +4042,7 @@ if (form) {
   filterMin,
   filterMax,
   filterMonth,
+  sortBySelect,
 ].forEach((input) => {
   if (input) {
     input.addEventListener("input", () => {
@@ -4013,5 +4138,7 @@ if (typeof module !== "undefined" && module.exports) {
     updateMarketRowCells,
     getScrollBehavior,
     scheduleResultScroll,
+    sortMarketEntries,
+    getSortValue,
   };
 }

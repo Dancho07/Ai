@@ -36,6 +36,7 @@ const {
   handleMarketRowAction,
   updateMarketRowCells,
   scheduleResultScroll,
+  sortMarketEntries,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -216,6 +217,22 @@ const tests = [
     fn: async () => {
       const horizon = classifyTimeHorizon({ volatilityLevel: "low", trendStrength: "strong" });
       assert.strictEqual(horizon.label, "Position (weeks)");
+    },
+  },
+  {
+    name: "sorts market entries with stable ordering and n/a last",
+    fn: async () => {
+      const entries = [
+        { symbol: "AAA", dailyChange: 1.5 },
+        { symbol: "BBB", dailyChange: null },
+        { symbol: "CCC", dailyChange: 1.5 },
+        { symbol: "DDD", dailyChange: -2.1 },
+      ];
+      const sorted = sortMarketEntries(entries, "change1d");
+      assert.deepStrictEqual(
+        sorted.map((entry) => entry.symbol),
+        ["AAA", "CCC", "DDD", "BBB"],
+      );
     },
   },
   {
