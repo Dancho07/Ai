@@ -20,6 +20,7 @@ const {
   applyRateLimitBackoff,
   isRateLimitBackoffActive,
   updateStockWithQuote,
+  updateStockWithHistorical,
   getStockEntry,
   calculateAtrLike,
   getConfidenceLabel,
@@ -505,6 +506,48 @@ const tests = [
     },
   },
   {
+    name: "keeps symbols from awaiting quote once cached data exists",
+    fn: async () => {
+      resetQuoteCache();
+      setLastKnownQuote("MSFT", {
+        price: 312.5,
+        change: 2.1,
+        changePct: 0.68,
+        asOfTimestamp: Date.now() - 60000,
+        isRealtime: false,
+        session: "CLOSED",
+        source: "cache",
+      });
+      hydrateMarketStateFromCache();
+      const stock = getStockEntry("MSFT");
+      const display = getMarketRowDisplay(stock);
+      assert.notStrictEqual(display.meta, "Awaiting quote");
+    },
+  },
+  {
+    name: "uses historical data to avoid awaiting quote after refresh",
+    fn: async () => {
+      const stock = getStockEntry("NVDA");
+      updateStockWithQuote(stock, {
+        price: null,
+        change: null,
+        changePct: null,
+        asOfTimestamp: null,
+        isRealtime: false,
+        session: "UNKNOWN",
+        source: "unavailable",
+      });
+      const now = Date.now();
+      updateStockWithHistorical(stock, {
+        closes: [120, 121, 123],
+        timestamps: [now - 2 * 86400000, now - 86400000, now],
+      });
+      const display = getMarketRowDisplay(stock);
+      assert.notStrictEqual(display.meta, "Awaiting quote");
+      assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+    },
+  },
+  {
     name: "keeps cached values when live quote fetch fails",
     fn: async () => {
       resetQuoteCache();
@@ -526,6 +569,29 @@ const tests = [
       const display = getMarketRowDisplay(stock);
       assert.strictEqual(quote.source, "cache");
       assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+    },
+  },
+  {
+    name: "does not concatenate change and 1D change values",
+    fn: async () => {
+      const stock = getStockEntry("AAPL");
+      updateStockWithQuote(stock, {
+        price: 98,
+        change: -2,
+        changePct: -2.0,
+        asOfTimestamp: Date.now(),
+        isRealtime: true,
+        session: "REGULAR",
+        source: "primary",
+      });
+      updateStockWithHistorical(stock, {
+        closes: [100, 99, 98],
+        timestamps: [Date.now() - 2 * 86400000, Date.now() - 86400000, Date.now()],
+      });
+      const display = getMarketRowDisplay(stock);
+      assert.ok(display.changeDisplay.includes("("));
+      assert.strictEqual(display.dayDisplay.endsWith("%"), true);
+      assert.strictEqual(display.changeDisplay.includes(display.dayDisplay), false);
     },
   },
   {
