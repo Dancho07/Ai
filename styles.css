@@ -707,6 +707,86 @@ td[data-col="analyze"] {
   margin-bottom: 8px;
 }
 
+.signal-score-card {
+  display: grid;
+  gap: 12px;
+}
+
+.signal-score-value {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.signal-score-number {
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: #1d1f2c;
+}
+
+.signal-score-label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef1ff;
+  color: #3945a3;
+}
+
+.signal-score-label.strong {
+  background: #e7f6ed;
+  color: #1d7a4a;
+}
+
+.signal-score-label.ok {
+  background: #fff6db;
+  color: #786307;
+}
+
+.signal-score-label.weak {
+  background: #fdecec;
+  color: #b54141;
+}
+
+.score-breakdown {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.score-breakdown-item {
+  display: grid;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: #30344a;
+}
+
+.score-breakdown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+}
+
+.score-breakdown-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #e4e8ff;
+  overflow: hidden;
+}
+
+.score-breakdown-bar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(120deg, #4d5bff, #7b6cff);
+  border-radius: inherit;
+}
+
 .confidence-score {
   font-size: 1.4rem;
   font-weight: 700;
