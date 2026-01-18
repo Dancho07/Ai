@@ -30,6 +30,7 @@ const {
   getMarketIndicatorData,
   handleMarketRowAction,
   updateMarketRowCells,
+  scheduleResultScroll,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -931,6 +932,34 @@ const tests = [
       const change1dCell = cells.get("change1d");
       assert.ok(changeCell.textContent.includes("+100.12"));
       assert.ok(!changeCell.textContent.includes(change1dCell.textContent));
+    },
+  },
+  {
+    name: "scrolls to the signal result after rendering",
+    fn: async () => {
+      let scrollCalls = 0;
+      const element = {
+        scrollIntoView: () => {
+          scrollCalls += 1;
+        },
+        classList: {
+          add: () => {},
+          remove: () => {},
+        },
+      };
+      const originalRaf = global.requestAnimationFrame;
+      global.requestAnimationFrame = (callback) => callback();
+      scheduleResultScroll(element);
+      global.requestAnimationFrame = originalRaf;
+      assert.strictEqual(scrollCalls, 1);
+    },
+  },
+  {
+    name: "does not scroll when no signal result is available",
+    fn: async () => {
+      let scrollCalls = 0;
+      scheduleResultScroll(null);
+      assert.strictEqual(scrollCalls, 0);
     },
   },
 ];
