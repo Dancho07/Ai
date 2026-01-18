@@ -10,6 +10,7 @@ const {
   loadPersistedFormState,
   bindRiskPercentField,
   getQuote,
+  fetchHistoricalSeries,
   loadSymbolSnapshot,
   resetSymbolCache,
   extraSymbolData,
@@ -435,6 +436,83 @@ const tests = [
       const quote = await getQuote("NVDA", { fetchFn, maxAttempts: 1 });
       assert.strictEqual(quote.price, 123.45);
       assert.strictEqual(quote.session, "REGULAR");
+    },
+  },
+  {
+    name: "dedupes inflight quote requests for the same symbol",
+    fn: async () => {
+      resetQuoteCache();
+      let callCount = 0;
+      let resolveFetch = null;
+      const fetchFn = () => {
+        callCount += 1;
+        return new Promise((resolve) => {
+          resolveFetch = resolve;
+        });
+      };
+
+      const quotePromise = getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      const quotePromise2 = getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(callCount, 1);
+      resolveFetch(
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: {
+              result: [
+                {
+                  symbol: "AAPL",
+                  marketState: "REGULAR",
+                  regularMarketPrice: 189.5,
+                  regularMarketPreviousClose: 188.1,
+                  regularMarketChange: 1.4,
+                  regularMarketChangePercent: 0.74,
+                  regularMarketTime: 1700000000,
+                  shortName: "Apple",
+                  currency: "USD",
+                },
+              ],
+            },
+          },
+        }),
+      );
+      const [quoteA, quoteB] = await Promise.all([quotePromise, quotePromise2]);
+      assert.strictEqual(quoteA.price, 189.5);
+      assert.strictEqual(quoteB.price, 189.5);
+    },
+  },
+  {
+    name: "reuses cached historical data within TTL",
+    fn: async () => {
+      resetQuoteCache();
+      const fetchFn = createFetchSequence([
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            chart: {
+              result: [
+                {
+                  timestamp: [1700000000, 1700086400, 1700172800],
+                  indicators: {
+                    quote: [
+                      {
+                        close: [100, 101, 102],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      ]);
+
+      const first = await fetchHistoricalSeries("AAPL", { fetchFn, maxAttempts: 1 });
+      const second = await fetchHistoricalSeries("AAPL", { fetchFn, maxAttempts: 1 });
+      assert.deepStrictEqual(first, second);
+      assert.strictEqual(fetchFn.getCallCount(), 1);
     },
   },
   {

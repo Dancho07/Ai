@@ -159,16 +159,21 @@ const MAX_PARALLEL_REQUESTS = 3;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
+const HISTORICAL_CACHE_KEY = "market_historical_cache_v1";
 const MARKET_OPEN_TTL_MS = 5 * 1000;
 const MARKET_EXTENDED_TTL_MS = 12 * 1000;
 const MARKET_CLOSED_TTL_MS = 5 * 60 * 1000;
-const HISTORICAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const HISTORICAL_DAILY_TTL_MS = 24 * 60 * 60 * 1000;
+const HISTORICAL_INTRADAY_TTL_MS = 60 * 60 * 1000;
 const MARKET_DEBUG_SYMBOLS = new Set(["AAPL", "SPY"]);
 const MARKET_DEBUG_PARAM = "debug";
 const MARKET_DEBUG_ENABLED =
   isBrowser && typeof window !== "undefined"
     ? new URLSearchParams(window.location.search).get(MARKET_DEBUG_PARAM) === "1"
     : false;
+const PERF_DEBUG_ENABLED = MARKET_DEBUG_ENABLED;
+const QUOTE_FAST_FALLBACK_MS = 800;
+const INDICATOR_CACHE_TTL_MS = 60 * 1000;
 const REFRESH_INTERVALS = {
   REGULAR: 5 * 1000,
   PRE: 12 * 1000,
@@ -180,15 +185,17 @@ const REFRESH_INTERVALS = {
 
 const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
-const YAHOO_CHART_URL = (symbol, range) =>
-  `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=1d&includePrePost=false`;
+const YAHOO_CHART_URL = (symbol, range, interval = "1d") =>
+  `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=${interval}&includePrePost=false`;
 
 const quoteCache = new Map();
 const lastKnownQuotes = new Map();
 const historicalCache = new Map();
+const inflightHistoricalRequests = new Map();
 const inflightQuoteRequests = new Map();
 const marketIndicatorState = { usingCached: false };
 const lastQuoteRequestStatus = new Map();
+const indicatorCache = new Map();
 
 let refreshTimerId = null;
 let refreshInProgress = false;
@@ -239,6 +246,47 @@ class MarketDataError extends Error {
 
 function createRequestId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getPerfNow() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function createPerfTracker(enabled = false) {
+  const marks = new Map();
+  const durations = new Map();
+  const start = (label) => {
+    if (!enabled) {
+      return;
+    }
+    marks.set(label, getPerfNow());
+  };
+  const end = (label) => {
+    if (!enabled) {
+      return null;
+    }
+    const started = marks.get(label);
+    if (started == null) {
+      return null;
+    }
+    const duration = getPerfNow() - started;
+    durations.set(label, duration);
+    return duration;
+  };
+  const summary = (totalLabel) => {
+    if (!enabled) {
+      return null;
+    }
+    const total = durations.get(totalLabel);
+    return {
+      total,
+      breakdown: Object.fromEntries(durations.entries()),
+    };
+  };
+  return { start, end, summary, enabled };
 }
 
 function logMarketDataEvent(level, payload) {
@@ -672,6 +720,45 @@ function loadPersistentQuoteCache(storage = isBrowser ? localStorage : null) {
   }
 }
 
+function getHistoricalCacheKey(symbol, range = "1mo", interval = "1d") {
+  return `${symbol}|${range}|${interval}`;
+}
+
+function getHistoricalCacheTtl(range = "1mo", interval = "1d") {
+  if (interval !== "1d") {
+    return HISTORICAL_INTRADAY_TTL_MS;
+  }
+  if (range === "1mo" || range === "3mo") {
+    return HISTORICAL_DAILY_TTL_MS;
+  }
+  return HISTORICAL_DAILY_TTL_MS;
+}
+
+function loadPersistentHistoricalCache(storage = isBrowser ? localStorage : null) {
+  if (!storage) {
+    return;
+  }
+  try {
+    const raw = storage.getItem(HISTORICAL_CACHE_KEY);
+    if (!raw) {
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    Object.entries(parsed).forEach(([key, entry]) => {
+      if (!entry?.payload?.closes?.length) {
+        return;
+      }
+      historicalCache.set(key, {
+        payload: entry.payload,
+        storedAt: entry.storedAt,
+        ttlMs: entry.ttlMs ?? HISTORICAL_DAILY_TTL_MS,
+      });
+    });
+  } catch (error) {
+    console.warn("Unable to read cached historical data.", error);
+  }
+}
+
 function persistLastKnownQuotes(storage = isBrowser ? localStorage : null) {
   if (!storage) {
     return;
@@ -684,6 +771,21 @@ function persistLastKnownQuotes(storage = isBrowser ? localStorage : null) {
     storage.setItem(LAST_KNOWN_CACHE_KEY, JSON.stringify(payload));
   } catch (error) {
     console.warn("Unable to persist cached quotes.", error);
+  }
+}
+
+function persistHistoricalCache(storage = isBrowser ? localStorage : null) {
+  if (!storage) {
+    return;
+  }
+  const payload = {};
+  historicalCache.forEach((value, key) => {
+    payload[key] = value;
+  });
+  try {
+    storage.setItem(HISTORICAL_CACHE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Unable to persist cached historical data.", error);
   }
 }
 
@@ -719,8 +821,11 @@ function resetQuoteCache() {
   quoteCache.clear();
   lastKnownQuotes.clear();
   historicalCache.clear();
+  inflightHistoricalRequests.clear();
+  indicatorCache.clear();
   if (isBrowser && typeof localStorage !== "undefined") {
     localStorage.removeItem(LAST_KNOWN_CACHE_KEY);
+    localStorage.removeItem(HISTORICAL_CACHE_KEY);
   }
 }
 
@@ -1236,7 +1341,7 @@ function getVolatilityLevel(atrPercent) {
   return "high";
 }
 
-function calculateTimeHorizon(prices) {
+function calculateTimeHorizon(prices, atrLikeOverride) {
   if (!prices || prices.length < 2) {
     return { label: "Swing (days)", shortLabel: "Swing" };
   }
@@ -1245,7 +1350,7 @@ function calculateTimeHorizon(prices) {
   const start = slice[0];
   const end = slice[slice.length - 1];
   const trendPercent = start ? ((end - start) / start) * 100 : null;
-  const atrLike = calculateAtrLike(prices, ATR_LOOKBACK);
+  const atrLike = atrLikeOverride ?? calculateAtrLike(prices, ATR_LOOKBACK);
   const atrPercent = atrLike && end ? (atrLike / end) * 100 : null;
   const trendStrength = getTrendStrengthLabel(trendPercent);
   const volatilityLevel = getVolatilityLevel(atrPercent);
@@ -1272,6 +1377,57 @@ function calculateAtrLike(prices, lookback = ATR_LOOKBACK) {
   }
   const total = ranges.reduce((sum, value) => sum + value, 0);
   return total / ranges.length;
+}
+
+function getIndicatorCacheKey(symbol, timestamp) {
+  return `${symbol}|${timestamp ?? "unknown"}`;
+}
+
+function getCachedIndicatorSnapshot(symbol, prices, lastTimestamp) {
+  const key = getIndicatorCacheKey(symbol, lastTimestamp);
+  const cached = indicatorCache.get(key);
+  if (cached && Date.now() - cached.storedAt < INDICATOR_CACHE_TTL_MS) {
+    return cached.snapshot;
+  }
+  if (!prices?.length) {
+    return null;
+  }
+  const length = prices.length;
+  const maxLookback = Math.max(ATR_LOOKBACK + 1, 10, 6);
+  const sliceStart = Math.max(length - maxLookback, 0);
+  let atrSum = 0;
+  let atrCount = 0;
+  let averageSum = 0;
+  let averageCount = 0;
+  const recentReturns = [];
+  for (let index = sliceStart + 1; index < length; index += 1) {
+    const current = prices[index];
+    const previous = prices[index - 1];
+    if (typeof current === "number" && typeof previous === "number") {
+      if (index >= length - (ATR_LOOKBACK + 1)) {
+        atrSum += Math.abs(current - previous);
+        atrCount += 1;
+      }
+      if (index >= length - 5) {
+        recentReturns.push(((current - previous) / previous) * 100);
+      }
+    }
+  }
+  for (let index = Math.max(length - 10, 0); index < length; index += 1) {
+    const value = prices[index];
+    if (typeof value === "number") {
+      averageSum += value;
+      averageCount += 1;
+    }
+  }
+  const snapshot = {
+    recent: prices[length - 1] ?? null,
+    average10: averageCount ? averageSum / averageCount : null,
+    atrLike: atrCount ? atrSum / atrCount : null,
+    recentReturns,
+  };
+  indicatorCache.set(key, { snapshot, storedAt: Date.now() });
+  return snapshot;
 }
 
 function getSwingLevels(prices, lookback = SWING_LOOKBACK) {
@@ -1431,6 +1587,8 @@ function calculateSignalScore({
   atrPercent,
   prices,
   tradePlan,
+  atrLike,
+  recentReturns,
 }) {
   const baseWeights = {
     trend: 30,
@@ -1439,16 +1597,18 @@ function calculateSignalScore({
     volume: 15,
     risk: 10,
   };
-  const recentReturns = getRecentReturns(prices, 5);
-  const averageAbsReturn = recentReturns.length
-    ? recentReturns.reduce((sum, value) => sum + Math.abs(value), 0) / recentReturns.length
+  const resolvedReturns = Array.isArray(recentReturns)
+    ? recentReturns
+    : getRecentReturns(prices, 5);
+  const averageAbsReturn = resolvedReturns.length
+    ? resolvedReturns.reduce((sum, value) => sum + Math.abs(value), 0) / resolvedReturns.length
     : null;
   const dailyAbs = dailyChange != null ? Math.abs(dailyChange) : null;
   const monthlyAbs = monthlyChange != null ? Math.abs(monthlyChange) / 4 : null;
   const entryPrice = recent ?? (prices?.length ? prices[prices.length - 1] : null);
-  const atrLike = calculateAtrLike(prices ?? []);
+  const resolvedAtrLike = atrLike ?? calculateAtrLike(prices ?? []);
   const resolvedAtrPercent =
-    atrPercent ?? (entryPrice && atrLike ? (atrLike / entryPrice) * 100 : null);
+    atrPercent ?? (entryPrice && resolvedAtrLike ? (resolvedAtrLike / entryPrice) * 100 : null);
 
   const hasVolumeProxy =
     averageAbsReturn != null || dailyAbs != null || monthlyAbs != null || (prices?.length ?? 0) >= 2;
@@ -1496,7 +1656,7 @@ function calculateSignalScore({
 
   let riskRatio = 0.45;
   if (entryPrice != null && tradePlan?.stopLoss != null) {
-    const atrReference = atrLike ?? entryPrice * 0.02;
+    const atrReference = resolvedAtrLike ?? entryPrice * 0.02;
     const riskDistance = Math.abs(entryPrice - tradePlan.stopLoss) / atrReference;
     riskRatio = clampNumber(1 - (riskDistance - 1) / 2);
   }
@@ -1669,6 +1829,7 @@ function calculateTradePlan({
   risk,
   positionSizingMode,
   riskPercent,
+  atrLike,
 }) {
   const entryMeta = priceLabel
     ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf)})` : ""}`
@@ -1730,9 +1891,9 @@ function calculateTradePlan({
 
   const entryRangeLow = resolvedEntryPrice * (1 - ENTRY_RANGE_PCT);
   const entryRangeHigh = resolvedEntryPrice * (1 + ENTRY_RANGE_PCT);
-  const atrLike = calculateAtrLike(safePrices);
+  const resolvedAtrLike = atrLike ?? calculateAtrLike(safePrices);
   const fallbackAtr = Math.max(resolvedEntryPrice * 0.02, 0.01);
-  const atrValue = atrLike ?? fallbackAtr;
+  const atrValue = resolvedAtrLike ?? fallbackAtr;
   const swingLevels = getSwingLevels(safePrices);
   let stopLoss = null;
   if (action === "buy") {
@@ -1812,11 +1973,14 @@ function calculateTradePlan({
 function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const marketEntry = getStockEntry(symbol);
   const prices = marketEntry?.history ?? [];
+  const lastCandleTimestamp =
+    marketEntry?.lastHistoricalTimestamp ?? marketEntry?.quoteAsOf ?? marketEntry?.lastUpdatedAt ?? null;
+  const indicatorSnapshot = getCachedIndicatorSnapshot(symbol, prices, lastCandleTimestamp);
   const priceContext = resolvePriceContext(marketEntry);
-  const recent = priceContext.price;
+  const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
   const hasHistory = prices.length >= 10;
   const average = hasHistory
-    ? prices.slice(-10).reduce((a, b) => a + b, 0) / 10
+    ? indicatorSnapshot?.average10 ?? prices.slice(-10).reduce((a, b) => a + b, 0) / 10
     : recent;
   let action = "hold";
   let thesis = [
@@ -1843,6 +2007,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       monthlyChange: marketEntry?.monthlyChange ?? null,
       atrPercent: null,
       prices,
+      atrLike: indicatorSnapshot?.atrLike ?? null,
+      recentReturns: indicatorSnapshot?.recentReturns ?? null,
       tradePlan,
     });
     const confidence = calculateSignalConfidence({
@@ -1877,7 +2043,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
         monthlyChange: marketEntry?.monthlyChange ?? null,
         atrPercent: null,
       }),
-      timeHorizon: calculateTimeHorizon(prices),
+      timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
     };
@@ -1902,7 +2068,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     ];
   }
 
-  const atrLike = calculateAtrLike(prices);
+  const atrLike = indicatorSnapshot?.atrLike ?? calculateAtrLike(prices);
   const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
   const confidence = calculateSignalConfidence({
     action,
@@ -1923,6 +2089,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     risk,
     positionSizingMode,
     riskPercent,
+    atrLike,
   });
   const signalScore = calculateSignalScore({
     recent,
@@ -1931,6 +2098,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     monthlyChange: marketEntry?.monthlyChange ?? null,
     atrPercent,
     prices,
+    atrLike,
+    recentReturns: indicatorSnapshot?.recentReturns ?? null,
     tradePlan,
   });
   const shares = tradePlan.positionSize;
@@ -1955,7 +2124,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       monthlyChange: marketEntry?.monthlyChange ?? null,
       atrPercent,
     }),
-    timeHorizon: calculateTimeHorizon(prices),
+    timeHorizon: calculateTimeHorizon(prices, atrLike),
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
     generatedAt: new Date().toLocaleString(),
   };
@@ -2044,10 +2213,73 @@ function setFormLoadingState(isLoading) {
   }
 }
 
+function renderLoadingState(symbol) {
+  if (!resultCard) {
+    return;
+  }
+  resultCard.classList.remove("hidden");
+  resultCard.classList.add("loading");
+  if (resultSymbol) {
+    resultSymbol.textContent = symbol;
+  }
+  if (resultAction) {
+    resultAction.textContent = "LOADING";
+    resultAction.className = "signal hold";
+  }
+  if (resultConfidence) {
+    resultConfidence.textContent = "AI Confidence: —";
+  }
+  if (resultConfidenceBadge) {
+    resultConfidenceBadge.textContent = "—";
+    resultConfidenceBadge.className = "badge confidence-badge low";
+  }
+  if (resultConfidenceScore) {
+    resultConfidenceScore.textContent = "—";
+  }
+  if (resultSignalScore) {
+    resultSignalScore.textContent = "—";
+  }
+  if (resultSignalLabel) {
+    resultSignalLabel.textContent = "—";
+    resultSignalLabel.className = "signal-score-label";
+  }
+  if (resultSignalBreakdown) {
+    resultSignalBreakdown.innerHTML = "";
+  }
+  if (resultTimeHorizon) {
+    resultTimeHorizon.textContent = "Time horizon: —";
+  }
+  if (resultShares) {
+    resultShares.textContent = "Loading...";
+  }
+  if (resultLivePrice) {
+    resultLivePrice.textContent = "Live price: Loading...";
+  }
+  if (resultPrice) {
+    resultPrice.textContent = "Estimated price: —";
+  }
+  if (resultThesis) {
+    resultThesis.innerHTML = "<li>Gathering the latest market data...</li>";
+  }
+  if (resultReasoning) {
+    resultReasoning.innerHTML = "<li>Preparing indicator breakdown...</li>";
+  }
+  if (resultConfidenceCaution) {
+    resultConfidenceCaution.textContent = "—";
+  }
+  if (resultGenerated) {
+    resultGenerated.textContent = "Generated —";
+  }
+  if (resultDisclaimer) {
+    resultDisclaimer.textContent = "Educational demo only — not financial advice.";
+  }
+}
+
 function renderResult(result) {
   if (!resultCard) {
     return;
   }
+  resultCard.classList.remove("loading");
   resultSymbol.textContent = result.symbol;
   resultAction.textContent = result.action.toUpperCase();
   resultAction.className = `signal ${result.action}`;
@@ -2372,26 +2604,66 @@ function updateStockWithHistorical(stock, historyPayload) {
   }
 }
 
+function createSymbolEntry(symbol, fallbackName) {
+  return {
+    symbol,
+    name: fallbackName ?? symbol,
+    sector: "Unknown",
+    cap: "—",
+    history: [],
+    lastPrice: null,
+    previousClose: null,
+    lastChange: null,
+    lastChangePct: null,
+    monthlyChange: null,
+    dailyChange: null,
+    lastUpdated: null,
+    lastUpdatedAt: null,
+    quoteAsOf: null,
+    quoteSession: null,
+    isRealtime: false,
+    dataSource: "live",
+  };
+}
+
+function applyCachedMarketData(symbol, entry, options = {}) {
+  const resolvedEntry = entry ?? createSymbolEntry(symbol);
+  const cachedQuote = getCachedQuote(symbol) ?? getLastKnownQuote(symbol);
+  if (cachedQuote) {
+    updateStockWithQuote(resolvedEntry, { ...cachedQuote, source: "cache" });
+  }
+  const cachedHistory = getCachedHistorical(symbol, options);
+  if (cachedHistory) {
+    updateStockWithHistorical(resolvedEntry, cachedHistory);
+  }
+  return resolvedEntry;
+}
+
 function updateQuoteCache(symbol, quote) {
   const ttl = getCacheTtl(quote.session);
   quoteCache.set(symbol, { quote, expiresAt: Date.now() + ttl });
 }
 
-function cacheHistorical(symbol, payload) {
-  historicalCache.set(symbol, { payload, storedAt: Date.now() });
+function cacheHistorical(key, payload, ttlMs) {
+  historicalCache.set(key, { payload, storedAt: Date.now(), ttlMs });
+  persistHistoricalCache();
 }
 
-function getCachedHistorical(symbol) {
-  const entry = historicalCache.get(symbol);
-  if (entry && Date.now() - entry.storedAt < HISTORICAL_CACHE_TTL_MS) {
+function getCachedHistorical(symbol, { range = "1mo", interval = "1d" } = {}) {
+  const key = getHistoricalCacheKey(symbol, range, interval);
+  const entry = historicalCache.get(key);
+  const ttlMs = entry?.ttlMs ?? getHistoricalCacheTtl(range, interval);
+  if (entry && Date.now() - entry.storedAt < ttlMs) {
     return entry.payload;
   }
   return null;
 }
 
-function isHistoricalStale(symbol) {
-  const entry = historicalCache.get(symbol);
-  return !entry || Date.now() - entry.storedAt >= HISTORICAL_CACHE_TTL_MS;
+function isHistoricalStale(symbol, { range = "1mo", interval = "1d" } = {}) {
+  const key = getHistoricalCacheKey(symbol, range, interval);
+  const entry = historicalCache.get(key);
+  const ttlMs = entry?.ttlMs ?? getHistoricalCacheTtl(range, interval);
+  return !entry || Date.now() - entry.storedAt >= ttlMs;
 }
 
 async function fetchYahooQuotes(symbols, options = {}) {
@@ -2423,22 +2695,37 @@ async function fetchYahooQuotes(symbols, options = {}) {
 }
 
 async function fetchHistoricalSeries(symbol, options = {}) {
-  const cached = getCachedHistorical(symbol);
+  const range = options.range ?? "1mo";
+  const interval = options.interval ?? "1d";
+  const cached = getCachedHistorical(symbol, { range, interval });
   if (cached) {
     return cached;
   }
-  const chartData = await fetchJson(YAHOO_CHART_URL(symbol, "1mo"), {
-    provider: PROVIDER,
-    symbol,
-    fetchFn: options.fetchFn,
-    maxAttempts: options.maxAttempts,
-    timeoutMs: options.timeoutMs,
-  });
-  const chart = chartData?.chart?.result?.[0];
-  const { closes, timestamps } = extractCloseSeries(chart);
-  const payload = { closes, timestamps };
-  cacheHistorical(symbol, payload);
-  return payload;
+  const cacheKey = getHistoricalCacheKey(symbol, range, interval);
+  const inflight = inflightHistoricalRequests.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+  const requestPromise = (async () => {
+    const chartData = await fetchJson(YAHOO_CHART_URL(symbol, range, interval), {
+      provider: PROVIDER,
+      symbol,
+      fetchFn: options.fetchFn,
+      maxAttempts: options.maxAttempts,
+      timeoutMs: options.timeoutMs,
+    });
+    const chart = chartData?.chart?.result?.[0];
+    const { closes, timestamps } = extractCloseSeries(chart);
+    const payload = { closes, timestamps };
+    cacheHistorical(cacheKey, payload, getHistoricalCacheTtl(range, interval));
+    return payload;
+  })();
+  inflightHistoricalRequests.set(cacheKey, requestPromise);
+  try {
+    return await requestPromise;
+  } finally {
+    inflightHistoricalRequests.delete(cacheKey);
+  }
 }
 
 function deriveHistoricalQuote(closes, timestamps, sessionOverride = "DELAYED") {
@@ -2643,30 +2930,88 @@ async function loadSymbolSnapshot(symbol, options = {}) {
   const cachedEntry = getStockEntry(symbol);
   const hasCachedData = Boolean(cachedEntry?.lastPrice || cachedEntry?.history?.length);
 
-  try {
-    quote = await getQuote(symbol, options);
-  } catch (error) {
-    if (error.type === "invalid_symbol") {
-      throw error;
+  const range = options.range ?? "1mo";
+  const interval = options.interval ?? "1d";
+  const perf = options.perf;
+  let quoteSettled = false;
+
+  const quotePromise = (async () => {
+    perf?.start?.("fetchQuote");
+    try {
+      return await getQuote(symbol, options);
+    } finally {
+      quoteSettled = true;
+      perf?.end?.("fetchQuote");
+    }
+  })();
+  const historyPromise = (async () => {
+    perf?.start?.("fetchHistory");
+    try {
+      return await fetchHistoricalSeries(symbol, { ...options, range, interval });
+    } finally {
+      perf?.end?.("fetchHistory");
+    }
+  })();
+
+  let fallbackTimerId = null;
+  if (options.onIntermediateSnapshot && options.fastFallback !== false) {
+    const fallbackMs = options.fastFallbackMs ?? QUOTE_FAST_FALLBACK_MS;
+    fallbackTimerId = setTimeout(() => {
+      if (quoteSettled) {
+        return;
+      }
+      const fallbackEntry = applyCachedMarketData(symbol, cachedEntry ?? null, {
+        range,
+        interval,
+      });
+      if (hasAnyMarketData(fallbackEntry)) {
+        options.onIntermediateSnapshot({
+          status: "cache",
+          entry: fallbackEntry,
+          dataSource: fallbackEntry.dataSource ?? "cache",
+        });
+      }
+    }, fallbackMs);
+  }
+
+  let quoteError = null;
+  let historyError = null;
+  const [quoteResult, historyResult] = await Promise.allSettled([quotePromise, historyPromise]);
+  if (fallbackTimerId) {
+    clearTimeout(fallbackTimerId);
+  }
+
+  if (quoteResult.status === "fulfilled") {
+    quote = quoteResult.value;
+  } else {
+    quoteError = quoteResult.reason;
+  }
+  if (historyResult.status === "fulfilled") {
+    historyPayload = historyResult.value;
+  } else {
+    historyError = historyResult.reason;
+  }
+
+  if (quoteError) {
+    if (quoteError.type === "invalid_symbol") {
+      throw quoteError;
     }
     logMarketDataEvent("warn", {
       event: "market_data_quote_failure",
       provider: PROVIDER,
       symbol,
-      errorType: error.type ?? "unknown",
-      message: error.message ?? "Quote fetch failed.",
+      errorType: quoteError.type ?? "unknown",
+      message: quoteError.message ?? "Quote fetch failed.",
     });
   }
 
-  try {
-    historyPayload = await fetchHistoricalSeries(symbol, options);
-  } catch (error) {
+  if (historyError) {
     logMarketDataEvent("warn", {
       event: "market_data_chart_failure",
       provider: PROVIDER,
       symbol,
-      errorType: error.type ?? "unknown",
-      message: error.message ?? "Chart fetch failed.",
+      errorType: historyError.type ?? "unknown",
+      message: historyError.message ?? "Chart fetch failed.",
     });
   }
 
@@ -2677,25 +3022,7 @@ async function loadSymbolSnapshot(symbol, options = {}) {
     throw new MarketDataError("unavailable", "Quote and chart requests failed.");
   }
 
-  const entry = extraSymbolData.get(symbol) ?? {
-    symbol,
-    name: quote?.name ?? symbol,
-    sector: "Unknown",
-    cap: "—",
-    history: [],
-    lastPrice: null,
-    previousClose: null,
-    lastChange: null,
-    lastChangePct: null,
-    monthlyChange: null,
-    dailyChange: null,
-    lastUpdated: null,
-    lastUpdatedAt: null,
-    quoteAsOf: null,
-    quoteSession: null,
-    isRealtime: false,
-    dataSource: "live",
-  };
+  const entry = extraSymbolData.get(symbol) ?? createSymbolEntry(symbol, quote?.name ?? symbol);
 
   if (quote) {
     updateStockWithQuote(entry, quote);
@@ -3389,32 +3716,65 @@ if (form) {
 
     isSubmitting = true;
     setFormLoadingState(true);
+    renderLoadingState(symbol);
+    showStatus("Generating AI Signal...");
+    const perf = createPerfTracker(PERF_DEBUG_ENABLED);
+    perf.start("total");
+    let usedCachedFallback = false;
     try {
-      const snapshot = await loadSymbolSnapshot(symbol);
+      const snapshot = await loadSymbolSnapshot(symbol, {
+        perf,
+        onIntermediateSnapshot: (intermediate) => {
+          if (usedCachedFallback) {
+            return;
+          }
+          if (!intermediate?.entry || !hasAnyMarketData(intermediate.entry)) {
+            return;
+          }
+          usedCachedFallback = true;
+          extraSymbolData.set(symbol, intermediate.entry);
+          showStatus("Using cached data — refreshing with live quote...");
+          marketIndicatorState.usingCached = true;
+          updateMarketIndicator();
+          perf.start("compute");
+          const interimResult = analyzeTrade({
+            symbol,
+            cash: cashValue,
+            risk,
+            positionSizingMode: safePositionSizing,
+            riskPercent: riskPercentValue,
+          });
+          perf.end("compute");
+          perf.start("render");
+          renderResult(interimResult);
+          perf.end("render");
+        },
+      });
       showErrors([]);
       setSymbolError("");
+      let statusMessage = "";
       if (snapshot?.status === "cache") {
         const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        showStatus(`Live data unavailable — showing cached price from ${lastUpdated}.`);
+        statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
         marketIndicatorState.usingCached = true;
         updateMarketIndicator();
       } else if (snapshot?.status === "unavailable") {
         const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        const message = snapshot.entry?.lastUpdatedAt
+        statusMessage = snapshot.entry?.lastUpdatedAt
           ? `Data unavailable — showing cached price from ${lastUpdated}.`
           : "Data unavailable — please try again shortly.";
-        showStatus(message);
         marketIndicatorState.usingCached = true;
         updateMarketIndicator();
       } else if (snapshot?.dataSource === "historical") {
         const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        showStatus(`Live data unavailable — showing last close from ${lastUpdated}.`);
+        statusMessage = `Live data unavailable — showing last close from ${lastUpdated}.`;
       } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
         const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        showStatus(`Market closed — showing last close from ${lastUpdated}.`);
+        statusMessage = `Market closed — showing last close from ${lastUpdated}.`;
       } else {
-        showStatus("");
+        statusMessage = usedCachedFallback ? "Updated with live data." : "";
       }
+      showStatus(statusMessage);
     } catch (error) {
       if (error.type === "invalid_symbol") {
         setSymbolError(`We couldn't find data for ${symbol}. Double-check the symbol and try again.`);
@@ -3438,6 +3798,7 @@ if (form) {
       isSubmitting = false;
       setFormLoadingState(false);
     }
+    perf.start("compute");
     const result = analyzeTrade({
       symbol,
       cash: cashValue,
@@ -3445,7 +3806,22 @@ if (form) {
       positionSizingMode: safePositionSizing,
       riskPercent: riskPercentValue,
     });
+    perf.end("compute");
+    perf.start("render");
     renderResult(result);
+    perf.end("render");
+    perf.end("total");
+    const summary = perf.summary("total");
+    if (summary) {
+      const breakdown = summary.breakdown;
+      console.info(
+        `Generate AI Signal: total=${summary.total.toFixed(1)}ms | quote=${(
+          breakdown.fetchQuote ?? 0
+        ).toFixed(1)}ms | history=${(breakdown.fetchHistory ?? 0).toFixed(1)}ms | compute=${(
+          breakdown.compute ?? 0
+        ).toFixed(1)}ms | render=${(breakdown.render ?? 0).toFixed(1)}ms`,
+      );
+    }
   });
 }
 
@@ -3488,6 +3864,7 @@ if (isBrowser) {
   }
   updateRiskPercentVisibility(positionSizingInput?.value ?? POSITION_SIZING_MODES.CASH);
   loadPersistentQuoteCache();
+  loadPersistentHistoricalCache();
   hydrateMarketStateFromCache();
   renderMarketTable();
   loadInitialMarketData()
@@ -3520,6 +3897,7 @@ if (typeof module !== "undefined" && module.exports) {
     applyRiskPercentVisibility,
     bindRiskPercentField,
     getQuote,
+    fetchHistoricalSeries,
     deriveMarketSession,
     loadSymbolSnapshot,
     resetSymbolCache,
