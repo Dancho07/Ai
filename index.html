@@ -171,6 +171,7 @@
                 <th data-col="sector">Sector</th>
                 <th data-col="cap">Market cap</th>
                 <th data-col="signal">Signal</th>
+                <th data-col="horizon">Time horizon</th>
                 <th data-col="price">Live price</th>
                 <th data-col="change">Change</th>
                 <th data-col="change1d">1D change</th>
@@ -190,7 +191,10 @@
             <p class="eyebrow">Signal for <span id="result-symbol"></span></p>
             <h2 id="result-action" class="signal"></h2>
           </div>
-          <div class="badge" id="result-confidence"></div>
+          <div class="result-badges">
+            <div class="badge" id="result-confidence"></div>
+            <div class="badge horizon-badge" id="result-time-horizon"></div>
+          </div>
         </div>
         <div class="grid">
           <div>

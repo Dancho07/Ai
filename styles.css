@@ -538,6 +538,12 @@ td[data-col="signal"] {
   min-width: 110px;
 }
 
+th[data-col="horizon"],
+td[data-col="horizon"] {
+  width: 150px;
+  min-width: 150px;
+}
+
 th[data-col="price"],
 td[data-col="price"] {
   width: 170px;
@@ -574,6 +580,8 @@ th[data-col="cap"],
 td[data-col="cap"],
 th[data-col="signal"],
 td[data-col="signal"],
+th[data-col="horizon"],
+td[data-col="horizon"],
 th[data-col="price"],
 td[data-col="price"],
 th[data-col="change"],
@@ -651,6 +659,20 @@ td[data-col="analyze"] {
   padding: 8px 14px;
   border-radius: 999px;
   font-weight: 600;
+}
+
+.result-badges {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.horizon-badge {
+  background: #f1f2f9;
+  color: #2f3550;
+  font-size: 0.78rem;
+  padding: 6px 12px;
 }
 
 .confidence-badge.low {

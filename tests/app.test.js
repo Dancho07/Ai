@@ -23,6 +23,7 @@ const {
   updateStockWithHistorical,
   getStockEntry,
   calculateAtrLike,
+  classifyTimeHorizon,
   getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
@@ -136,6 +137,27 @@ const tests = [
         getSymbolValidationMessage("NVDA!!!"),
         "Stock symbols must start with a letter and include up to 10 letters, numbers, dots, or hyphens (e.g. BRK.B).",
       );
+    },
+  },
+  {
+    name: "classifies scalp horizon for high volatility and weak trend",
+    fn: async () => {
+      const horizon = classifyTimeHorizon({ volatilityLevel: "high", trendStrength: "weak" });
+      assert.strictEqual(horizon.label, "Scalp (minutes–hours)");
+    },
+  },
+  {
+    name: "classifies swing horizon for medium volatility and moderate trend",
+    fn: async () => {
+      const horizon = classifyTimeHorizon({ volatilityLevel: "medium", trendStrength: "moderate" });
+      assert.strictEqual(horizon.label, "Swing (days)");
+    },
+  },
+  {
+    name: "classifies position horizon for low volatility and strong trend",
+    fn: async () => {
+      const horizon = classifyTimeHorizon({ volatilityLevel: "low", trendStrength: "strong" });
+      assert.strictEqual(horizon.label, "Position (weeks)");
     },
   },
   {
