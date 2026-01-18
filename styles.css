@@ -505,6 +505,8 @@ tbody tr:hover td:last-child {
 .price-change {
   font-weight: 600;
   text-align: right;
+  padding: 4px 8px;
+  border-radius: 8px;
 }
 
 th[data-col="symbol"],
@@ -600,10 +602,12 @@ td[data-col="analyze"] {
 
 .price-change.positive {
   color: #1d7a4a;
+  background: rgba(29, 122, 74, 0.08);
 }
 
 .price-change.negative {
   color: #b54141;
+  background: rgba(181, 65, 65, 0.08);
 }
 
 .alert {
