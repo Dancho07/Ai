@@ -24,6 +24,7 @@ const {
   getStockEntry,
   calculateAtrLike,
   classifyTimeHorizon,
+  calculateSignalScore,
   getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
@@ -858,6 +859,26 @@ const tests = [
       assert.strictEqual(getConfidenceLabel(69), "Medium");
       assert.strictEqual(getConfidenceLabel(70), "High");
       assert.strictEqual(getConfidenceLabel(100), "High");
+    },
+  },
+  {
+    name: "calculates deterministic signal scores",
+    fn: async () => {
+      const prices = [100, 102, 101, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115];
+      const score = calculateSignalScore({
+        recent: 115,
+        average: 110,
+        dailyChange: 1.2,
+        monthlyChange: 6.0,
+        atrPercent: 2.5,
+        prices,
+        tradePlan: { stopLoss: 110 },
+      });
+      assert.strictEqual(score.total, 50);
+      assert.deepStrictEqual(
+        score.components.map((component) => component.score),
+        [27, 7, 12, 4, 0],
+      );
     },
   },
   {
