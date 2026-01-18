@@ -9,6 +9,7 @@ const riskInput = isBrowser ? document.querySelector('select[name="risk"]') : nu
 const positionSizingInput = isBrowser ? document.querySelector('select[name="positionSizing"]') : null;
 const riskPercentInput = isBrowser ? document.querySelector('input[name="riskPercent"]') : null;
 const riskPercentField = isBrowser ? document.getElementById("risk-percent-field") : null;
+const riskPercentError = isBrowser ? document.getElementById("risk-percent-error") : null;
 const symbolError = isBrowser ? document.getElementById("symbol-error") : null;
 const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
 const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
@@ -86,7 +87,7 @@ const POSITION_SIZING_MODES = {
   RISK_PERCENT: "risk_percent",
 };
 const RISK_PERCENT_LIMITS = {
-  min: 0.25,
+  min: 0.1,
   max: 5,
   fallback: 1,
 };
@@ -348,13 +349,116 @@ function loadPersistedFormState(storage) {
   }
 }
 
-function updateRiskPercentVisibility(mode) {
-  if (!riskPercentField || !riskPercentInput) {
+function setRiskPercentError(message, { errorElement = riskPercentError } = {}) {
+  if (!errorElement) {
+    return;
+  }
+  if (!message) {
+    errorElement.textContent = "";
+    errorElement.classList.add("hidden");
+    return;
+  }
+  errorElement.textContent = message;
+  errorElement.classList.remove("hidden");
+}
+
+function getRiskPercentValidationMessage(mode, value) {
+  if (mode !== POSITION_SIZING_MODES.RISK_PERCENT) {
+    return "";
+  }
+  const raw = value?.toString().trim() ?? "";
+  if (!raw) {
+    return "Risk per trade is required.";
+  }
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) {
+    return "Risk per trade must be a valid number.";
+  }
+  if (parsed < RISK_PERCENT_LIMITS.min || parsed > RISK_PERCENT_LIMITS.max) {
+    return `Risk per trade must be between ${RISK_PERCENT_LIMITS.min}% and ${RISK_PERCENT_LIMITS.max}%.`;
+  }
+  return "";
+}
+
+function applyRiskPercentVisibility(mode, { field, input, errorElement } = {}) {
+  if (!field || !input) {
     return;
   }
   const isRiskPercent = mode === POSITION_SIZING_MODES.RISK_PERCENT;
-  riskPercentField.classList.toggle("hidden", !isRiskPercent);
-  riskPercentInput.toggleAttribute("required", isRiskPercent);
+  field.classList.toggle("hidden", !isRiskPercent);
+  input.toggleAttribute("required", isRiskPercent);
+  input.toggleAttribute("disabled", !isRiskPercent);
+  if (!isRiskPercent) {
+    setRiskPercentError("", { errorElement });
+  }
+}
+
+function updateRiskPercentVisibility(mode) {
+  applyRiskPercentVisibility(mode, {
+    field: riskPercentField,
+    input: riskPercentInput,
+    errorElement: riskPercentError,
+  });
+}
+
+function getFormStateFromInputs() {
+  return {
+    symbol: symbolInput?.value ?? "",
+    cash: cashInput?.value ?? "",
+    risk: riskInput?.value ?? "moderate",
+    positionSizing: positionSizingInput?.value ?? POSITION_SIZING_MODES.CASH,
+    riskPercent: riskPercentInput?.value ?? "",
+  };
+}
+
+function bindRiskPercentField({
+  positionSizingInput,
+  riskPercentField,
+  riskPercentInput,
+  riskPercentError,
+  storage,
+  getFormState,
+} = {}) {
+  const updateVisibility = (mode) =>
+    applyRiskPercentVisibility(mode, {
+      field: riskPercentField,
+      input: riskPercentInput,
+      errorElement: riskPercentError,
+    });
+  const persistDraft = () => {
+    if (!storage || typeof getFormState !== "function") {
+      return;
+    }
+    persistFormState(storage, getFormState());
+  };
+  const validateRiskPercent = () => {
+    const message = getRiskPercentValidationMessage(
+      positionSizingInput?.value ?? POSITION_SIZING_MODES.CASH,
+      riskPercentInput?.value ?? "",
+    );
+    setRiskPercentError(message, { errorElement: riskPercentError });
+    return message;
+  };
+
+  if (positionSizingInput?.addEventListener) {
+    positionSizingInput.addEventListener("change", () => {
+      updateVisibility(positionSizingInput.value);
+      persistDraft();
+    });
+  }
+  if (riskPercentInput?.addEventListener) {
+    riskPercentInput.addEventListener("input", () => {
+      persistDraft();
+    });
+    riskPercentInput.addEventListener("blur", () => {
+      validateRiskPercent();
+    });
+  }
+
+  return {
+    updateVisibility,
+    validateRiskPercent,
+  };
 }
 
 function formatTime(timestamp) {
@@ -3225,11 +3329,14 @@ if (marketBody) {
 }
 
 if (form) {
-  if (positionSizingInput) {
-    positionSizingInput.addEventListener("change", () => {
-      updateRiskPercentVisibility(positionSizingInput.value);
-    });
-  }
+  bindRiskPercentField({
+    positionSizingInput,
+    riskPercentField,
+    riskPercentInput,
+    riskPercentError,
+    storage: localStorage,
+    getFormState: getFormStateFromInputs,
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (isSubmitting) {
@@ -3243,7 +3350,8 @@ if (form) {
     const cashValue = Number(formData.get("cash"));
     const risk = formData.get("risk").toString();
     const positionSizingMode = formData.get("positionSizing")?.toString() ?? POSITION_SIZING_MODES.CASH;
-    const riskPercentValue = Number(formData.get("riskPercent"));
+    const riskPercentRaw = formData.get("riskPercent")?.toString() ?? "";
+    const riskPercentValue = Number.parseFloat(riskPercentRaw);
 
     const validationErrors = [];
     const symbolMessage = getSymbolValidationMessage(symbol);
@@ -3258,14 +3366,10 @@ if (form) {
       positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
         ? POSITION_SIZING_MODES.RISK_PERCENT
         : POSITION_SIZING_MODES.CASH;
-    if (safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT) {
-      if (!Number.isFinite(riskPercentValue)) {
-        validationErrors.push("Risk per trade must be a valid number.");
-      } else if (riskPercentValue < RISK_PERCENT_LIMITS.min || riskPercentValue > RISK_PERCENT_LIMITS.max) {
-        validationErrors.push(
-          `Risk per trade must be between ${RISK_PERCENT_LIMITS.min}% and ${RISK_PERCENT_LIMITS.max}%.`,
-        );
-      }
+    const riskPercentMessage = getRiskPercentValidationMessage(safePositionSizing, riskPercentRaw);
+    setRiskPercentError(riskPercentMessage);
+    if (riskPercentMessage) {
+      validationErrors.push(riskPercentMessage);
     }
 
     if (symbolMessage || validationErrors.length > 0) {
@@ -3412,6 +3516,9 @@ if (typeof module !== "undefined" && module.exports) {
     getSymbolValidationMessage,
     persistFormState,
     loadPersistedFormState,
+    getRiskPercentValidationMessage,
+    applyRiskPercentVisibility,
+    bindRiskPercentField,
     getQuote,
     deriveMarketSession,
     loadSymbolSnapshot,
