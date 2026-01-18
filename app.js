@@ -2519,13 +2519,31 @@ function createMarketRowSkeleton(stock) {
     <td data-col="cap"></td>
     <td data-col="signal"></td>
     <td data-col="price"></td>
-    <td data-col="change" class="price-change"></td>
-    <td data-col="change1d" class="price-change"></td>
+    <td data-col="change" class="price-change change-cell"></td>
+    <td data-col="change1d" class="price-change change1d-cell"></td>
     <td data-col="change1m" class="price-change"></td>
     <td data-col="change1y" class="price-change"></td>
     <td data-col="analyze" class="analyze-cell"></td>
   `;
   return row;
+}
+
+function formatChangeCellContent(cell, value, className) {
+  if (!cell) {
+    return;
+  }
+  const baseClass =
+    cell.dataset.col === "change"
+      ? "change-cell"
+      : cell.dataset.col === "change1d"
+        ? "change1d-cell"
+        : "";
+  cell.className = `price-change ${baseClass} ${className}`.trim();
+  if (value === "n/a") {
+    cell.innerHTML = '<span class="muted">n/a</span>';
+  } else {
+    cell.textContent = value;
+  }
 }
 
 function updateMarketRowCells(row, stock) {
@@ -2590,22 +2608,10 @@ function updateMarketRowCells(row, stock) {
       </div>
     `;
   }
-  if (changeCell) {
-    changeCell.textContent = changeDisplay;
-    changeCell.className = `price-change ${changeClass}`.trim();
-  }
-  if (dayCell) {
-    dayCell.textContent = dayDisplay;
-    dayCell.className = `price-change ${dayClass}`.trim();
-  }
-  if (monthCell) {
-    monthCell.textContent = monthDisplay;
-    monthCell.className = `price-change ${monthClass}`.trim();
-  }
-  if (yearCell) {
-    yearCell.textContent = yearDisplay;
-    yearCell.className = `price-change ${yearClass}`.trim();
-  }
+  formatChangeCellContent(changeCell, changeDisplay, changeClass);
+  formatChangeCellContent(dayCell, dayDisplay, dayClass);
+  formatChangeCellContent(monthCell, monthDisplay, monthClass);
+  formatChangeCellContent(yearCell, yearDisplay, yearClass);
   if (analyzeCell) {
     analyzeCell.innerHTML = `
       <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
@@ -2933,5 +2939,6 @@ if (typeof module !== "undefined" && module.exports) {
     formatTimestamp,
     getMarketIndicatorData,
     handleMarketRowAction,
+    updateMarketRowCells,
   };
 }
