@@ -69,6 +69,25 @@
               <option value="high">High</option>
             </select>
           </label>
+          <label>
+            Position sizing mode
+            <select name="positionSizing" id="position-sizing" required>
+              <option value="cash" selected>Use available cash (current)</option>
+              <option value="risk_percent">Risk per trade (%)</option>
+            </select>
+          </label>
+          <label id="risk-percent-field" class="hidden">
+            Risk per trade (%)
+            <input
+              type="number"
+              name="riskPercent"
+              min="0.25"
+              max="5"
+              step="0.25"
+              placeholder="1"
+              value="1"
+            />
+          </label>
           <button type="submit">
             <span class="button-label">Generate AI Signal</span>
             <span class="button-spinner" aria-hidden="true"></span>
@@ -223,6 +242,14 @@
               <div>
                 <dt>Position size</dt>
                 <dd id="plan-position"></dd>
+              </div>
+              <div>
+                <dt>Risk amount</dt>
+                <dd id="plan-risk-amount"></dd>
+              </div>
+              <div>
+                <dt>Stop distance</dt>
+                <dd id="plan-stop-distance"></dd>
               </div>
               <div id="plan-risk-reward-row">
                 <dt>Risk/Reward</dt>

@@ -6,6 +6,9 @@ const resultCard = isBrowser ? document.getElementById("signalResult") : null;
 const symbolInput = isBrowser ? document.getElementById("symbol-input") : null;
 const cashInput = isBrowser ? document.querySelector('input[name="cash"]') : null;
 const riskInput = isBrowser ? document.querySelector('select[name="risk"]') : null;
+const positionSizingInput = isBrowser ? document.querySelector('select[name="positionSizing"]') : null;
+const riskPercentInput = isBrowser ? document.querySelector('input[name="riskPercent"]') : null;
+const riskPercentField = isBrowser ? document.getElementById("risk-percent-field") : null;
 const symbolError = isBrowser ? document.getElementById("symbol-error") : null;
 const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
 const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
@@ -35,6 +38,8 @@ const planStopLoss = isBrowser ? document.getElementById("plan-stop-loss") : nul
 const planTakeProfitRow = isBrowser ? document.getElementById("plan-take-profit-row") : null;
 const planTakeProfit = isBrowser ? document.getElementById("plan-take-profit") : null;
 const planPosition = isBrowser ? document.getElementById("plan-position") : null;
+const planRiskAmount = isBrowser ? document.getElementById("plan-risk-amount") : null;
+const planStopDistance = isBrowser ? document.getElementById("plan-stop-distance") : null;
 const planRiskRewardRow = isBrowser ? document.getElementById("plan-risk-reward-row") : null;
 const planRiskReward = isBrowser ? document.getElementById("plan-risk-reward") : null;
 const planHoldLevels = isBrowser ? document.getElementById("plan-hold-levels") : null;
@@ -76,6 +81,15 @@ const riskPerTrade = {
 };
 
 const FORM_STATE_KEY = "trade_form_state_v1";
+const POSITION_SIZING_MODES = {
+  CASH: "cash",
+  RISK_PERCENT: "risk_percent",
+};
+const RISK_PERCENT_LIMITS = {
+  min: 0.25,
+  max: 5,
+  fallback: 1,
+};
 
 const ENTRY_RANGE_PCT = 0.003;
 const ATR_LOOKBACK = 30;
@@ -294,7 +308,7 @@ function getSymbolValidationMessage(symbol) {
   return "";
 }
 
-function persistFormState(storage, { symbol, cash, risk }) {
+function persistFormState(storage, { symbol, cash, risk, positionSizing, riskPercent }) {
   if (!storage?.setItem) {
     return;
   }
@@ -302,6 +316,9 @@ function persistFormState(storage, { symbol, cash, risk }) {
     symbol: normalizeSymbolInput(symbol ?? ""),
     cash: typeof cash === "string" ? cash : cash?.toString?.() ?? "",
     risk: Object.keys(riskLimits).includes(risk) ? risk : "moderate",
+    positionSizing:
+      positionSizing === POSITION_SIZING_MODES.RISK_PERCENT ? POSITION_SIZING_MODES.RISK_PERCENT : POSITION_SIZING_MODES.CASH,
+    riskPercent: typeof riskPercent === "string" ? riskPercent : riskPercent?.toString?.() ?? "",
   };
   storage.setItem(FORM_STATE_KEY, JSON.stringify(payload));
 }
@@ -320,10 +337,24 @@ function loadPersistedFormState(storage) {
       symbol: normalizeSymbolInput(parsed.symbol ?? ""),
       cash: parsed.cash ?? "",
       risk: Object.keys(riskLimits).includes(parsed.risk) ? parsed.risk : "moderate",
+      positionSizing:
+        parsed.positionSizing === POSITION_SIZING_MODES.RISK_PERCENT
+          ? POSITION_SIZING_MODES.RISK_PERCENT
+          : POSITION_SIZING_MODES.CASH,
+      riskPercent: parsed.riskPercent ?? "",
     };
   } catch (error) {
     return null;
   }
+}
+
+function updateRiskPercentVisibility(mode) {
+  if (!riskPercentField || !riskPercentInput) {
+    return;
+  }
+  const isRiskPercent = mode === POSITION_SIZING_MODES.RISK_PERCENT;
+  riskPercentField.classList.toggle("hidden", !isRiskPercent);
+  riskPercentInput.toggleAttribute("required", isRiskPercent);
 }
 
 function formatTime(timestamp) {
@@ -1532,6 +1563,8 @@ function calculateTradePlan({
   prices,
   cash,
   risk,
+  positionSizingMode,
+  riskPercent,
 }) {
   const entryMeta = priceLabel
     ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf)})` : ""}`
@@ -1549,15 +1582,19 @@ function calculateTradePlan({
     const breakdownDisplay =
       breakdownLevel != null ? quoteFormatter.format(breakdownLevel) : "Awaiting history";
     return {
-      entryDisplay: "No trade recommended right now",
+      entryDisplay: "No position recommended",
       entryMeta,
       stopLossDisplay: "",
       takeProfitDisplay: "",
-      positionSizeDisplay: "0 shares",
+      positionSizeDisplay: "No position recommended",
+      riskAmountDisplay: "—",
+      stopDistanceDisplay: "—",
       riskRewardDisplay: "",
       positionSize: 0,
+      riskAmount: 0,
+      stopDistance: 0,
       isHold: true,
-      holdNotice: "No trade recommended right now",
+      holdNotice: "No position recommended",
       holdLevels: {
         breakoutLevel,
         breakdownLevel,
@@ -1576,8 +1613,12 @@ function calculateTradePlan({
       stopLossDisplay: "Not available",
       takeProfitDisplay: "Not available",
       positionSizeDisplay: "0 shares",
+      riskAmountDisplay: "Not available",
+      stopDistanceDisplay: "Not available",
       riskRewardDisplay: "Not available",
       positionSize: 0,
+      riskAmount: 0,
+      stopDistance: 0,
       isHold: false,
       holdLevels: null,
     };
@@ -1614,12 +1655,23 @@ function calculateTradePlan({
   }
 
   const riskPerShare = stopLoss != null ? Math.abs(resolvedEntryPrice - stopLoss) : null;
-  const riskBudget = cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
+  const safePositionSizing =
+    positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
+      ? POSITION_SIZING_MODES.RISK_PERCENT
+      : POSITION_SIZING_MODES.CASH;
+  const normalizedRiskPercent = Number.isFinite(riskPercent)
+    ? clampNumber(riskPercent, RISK_PERCENT_LIMITS.min, RISK_PERCENT_LIMITS.max)
+    : RISK_PERCENT_LIMITS.fallback;
+  const riskBudget =
+    safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT
+      ? cash * (normalizedRiskPercent / 100)
+      : cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
   const maxShares = Math.max(Math.floor(cash / resolvedEntryPrice), 0);
   const positionSize =
     riskPerShare && riskPerShare > 0
       ? Math.min(Math.floor(riskBudget / riskPerShare), maxShares)
       : 0;
+  const stopDistance = riskPerShare && riskPerShare > 0 ? riskPerShare : 0;
 
   let takeProfit = null;
   let riskReward = null;
@@ -1638,12 +1690,13 @@ function calculateTradePlan({
     entryMeta,
     stopLossDisplay: quoteFormatter.format(stopLoss),
     takeProfitDisplay: takeProfit != null ? quoteFormatter.format(takeProfit) : quoteFormatter.format(stopLoss),
-    positionSizeDisplay:
-      positionSize > 0
-        ? `${positionSize} shares (risk ${quoteFormatter.format(riskBudget)})`
-        : "0 shares",
+    positionSizeDisplay: positionSize > 0 ? `${positionSize} shares` : "0 shares",
+    riskAmountDisplay: quoteFormatter.format(riskBudget),
+    stopDistanceDisplay: stopDistance ? quoteFormatter.format(stopDistance) : "Not available",
     riskRewardDisplay: riskReward != null ? `${riskReward.toFixed(2)}:1` : "1.00:1",
     positionSize,
+    riskAmount: riskBudget,
+    stopDistance,
     stopLoss,
     takeProfit,
     riskReward,
@@ -1652,7 +1705,7 @@ function calculateTradePlan({
   };
 }
 
-function analyzeTrade({ symbol, cash, risk }) {
+function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const marketEntry = getStockEntry(symbol);
   const prices = marketEntry?.history ?? [];
   const priceContext = resolvePriceContext(marketEntry);
@@ -1676,6 +1729,8 @@ function analyzeTrade({ symbol, cash, risk }) {
       prices,
       cash,
       risk,
+      positionSizingMode,
+      riskPercent,
     });
     const signalScore = calculateSignalScore({
       recent,
@@ -1762,6 +1817,8 @@ function analyzeTrade({ symbol, cash, risk }) {
     prices,
     cash,
     risk,
+    positionSizingMode,
+    riskPercent,
   });
   const signalScore = calculateSignalScore({
     recent,
@@ -1898,7 +1955,9 @@ function renderResult(result) {
   if (resultConfidenceScore) {
     resultConfidenceScore.textContent = `${result.confidenceScore}%`;
   }
-  resultShares.textContent = `${result.shares} shares`;
+  resultShares.textContent = result.tradePlan.isHold
+    ? "No position recommended"
+    : `${result.shares} shares`;
   updateResultLivePriceDisplay(result.symbol);
   resultPrice.textContent = result.estimatedPrice
     ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
@@ -1955,6 +2014,12 @@ function renderResult(result) {
   }
   if (planPosition) {
     planPosition.textContent = result.tradePlan.positionSizeDisplay;
+  }
+  if (planRiskAmount) {
+    planRiskAmount.textContent = result.tradePlan.riskAmountDisplay;
+  }
+  if (planStopDistance) {
+    planStopDistance.textContent = result.tradePlan.stopDistanceDisplay;
   }
   if (planRiskReward) {
     planRiskReward.textContent = result.tradePlan.riskRewardDisplay;
@@ -3160,6 +3225,11 @@ if (marketBody) {
 }
 
 if (form) {
+  if (positionSizingInput) {
+    positionSizingInput.addEventListener("change", () => {
+      updateRiskPercentVisibility(positionSizingInput.value);
+    });
+  }
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (isSubmitting) {
@@ -3172,6 +3242,8 @@ if (form) {
     }
     const cashValue = Number(formData.get("cash"));
     const risk = formData.get("risk").toString();
+    const positionSizingMode = formData.get("positionSizing")?.toString() ?? POSITION_SIZING_MODES.CASH;
+    const riskPercentValue = Number(formData.get("riskPercent"));
 
     const validationErrors = [];
     const symbolMessage = getSymbolValidationMessage(symbol);
@@ -3182,18 +3254,33 @@ if (form) {
     if (!Object.keys(riskLimits).includes(risk)) {
       validationErrors.push("Risk tolerance must be low, moderate, or high.");
     }
+    const safePositionSizing =
+      positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
+        ? POSITION_SIZING_MODES.RISK_PERCENT
+        : POSITION_SIZING_MODES.CASH;
+    if (safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT) {
+      if (!Number.isFinite(riskPercentValue)) {
+        validationErrors.push("Risk per trade must be a valid number.");
+      } else if (riskPercentValue < RISK_PERCENT_LIMITS.min || riskPercentValue > RISK_PERCENT_LIMITS.max) {
+        validationErrors.push(
+          `Risk per trade must be between ${RISK_PERCENT_LIMITS.min}% and ${RISK_PERCENT_LIMITS.max}%.`,
+        );
+      }
+    }
 
     if (symbolMessage || validationErrors.length > 0) {
       showErrors(validationErrors);
       showStatus("");
-    resultCard.classList.add("hidden");
-    return;
-  }
+      resultCard.classList.add("hidden");
+      return;
+    }
 
     persistFormState(localStorage, {
       symbol,
       cash: formData.get("cash").toString(),
       risk,
+      positionSizing: safePositionSizing,
+      riskPercent: formData.get("riskPercent")?.toString?.() ?? "",
     });
 
     isSubmitting = true;
@@ -3247,7 +3334,13 @@ if (form) {
       isSubmitting = false;
       setFormLoadingState(false);
     }
-    const result = analyzeTrade({ symbol, cash: cashValue, risk });
+    const result = analyzeTrade({
+      symbol,
+      cash: cashValue,
+      risk,
+      positionSizingMode: safePositionSizing,
+      riskPercent: riskPercentValue,
+    });
     renderResult(result);
   });
 }
@@ -3282,7 +3375,14 @@ if (isBrowser) {
     if (riskInput) {
       riskInput.value = restoredState.risk;
     }
+    if (positionSizingInput) {
+      positionSizingInput.value = restoredState.positionSizing;
+    }
+    if (riskPercentInput && restoredState.riskPercent) {
+      riskPercentInput.value = restoredState.riskPercent;
+    }
   }
+  updateRiskPercentVisibility(positionSizingInput?.value ?? POSITION_SIZING_MODES.CASH);
   loadPersistentQuoteCache();
   hydrateMarketStateFromCache();
   renderMarketTable();
