@@ -844,7 +844,6 @@ const tests = [
         average: 102,
         dailyChange: -1,
         monthlyChange: 3,
-        yearlyChange: 8,
         atrPercent: 1.5,
       });
       assert.ok(reasons.length >= 3 && reasons.length <= 5);
@@ -927,7 +926,6 @@ const tests = [
         lastChangePct: -1.04,
         dailyChange: null,
         monthlyChange: 5,
-        yearlyChange: 10,
         quoteAsOf: null,
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
@@ -964,7 +962,6 @@ const tests = [
         lastChangePct: 12.3456,
         dailyChange: -0.5,
         monthlyChange: null,
-        yearlyChange: null,
         quoteAsOf: null,
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,

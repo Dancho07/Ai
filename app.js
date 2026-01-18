@@ -59,7 +59,6 @@ const filterSignal = isBrowser ? document.getElementById("filter-signal") : null
 const filterMin = isBrowser ? document.getElementById("filter-min") : null;
 const filterMax = isBrowser ? document.getElementById("filter-max") : null;
 const filterMonth = isBrowser ? document.getElementById("filter-month") : null;
-const filterYear = isBrowser ? document.getElementById("filter-year") : null;
 
 const riskLimits = {
   low: 0.2,
@@ -113,7 +112,6 @@ const marketState = marketWatchlist.map((stock) => ({
   lastChangePct: null,
   dailyChange: null,
   monthlyChange: null,
-  yearlyChange: null,
   lastUpdated: null,
   lastUpdatedAt: null,
   quoteAsOf: null,
@@ -1192,7 +1190,6 @@ function buildSignalReasons({
   average,
   dailyChange,
   monthlyChange,
-  yearlyChange,
   atrPercent,
 }) {
   const reasons = [];
@@ -1207,9 +1204,6 @@ function buildSignalReasons({
   }
   if (monthlyChange != null) {
     reasons.push(`1-month trend: ${formatPercent(monthlyChange)}.`);
-  }
-  if (yearlyChange != null) {
-    reasons.push(`1-year trend: ${formatPercent(yearlyChange)}.`);
   }
   if (atrPercent != null) {
     reasons.push(`30-day volatility avg: ${formatPercent(atrPercent)}.`);
@@ -1289,7 +1283,6 @@ function calculateSignalConfidence({
   average,
   dailyChange,
   monthlyChange,
-  yearlyChange,
   atrPercent,
   prices,
 }) {
@@ -1313,7 +1306,7 @@ function calculateSignalConfidence({
       : action === "sell"
         ? diffPct >= 0.7
         : Math.abs(diffPct) < 0.7;
-  const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange, yearlyChange]);
+  const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange]);
   const momentumAligned =
     action === "buy"
       ? momentumDirection <= 0
@@ -1512,7 +1505,6 @@ function analyzeTrade({ symbol, cash, risk }) {
       average: null,
       dailyChange: marketEntry?.dailyChange ?? null,
       monthlyChange: marketEntry?.monthlyChange ?? null,
-      yearlyChange: marketEntry?.yearlyChange ?? null,
       atrPercent: null,
       prices,
     });
@@ -1544,7 +1536,6 @@ function analyzeTrade({ symbol, cash, risk }) {
         average,
         dailyChange: marketEntry?.dailyChange ?? null,
         monthlyChange: marketEntry?.monthlyChange ?? null,
-        yearlyChange: marketEntry?.yearlyChange ?? null,
         atrPercent: null,
       }),
       timeHorizon: calculateTimeHorizon(prices),
@@ -1580,7 +1571,6 @@ function analyzeTrade({ symbol, cash, risk }) {
     average,
     dailyChange: marketEntry?.dailyChange ?? null,
     monthlyChange: marketEntry?.monthlyChange ?? null,
-    yearlyChange: marketEntry?.yearlyChange ?? null,
     atrPercent,
     prices,
   });
@@ -1612,7 +1602,6 @@ function analyzeTrade({ symbol, cash, risk }) {
       average,
       dailyChange: marketEntry?.dailyChange ?? null,
       monthlyChange: marketEntry?.monthlyChange ?? null,
-      yearlyChange: marketEntry?.yearlyChange ?? null,
       atrPercent,
     }),
     timeHorizon: calculateTimeHorizon(prices),
@@ -1909,14 +1898,12 @@ function applyChartMetrics(stock, closeSeries, timestamps) {
   const latest = closeSeries[closeSeries.length - 1];
   const monthIndex = Math.max(closeSeries.length - 22, 0);
   const monthClose = closeSeries[monthIndex];
-  const yearClose = closeSeries[0];
   stock.history = closeSeries;
   stock.dailyChange =
     closeSeries.length >= 2
       ? calculatePercentChange(latest, closeSeries[closeSeries.length - 2])
       : null;
   stock.monthlyChange = calculatePercentChange(latest, monthClose);
-  stock.yearlyChange = calculatePercentChange(latest, yearClose);
   stock.lastHistoricalTimestamp = timestamps?.[timestamps.length - 1] ?? stock.lastHistoricalTimestamp;
 }
 
@@ -2054,7 +2041,7 @@ async function fetchHistoricalSeries(symbol, options = {}) {
   if (cached) {
     return cached;
   }
-  const chartData = await fetchJson(YAHOO_CHART_URL(symbol, "1y"), {
+  const chartData = await fetchJson(YAHOO_CHART_URL(symbol, "1mo"), {
     provider: PROVIDER,
     symbol,
     fetchFn: options.fetchFn,
@@ -2315,7 +2302,6 @@ async function loadSymbolSnapshot(symbol, options = {}) {
     lastChange: null,
     lastChangePct: null,
     monthlyChange: null,
-    yearlyChange: null,
     dailyChange: null,
     lastUpdated: null,
     lastUpdatedAt: null,
@@ -2345,7 +2331,6 @@ function matchesFilters(stock) {
   const minValue = Number(filterMin.value);
   const maxValue = Number(filterMax.value);
   const minMonthValue = Number(filterMonth.value);
-  const minYearValue = Number(filterYear.value);
   const signal = calculateSignal(stock.history);
 
   if (searchValue && !stock.symbol.includes(searchValue)) {
@@ -2370,13 +2355,6 @@ function matchesFilters(stock) {
     !Number.isNaN(minMonthValue) &&
     minMonthValue !== 0 &&
     (stock.monthlyChange === null || stock.monthlyChange < minMonthValue)
-  ) {
-    return false;
-  }
-  if (
-    !Number.isNaN(minYearValue) &&
-    minYearValue !== 0 &&
-    (stock.yearlyChange === null || stock.yearlyChange < minYearValue)
   ) {
     return false;
   }
@@ -2457,7 +2435,6 @@ async function refreshSymbolData(symbol, options = {}) {
       change: display.changeDisplay,
       change1d: display.dayDisplay,
       change1m: display.monthDisplay,
-      change1y: display.yearDisplay,
       meta: display.meta,
     },
   });
@@ -2689,7 +2666,6 @@ function getMarketRowDisplay(stock) {
   const changeClass = change === null ? "" : change >= 0 ? "positive" : "negative";
   const dayDisplay = formatPercent(stock.dailyChange);
   const monthDisplay = formatPercent(stock.monthlyChange);
-  const yearDisplay = formatPercent(stock.yearlyChange);
 
   return {
     priceDisplay,
@@ -2699,10 +2675,8 @@ function getMarketRowDisplay(stock) {
     changeClass,
     dayDisplay,
     monthDisplay,
-    yearDisplay,
     dayClass: stock.dailyChange === null ? "" : stock.dailyChange >= 0 ? "positive" : "negative",
     monthClass: stock.monthlyChange === null ? "" : stock.monthlyChange >= 0 ? "positive" : "negative",
-    yearClass: stock.yearlyChange === null ? "" : stock.yearlyChange >= 0 ? "positive" : "negative",
   };
 }
 
@@ -2727,7 +2701,6 @@ function createMarketRowSkeleton(stock) {
     <td data-col="change" class="price-change change-cell"></td>
     <td data-col="change1d" class="price-change change1d-cell"></td>
     <td data-col="change1m" class="price-change"></td>
-    <td data-col="change1y" class="price-change"></td>
     <td data-col="analyze" class="analyze-cell"></td>
   `;
   return row;
@@ -2765,10 +2738,8 @@ function updateMarketRowCells(row, stock) {
     changeClass,
     dayDisplay,
     monthDisplay,
-    yearDisplay,
     dayClass,
     monthClass,
-    yearClass,
   } = getMarketRowDisplay(stock);
 
   const symbolCell = row.querySelector('[data-col="symbol"]');
@@ -2781,7 +2752,6 @@ function updateMarketRowCells(row, stock) {
   const changeCell = row.querySelector('[data-col="change"]');
   const dayCell = row.querySelector('[data-col="change1d"]');
   const monthCell = row.querySelector('[data-col="change1m"]');
-  const yearCell = row.querySelector('[data-col="change1y"]');
   const analyzeCell = row.querySelector('[data-col="analyze"]');
 
   if (symbolCell) {
@@ -2823,7 +2793,6 @@ function updateMarketRowCells(row, stock) {
   formatChangeCellContent(changeCell, changeDisplay, changeClass);
   formatChangeCellContent(dayCell, dayDisplay, dayClass);
   formatChangeCellContent(monthCell, monthDisplay, monthClass);
-  formatChangeCellContent(yearCell, yearDisplay, yearClass);
   if (analyzeCell) {
     analyzeCell.innerHTML = `
       <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
@@ -2839,7 +2808,7 @@ function renderMarketTable() {
   }
   const filtered = marketState.filter(matchesFilters);
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="12">No stocks match these filters.</td></tr>`;
+    marketBody.innerHTML = `<tr><td colspan="11">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
     return;
   }
@@ -3074,7 +3043,6 @@ if (form) {
   filterMin,
   filterMax,
   filterMonth,
-  filterYear,
 ].forEach((input) => {
   if (input) {
     input.addEventListener("input", () => {
