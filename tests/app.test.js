@@ -30,6 +30,7 @@ const {
   getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
+  buildInvalidationRules,
   formatTimestamp,
   getMarketIndicatorData,
   handleMarketRowAction,
@@ -1132,6 +1133,24 @@ const tests = [
         atrPercent: 1.5,
       });
       assert.ok(reasons.length >= 3 && reasons.length <= 5);
+    },
+  },
+  {
+    name: "creates invalidation rules for all signal types",
+    fn: async () => {
+      const scenarios = ["buy", "sell", "hold"];
+      scenarios.forEach((action) => {
+        const rules = buildInvalidationRules({
+          action,
+          recent: 100,
+          average: 102,
+          dailyChange: -0.6,
+          monthlyChange: 1.2,
+          atrPercent: 4.5,
+        });
+        assert.ok(rules.length >= 2 && rules.length <= 3);
+        rules.forEach((rule) => assert.ok(rule.trim().length > 0));
+      });
     },
   },
   {

@@ -700,6 +700,29 @@ td[data-col="analyze"] {
   border: 1px solid #e3e7ff;
 }
 
+.invalidation-card {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #e3e7ff;
+  background: #ffffff;
+}
+
+.invalidation-card h4 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: #2f3550;
+}
+
+.invalidation-card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #30344a;
+  font-size: 0.88rem;
+}
+
 .confidence-row {
   display: flex;
   align-items: center;

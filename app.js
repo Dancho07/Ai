@@ -32,6 +32,7 @@ const resultThesis = isBrowser ? document.getElementById("result-thesis") : null
 const resultGenerated = isBrowser ? document.getElementById("result-generated") : null;
 const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer") : null;
 const resultReasoning = isBrowser ? document.getElementById("result-reasoning") : null;
+const resultInvalidation = isBrowser ? document.getElementById("result-invalidation") : null;
 const planEntry = isBrowser ? document.getElementById("plan-entry") : null;
 const planEntryMeta = isBrowser ? document.getElementById("plan-entry-meta") : null;
 const planStopLossRow = isBrowser ? document.getElementById("plan-stop-loss-row") : null;
@@ -1517,6 +1518,67 @@ function buildSignalReasons({
   return trimmed;
 }
 
+function buildInvalidationRules({
+  action,
+  recent,
+  average,
+  dailyChange,
+  monthlyChange,
+  atrPercent,
+}) {
+  const maThreshold = 1;
+  const volatilityThreshold = 5;
+  const volatilityHoldThreshold = 6;
+  const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange]);
+  const rules = [];
+
+  if (action === "buy") {
+    rules.push(
+      `If price closes >${maThreshold}% above the 10-day MA => downgrade to HOLD.`,
+    );
+    rules.push(
+      "If 1D/1M momentum flips positive => mean-reversion edge fades.",
+    );
+    rules.push(
+      `If volatility spikes above ${volatilityThreshold}% ATR => reduce size or wait.`,
+    );
+  } else if (action === "sell") {
+    rules.push(
+      `If price closes >${maThreshold}% below the 10-day MA => downgrade to HOLD.`,
+    );
+    rules.push(
+      "If 1D/1M momentum turns negative => cover and reassess.",
+    );
+    rules.push(
+      `If volatility spikes above ${volatilityThreshold}% ATR => reduce size or wait.`,
+    );
+  } else {
+    rules.push(
+      `If price closes >${maThreshold}% above the 10-day MA => upgrade to BUY.`,
+    );
+    rules.push(
+      `If price closes >${maThreshold}% below the 10-day MA => downgrade to SELL.`,
+    );
+    rules.push(
+      `If volatility spikes above ${volatilityHoldThreshold}% ATR => stay on the sidelines.`,
+    );
+  }
+
+  if (momentumDirection !== 0 && rules.length) {
+    rules[1] =
+      momentumDirection > 0
+        ? rules[1].replace("positive", "decisively positive")
+        : rules[1].replace("negative", "decisively negative");
+  }
+
+  const unique = [...new Set(rules)].filter((rule) => rule && rule.trim().length);
+  const trimmed = unique.slice(0, 3);
+  while (trimmed.length < 2) {
+    trimmed.push("If key indicators reverse, scale back risk and revisit the signal.");
+  }
+  return trimmed;
+}
+
 function getConfidenceLabel(score) {
   if (score >= 70) {
     return "High";
@@ -2043,6 +2105,14 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
         monthlyChange: marketEntry?.monthlyChange ?? null,
         atrPercent: null,
       }),
+      invalidationRules: buildInvalidationRules({
+        action: "hold",
+        recent,
+        average,
+        dailyChange: marketEntry?.dailyChange ?? null,
+        monthlyChange: marketEntry?.monthlyChange ?? null,
+        atrPercent: null,
+      }),
       timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
@@ -2117,6 +2187,14 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     thesis,
     tradePlan,
     signalReasons: buildSignalReasons({
+      action,
+      recent,
+      average,
+      dailyChange: marketEntry?.dailyChange ?? null,
+      monthlyChange: marketEntry?.monthlyChange ?? null,
+      atrPercent,
+    }),
+    invalidationRules: buildInvalidationRules({
       action,
       recent,
       average,
@@ -2264,6 +2342,9 @@ function renderLoadingState(symbol) {
   if (resultReasoning) {
     resultReasoning.innerHTML = "<li>Preparing indicator breakdown...</li>";
   }
+  if (resultInvalidation) {
+    resultInvalidation.innerHTML = "<li>Preparing invalidation rules...</li>";
+  }
   if (resultConfidenceCaution) {
     resultConfidenceCaution.textContent = "—";
   }
@@ -2301,6 +2382,10 @@ function renderResult(result) {
   resultThesis.innerHTML = result.thesis.map((line) => `<li>${line}</li>`).join("");
   if (resultReasoning) {
     resultReasoning.innerHTML = result.confidenceReasons.map((line) => `<li>${line}</li>`).join("");
+  }
+  if (resultInvalidation) {
+    const rules = Array.isArray(result.invalidationRules) ? result.invalidationRules : [];
+    resultInvalidation.innerHTML = rules.map((rule) => `<li>${rule}</li>`).join("");
   }
   if (resultConfidenceCaution) {
     resultConfidenceCaution.textContent = result.confidenceCaution;
@@ -3921,6 +4006,7 @@ if (typeof module !== "undefined" && module.exports) {
     getConfidenceLabel,
     calculateTradePlan,
     buildSignalReasons,
+    buildInvalidationRules,
     formatTimestamp,
     getMarketIndicatorData,
     handleMarketRowAction,
