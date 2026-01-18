@@ -165,9 +165,21 @@ const tests = [
     name: "restores persisted form state from storage",
     fn: async () => {
       const storage = createStorage();
-      persistFormState(storage, { symbol: " msft ", cash: "2500", risk: "high" });
+      persistFormState(storage, {
+        symbol: " msft ",
+        cash: "2500",
+        risk: "high",
+        positionSizing: "risk_percent",
+        riskPercent: "1.5",
+      });
       const restored = loadPersistedFormState(storage);
-      assert.deepStrictEqual(restored, { symbol: "MSFT", cash: "2500", risk: "high" });
+      assert.deepStrictEqual(restored, {
+        symbol: "MSFT",
+        cash: "2500",
+        risk: "high",
+        positionSizing: "risk_percent",
+        riskPercent: "1.5",
+      });
     },
   },
   {
@@ -816,6 +828,46 @@ const tests = [
     },
   },
   {
+    name: "sizes positions from risk percent and clamps to available cash",
+    fn: async () => {
+      const prices = [10, 10, 10, 10, 9.9, 10, 10, 10, 10, 10, 10];
+      const plan = calculateTradePlan({
+        action: "buy",
+        entryPrice: 10,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 1000,
+        risk: "moderate",
+        positionSizingMode: "risk_percent",
+        riskPercent: 5,
+      });
+      assert.strictEqual(plan.riskAmount, 50);
+      assert.strictEqual(plan.positionSize, 100);
+      assert.ok(plan.stopDistance > 0);
+    },
+  },
+  {
+    name: "uses risk percent sizing for short trades",
+    fn: async () => {
+      const prices = Array.from({ length: 12 }, () => 100);
+      const plan = calculateTradePlan({
+        action: "sell",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 10000,
+        risk: "moderate",
+        positionSizingMode: "risk_percent",
+        riskPercent: 1,
+      });
+      assert.strictEqual(plan.riskAmount, 100);
+      assert.strictEqual(plan.positionSize, 33);
+      assert.ok(plan.stopDistance > 0);
+    },
+  },
+  {
     name: "builds hold plan with breakout and breakdown levels",
     fn: async () => {
       const plan = calculateTradePlan({
@@ -827,7 +879,7 @@ const tests = [
         cash: 10000,
         risk: "moderate",
       });
-      assert.strictEqual(plan.entryDisplay, "No trade recommended right now");
+      assert.strictEqual(plan.entryDisplay, "No position recommended");
       assert.ok(plan.holdLevels);
       assert.ok(plan.holdLevels.breakoutLevel >= plan.holdLevels.breakdownLevel);
       assert.ok(plan.holdLevels.breakoutTrigger.includes("=> BUY"));
