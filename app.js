@@ -17,6 +17,7 @@ const resultConfidence = isBrowser ? document.getElementById("result-confidence"
 const resultConfidenceBadge = isBrowser ? document.getElementById("result-confidence-badge") : null;
 const resultConfidenceScore = isBrowser ? document.getElementById("result-confidence-score") : null;
 const resultConfidenceCaution = isBrowser ? document.getElementById("result-confidence-caution") : null;
+const resultTimeHorizon = isBrowser ? document.getElementById("result-time-horizon") : null;
 const resultShares = isBrowser ? document.getElementById("result-shares") : null;
 const resultLivePrice = isBrowser ? document.getElementById("result-live-price") : null;
 const resultPrice = isBrowser ? document.getElementById("result-price") : null;
@@ -1038,6 +1039,68 @@ function calculateSignal(prices) {
   return "hold";
 }
 
+function classifyTimeHorizon({ volatilityLevel, trendStrength }) {
+  if (volatilityLevel === "high" && trendStrength === "weak") {
+    return { label: "Scalp (minutes–hours)", shortLabel: "Scalp" };
+  }
+  if (volatilityLevel === "medium" && trendStrength === "moderate") {
+    return { label: "Swing (days)", shortLabel: "Swing" };
+  }
+  if (volatilityLevel === "low" && trendStrength === "strong") {
+    return { label: "Position (weeks)", shortLabel: "Position" };
+  }
+  if (trendStrength === "strong" && volatilityLevel !== "high") {
+    return { label: "Position (weeks)", shortLabel: "Position" };
+  }
+  if (volatilityLevel === "high") {
+    return { label: "Scalp (minutes–hours)", shortLabel: "Scalp" };
+  }
+  return { label: "Swing (days)", shortLabel: "Swing" };
+}
+
+function getTrendStrengthLabel(trendPercent) {
+  if (trendPercent == null) {
+    return "moderate";
+  }
+  const absoluteTrend = Math.abs(trendPercent);
+  if (absoluteTrend < 2) {
+    return "weak";
+  }
+  if (absoluteTrend < 5) {
+    return "moderate";
+  }
+  return "strong";
+}
+
+function getVolatilityLevel(atrPercent) {
+  if (atrPercent == null) {
+    return "medium";
+  }
+  if (atrPercent <= 2.5) {
+    return "low";
+  }
+  if (atrPercent <= 4.5) {
+    return "medium";
+  }
+  return "high";
+}
+
+function calculateTimeHorizon(prices) {
+  if (!prices || prices.length < 2) {
+    return { label: "Swing (days)", shortLabel: "Swing" };
+  }
+  const lookback = Math.min(ATR_LOOKBACK, prices.length);
+  const slice = prices.slice(-lookback);
+  const start = slice[0];
+  const end = slice[slice.length - 1];
+  const trendPercent = start ? ((end - start) / start) * 100 : null;
+  const atrLike = calculateAtrLike(prices, ATR_LOOKBACK);
+  const atrPercent = atrLike && end ? (atrLike / end) * 100 : null;
+  const trendStrength = getTrendStrengthLabel(trendPercent);
+  const volatilityLevel = getVolatilityLevel(atrPercent);
+  return classifyTimeHorizon({ volatilityLevel, trendStrength });
+}
+
 function formatPercent(value) {
   if (value == null || Number.isNaN(value)) {
     return "n/a";
@@ -1429,6 +1492,7 @@ function analyzeTrade({ symbol, cash, risk }) {
         yearlyChange: marketEntry?.yearlyChange ?? null,
         atrPercent: null,
       }),
+      timeHorizon: calculateTimeHorizon(prices),
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
     };
@@ -1496,6 +1560,7 @@ function analyzeTrade({ symbol, cash, risk }) {
       yearlyChange: marketEntry?.yearlyChange ?? null,
       atrPercent,
     }),
+    timeHorizon: calculateTimeHorizon(prices),
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
     generatedAt: new Date().toLocaleString(),
   };
@@ -1610,6 +1675,10 @@ function renderResult(result) {
   }
   if (resultConfidenceCaution) {
     resultConfidenceCaution.textContent = result.confidenceCaution;
+  }
+  if (resultTimeHorizon) {
+    const horizonLabel = result.timeHorizon?.label ?? "Swing (days)";
+    resultTimeHorizon.textContent = `Time horizon: ${horizonLabel}`;
   }
   if (planEntry) {
     planEntry.textContent = result.tradePlan.entryDisplay;
@@ -2552,6 +2621,7 @@ function createMarketRowSkeleton(stock) {
     <td data-col="sector"></td>
     <td data-col="cap"></td>
     <td data-col="signal"></td>
+    <td data-col="horizon"></td>
     <td data-col="price"></td>
     <td data-col="change" class="price-change change-cell"></td>
     <td data-col="change1d" class="price-change change1d-cell"></td>
@@ -2585,6 +2655,7 @@ function updateMarketRowCells(row, stock) {
     return;
   }
   const signal = calculateSignal(stock.history);
+  const timeHorizon = calculateTimeHorizon(stock.history);
   const {
     priceDisplay,
     badge,
@@ -2604,6 +2675,7 @@ function updateMarketRowCells(row, stock) {
   const sectorCell = row.querySelector('[data-col="sector"]');
   const capCell = row.querySelector('[data-col="cap"]');
   const signalCell = row.querySelector('[data-col="signal"]');
+  const horizonCell = row.querySelector('[data-col="horizon"]');
   const priceCell = row.querySelector('[data-col="price"]');
   const changeCell = row.querySelector('[data-col="change"]');
   const dayCell = row.querySelector('[data-col="change1d"]');
@@ -2626,6 +2698,11 @@ function updateMarketRowCells(row, stock) {
   }
   if (signalCell) {
     signalCell.innerHTML = `<span class="signal-pill ${signal}">${signal}</span>`;
+  }
+  if (horizonCell) {
+    horizonCell.innerHTML = `
+      <span class="badge horizon-badge" title="${timeHorizon.label}">${timeHorizon.shortLabel}</span>
+    `;
   }
   if (priceCell) {
     priceCell.innerHTML = `
@@ -2661,7 +2738,7 @@ function renderMarketTable() {
   }
   const filtered = marketState.filter(matchesFilters);
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="11">No stocks match these filters.</td></tr>`;
+    marketBody.innerHTML = `<tr><td colspan="12">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
     return;
   }
@@ -2966,6 +3043,8 @@ if (typeof module !== "undefined" && module.exports) {
     updateStockWithHistorical,
     getStockEntry,
     calculateAtrLike,
+    classifyTimeHorizon,
+    calculateTimeHorizon,
     calculateSignalConfidence,
     getConfidenceLabel,
     calculateTradePlan,
