@@ -16,9 +16,9 @@ body {
 }
 
 .page {
-  max-width: 1500px;
+  max-width: 1760px;
   margin: 0 auto;
-  padding: 48px 24px 72px;
+  padding: clamp(36px, 4vw, 56px) clamp(20px, 4vw, 64px) clamp(48px, 5vw, 72px);
   display: flex;
   flex-direction: column;
   gap: 32px;
@@ -309,7 +309,7 @@ button.is-loading .button-progress {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1240px;
+  min-width: 1520px;
   table-layout: auto;
 }
 
@@ -319,7 +319,7 @@ td {
   padding: 12px 14px;
   border-bottom: 1px solid #eef1ff;
   font-size: 0.98rem;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 th {
@@ -354,10 +354,10 @@ tbody tr:hover td:last-child {
 }
 
 .company-cell {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 280px;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
 }
 
 .market-row {
@@ -481,55 +481,86 @@ tbody tr:hover td:last-child {
   text-align: right;
 }
 
-th[data-col="change"],
-td[data-col="change"],
-th[data-col="change1d"],
-td[data-col="change1d"] {
-  width: 140px;
-}
-
 th[data-col="symbol"],
 td[data-col="symbol"] {
-  width: 80px;
+  width: 90px;
+  min-width: 90px;
 }
 
 th[data-col="company"],
 td[data-col="company"] {
-  width: 180px;
-  min-width: 160px;
-  max-width: 220px;
+  width: 260px;
+  min-width: 220px;
+  max-width: 280px;
 }
 
 th[data-col="sector"],
 td[data-col="sector"] {
-  width: 120px;
+  width: 140px;
+  min-width: 140px;
 }
 
 th[data-col="cap"],
 td[data-col="cap"] {
-  width: 90px;
+  width: 110px;
+  min-width: 110px;
 }
 
 th[data-col="signal"],
 td[data-col="signal"] {
-  width: 90px;
+  width: 110px;
+  min-width: 110px;
 }
 
 th[data-col="price"],
 td[data-col="price"] {
-  width: 140px;
+  width: 170px;
+  min-width: 170px;
 }
 
+th[data-col="change"],
+td[data-col="change"] {
+  width: 170px;
+  min-width: 170px;
+}
+
+th[data-col="change1d"],
+td[data-col="change1d"],
 th[data-col="change1m"],
 td[data-col="change1m"],
 th[data-col="change1y"],
 td[data-col="change1y"] {
-  width: 110px;
+  width: 120px;
+  min-width: 120px;
 }
 
 th[data-col="analyze"],
 td[data-col="analyze"] {
-  width: 110px;
+  width: 130px;
+  min-width: 130px;
+}
+
+th[data-col="symbol"],
+td[data-col="symbol"],
+th[data-col="sector"],
+td[data-col="sector"],
+th[data-col="cap"],
+td[data-col="cap"],
+th[data-col="signal"],
+td[data-col="signal"],
+th[data-col="price"],
+td[data-col="price"],
+th[data-col="change"],
+td[data-col="change"],
+th[data-col="change1d"],
+td[data-col="change1d"],
+th[data-col="change1m"],
+td[data-col="change1m"],
+th[data-col="change1y"],
+td[data-col="change1y"],
+th[data-col="analyze"],
+td[data-col="analyze"] {
+  white-space: nowrap;
 }
 
 .change-cell,
@@ -699,22 +730,12 @@ td[data-col="analyze"] {
     font-size: 16px;
   }
 
-  .page {
-    padding: 48px 32px 72px;
-  }
-
   .filters {
     grid-template-columns: repeat(5, minmax(180px, 1fr));
   }
 
   .market-table {
     overflow-x: hidden;
-  }
-}
-
-@media (min-width: 1600px) {
-  .page {
-    max-width: 1600px;
   }
 }
 
