@@ -2,7 +2,7 @@ const isBrowser = typeof document !== "undefined";
 const form = isBrowser ? document.getElementById("trade-form") : null;
 const errors = isBrowser ? document.getElementById("errors") : null;
 const statusNotice = isBrowser ? document.getElementById("status") : null;
-const resultCard = isBrowser ? document.getElementById("result") : null;
+const resultCard = isBrowser ? document.getElementById("signalResult") : null;
 const symbolInput = isBrowser ? document.getElementById("symbol-input") : null;
 const cashInput = isBrowser ? document.querySelector('input[name="cash"]') : null;
 const riskInput = isBrowser ? document.querySelector('select[name="risk"]') : null;
@@ -162,6 +162,39 @@ let refreshTimerId = null;
 let refreshInProgress = false;
 let rateLimitBackoffUntil = 0;
 let isSubmitting = false;
+const RESULT_HIGHLIGHT_CLASS = "result-highlight";
+
+function getScrollBehavior() {
+  if (!isBrowser || typeof window === "undefined") {
+    return "auto";
+  }
+  const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+  return prefersReducedMotion ? "auto" : "smooth";
+}
+
+function scheduleResultScroll(target) {
+  if (!target || typeof target.scrollIntoView !== "function") {
+    return;
+  }
+  const behavior = getScrollBehavior();
+  const timeoutFn = typeof window !== "undefined" && window.setTimeout ? window.setTimeout : setTimeout;
+  const highlight = () => {
+    if (!target.classList) {
+      return;
+    }
+    target.classList.add(RESULT_HIGHLIGHT_CLASS);
+    timeoutFn(() => target.classList.remove(RESULT_HIGHLIGHT_CLASS), 1200);
+  };
+  const doScroll = () => {
+    target.scrollIntoView({ behavior, block: "start" });
+    highlight();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => requestAnimationFrame(doScroll));
+  } else {
+    timeoutFn(doScroll, 0);
+  }
+}
 
 class MarketDataError extends Error {
   constructor(type, message, details = {}) {
@@ -1599,6 +1632,7 @@ function renderResult(result) {
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
   resultCard.classList.remove("hidden");
+  scheduleResultScroll(resultCard);
 }
 
 function handleMarketRowAction({ symbol, autoRun, onFillSymbol, onScrollToForm, onSubmit }) {
@@ -2940,5 +2974,7 @@ if (typeof module !== "undefined" && module.exports) {
     getMarketIndicatorData,
     handleMarketRowAction,
     updateMarketRowCells,
+    getScrollBehavior,
+    scheduleResultScroll,
   };
 }
