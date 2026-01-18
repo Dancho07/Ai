@@ -559,9 +559,7 @@ td[data-col="change"] {
 th[data-col="change1d"],
 td[data-col="change1d"],
 th[data-col="change1m"],
-td[data-col="change1m"],
-th[data-col="change1y"],
-td[data-col="change1y"] {
+td[data-col="change1m"] {
   width: 120px;
   min-width: 120px;
 }
@@ -590,8 +588,6 @@ th[data-col="change1d"],
 td[data-col="change1d"],
 th[data-col="change1m"],
 td[data-col="change1m"],
-th[data-col="change1y"],
-td[data-col="change1y"],
 th[data-col="analyze"],
 td[data-col="analyze"] {
   white-space: nowrap;
