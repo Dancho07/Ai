@@ -29,6 +29,7 @@ const {
   formatTimestamp,
   getMarketIndicatorData,
   handleMarketRowAction,
+  updateMarketRowCells,
 } = require("../app");
 
 function createResponse({ ok, status, json }) {
@@ -62,6 +63,41 @@ function createStorage() {
     },
     removeItem: (key) => {
       delete store[key];
+    },
+  };
+}
+
+function createMockCell(col) {
+  const cell = {
+    dataset: { col },
+    className: "",
+    _text: "",
+    _html: "",
+  };
+  Object.defineProperty(cell, "textContent", {
+    get: () => cell._text,
+    set: (value) => {
+      cell._text = value ?? "";
+    },
+  });
+  Object.defineProperty(cell, "innerHTML", {
+    get: () => cell._html,
+    set: (value) => {
+      cell._html = value ?? "";
+      cell._text = String(value ?? "").replace(/<[^>]*>/g, "");
+    },
+  });
+  return cell;
+}
+
+function createMockRow(cells) {
+  return {
+    querySelector: (selector) => {
+      const match = selector.match(/\[data-col="([^"]+)"\]/);
+      if (!match) {
+        return null;
+      }
+      return cells.get(match[1]) ?? null;
     },
   };
 }
@@ -822,6 +858,79 @@ const tests = [
       assert.strictEqual(filledSymbol, "MSFT");
       assert.strictEqual(didSubmit, false);
       assert.deepStrictEqual(result, { symbol: "MSFT", autoRun: false });
+    },
+  },
+  {
+    name: "renders change and 1D change into separate cells",
+    fn: async () => {
+      const cells = new Map([
+        ["symbol", createMockCell("symbol")],
+        ["change", createMockCell("change")],
+        ["change1d", createMockCell("change1d")],
+      ]);
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "TEST",
+        name: "Test Corp",
+        sector: "Technology",
+        cap: "Large",
+        history: [],
+        lastPrice: 100,
+        previousClose: 102.68,
+        lastChange: -2.68,
+        lastChangePct: -1.04,
+        dailyChange: null,
+        monthlyChange: 5,
+        yearlyChange: 10,
+        quoteAsOf: null,
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: null,
+      });
+
+      const changeCell = cells.get("change");
+      const change1dCell = cells.get("change1d");
+      assert.ok(changeCell.textContent.includes("-2.68"));
+      assert.ok(!changeCell.textContent.includes("n/a"));
+      assert.strictEqual(change1dCell.textContent.trim(), "n/a");
+    },
+  },
+  {
+    name: "keeps long change values isolated to their column",
+    fn: async () => {
+      const cells = new Map([
+        ["symbol", createMockCell("symbol")],
+        ["change", createMockCell("change")],
+        ["change1d", createMockCell("change1d")],
+      ]);
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "LONG",
+        name: "Long Form",
+        sector: "Energy",
+        cap: "Large",
+        history: [],
+        lastPrice: 1000,
+        previousClose: 900,
+        lastChange: 100.1234,
+        lastChangePct: 12.3456,
+        dailyChange: -0.5,
+        monthlyChange: null,
+        yearlyChange: null,
+        quoteAsOf: null,
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: null,
+      });
+
+      const changeCell = cells.get("change");
+      const change1dCell = cells.get("change1d");
+      assert.ok(changeCell.textContent.includes("+100.12"));
+      assert.ok(!changeCell.textContent.includes(change1dCell.textContent));
     },
   },
 ];

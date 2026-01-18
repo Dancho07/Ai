@@ -319,6 +319,8 @@ td {
   border-bottom: 1px solid #eef1ff;
   font-size: 0.95rem;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 th {
@@ -476,6 +478,19 @@ tbody tr:hover td:last-child {
 
 .price-change {
   font-weight: 600;
+  text-align: right;
+}
+
+th[data-col="change"],
+td[data-col="change"],
+th[data-col="change1d"],
+td[data-col="change1d"] {
+  width: 140px;
+}
+
+.change-cell,
+.change1d-cell {
+  text-overflow: ellipsis;
 }
 
 .price-change.positive {
