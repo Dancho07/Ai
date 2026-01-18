@@ -217,11 +217,11 @@
                 <dd id="plan-entry"></dd>
                 <span class="plan-meta" id="plan-entry-meta"></span>
               </div>
-              <div>
+              <div id="plan-stop-loss-row">
                 <dt>Stop-loss</dt>
                 <dd id="plan-stop-loss"></dd>
               </div>
-              <div>
+              <div id="plan-take-profit-row">
                 <dt>Take-profit</dt>
                 <dd id="plan-take-profit"></dd>
               </div>
@@ -229,11 +229,21 @@
                 <dt>Position size</dt>
                 <dd id="plan-position"></dd>
               </div>
-              <div>
+              <div id="plan-risk-reward-row">
                 <dt>Risk/Reward</dt>
                 <dd id="plan-risk-reward"></dd>
               </div>
             </dl>
+            <div class="hold-levels hidden" id="plan-hold-levels">
+              <p class="hold-note" id="plan-hold-note"></p>
+              <h4>Levels to watch</h4>
+              <ul class="hold-levels-list">
+                <li><strong>Breakout level:</strong> <span id="plan-hold-breakout"></span></li>
+                <li class="hold-trigger" id="plan-hold-breakout-trigger"></li>
+                <li><strong>Breakdown level:</strong> <span id="plan-hold-breakdown"></span></li>
+                <li class="hold-trigger" id="plan-hold-breakdown-trigger"></li>
+              </ul>
+            </div>
           </div>
           <div class="plan-card">
             <h3>AI Confidence</h3>

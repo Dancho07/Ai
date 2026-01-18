@@ -751,6 +751,39 @@ td[data-col="analyze"] {
   color: #6c728d;
 }
 
+.hold-levels {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e1e5ff;
+  display: grid;
+  gap: 8px;
+}
+
+.hold-levels h4 {
+  margin: 0;
+  font-size: 1rem;
+  color: #30344a;
+}
+
+.hold-note {
+  margin: 0;
+  font-weight: 600;
+  color: #1d1f2c;
+}
+
+.hold-levels-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #1d1f2c;
+}
+
+.hold-trigger {
+  font-size: 0.9rem;
+  color: #4d5373;
+}
+
 .stat {
   font-size: 2rem;
   margin: 8px 0;

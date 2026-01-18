@@ -810,6 +810,29 @@ const tests = [
       assert.strictEqual(plan.takeProfit, 100 + 2 * (100 - plan.stopLoss));
       assert.strictEqual(plan.riskReward.toFixed(2), "2.00");
       assert.ok(plan.positionSize > 0);
+      assert.notStrictEqual(plan.stopLossDisplay, "n/a");
+      assert.notStrictEqual(plan.takeProfitDisplay, "n/a");
+    },
+  },
+  {
+    name: "builds hold plan with breakout and breakdown levels",
+    fn: async () => {
+      const plan = calculateTradePlan({
+        action: "hold",
+        entryPrice: 105,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices: [96, 98, 100, 102, 101, 103, 104, 106, 105, 107, 108, 109],
+        cash: 10000,
+        risk: "moderate",
+      });
+      assert.strictEqual(plan.entryDisplay, "No trade recommended right now");
+      assert.ok(plan.holdLevels);
+      assert.ok(plan.holdLevels.breakoutLevel >= plan.holdLevels.breakdownLevel);
+      assert.ok(plan.holdLevels.breakoutTrigger.includes("=> BUY"));
+      assert.ok(plan.holdLevels.breakdownTrigger.includes("=> SELL"));
+      assert.notStrictEqual(plan.stopLossDisplay, "n/a");
+      assert.notStrictEqual(plan.takeProfitDisplay, "n/a");
     },
   },
   {

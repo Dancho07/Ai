@@ -27,10 +27,23 @@ const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer"
 const resultReasoning = isBrowser ? document.getElementById("result-reasoning") : null;
 const planEntry = isBrowser ? document.getElementById("plan-entry") : null;
 const planEntryMeta = isBrowser ? document.getElementById("plan-entry-meta") : null;
+const planStopLossRow = isBrowser ? document.getElementById("plan-stop-loss-row") : null;
 const planStopLoss = isBrowser ? document.getElementById("plan-stop-loss") : null;
+const planTakeProfitRow = isBrowser ? document.getElementById("plan-take-profit-row") : null;
 const planTakeProfit = isBrowser ? document.getElementById("plan-take-profit") : null;
 const planPosition = isBrowser ? document.getElementById("plan-position") : null;
+const planRiskRewardRow = isBrowser ? document.getElementById("plan-risk-reward-row") : null;
 const planRiskReward = isBrowser ? document.getElementById("plan-risk-reward") : null;
+const planHoldLevels = isBrowser ? document.getElementById("plan-hold-levels") : null;
+const planHoldNote = isBrowser ? document.getElementById("plan-hold-note") : null;
+const planHoldBreakout = isBrowser ? document.getElementById("plan-hold-breakout") : null;
+const planHoldBreakoutTrigger = isBrowser
+  ? document.getElementById("plan-hold-breakout-trigger")
+  : null;
+const planHoldBreakdown = isBrowser ? document.getElementById("plan-hold-breakdown") : null;
+const planHoldBreakdownTrigger = isBrowser
+  ? document.getElementById("plan-hold-breakdown-trigger")
+  : null;
 
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
@@ -65,6 +78,8 @@ const FORM_STATE_KEY = "trade_form_state_v1";
 const ENTRY_RANGE_PCT = 0.003;
 const ATR_LOOKBACK = 30;
 const SWING_LOOKBACK = 10;
+const HOLD_LOOKBACK_MIN = 10;
+const HOLD_LOOKBACK_MAX = 20;
 
 const marketWatchlist = [
   { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
@@ -1134,6 +1149,12 @@ function getSwingLevels(prices, lookback = SWING_LOOKBACK) {
   };
 }
 
+function getHoldWatchLevels(prices) {
+  const length = prices?.length ?? 0;
+  const lookback = Math.min(Math.max(length, HOLD_LOOKBACK_MIN), HOLD_LOOKBACK_MAX);
+  return getSwingLevels(prices ?? [], lookback);
+}
+
 function resolvePriceContext(marketEntry) {
   const history = marketEntry?.history ?? [];
   const historyPrice = history.length ? history[history.length - 1] : null;
@@ -1353,54 +1374,86 @@ function calculateTradePlan({
   const entryMeta = priceLabel
     ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf)})` : ""}`
     : "";
-  if (!entryPrice) {
+  const safePrices = Array.isArray(prices) ? prices : [];
+  const fallbackEntry = safePrices.length ? safePrices[safePrices.length - 1] : null;
+  const resolvedEntryPrice = entryPrice ?? fallbackEntry;
+
+  if (action === "hold") {
+    const watchLevels = getHoldWatchLevels(safePrices);
+    const breakoutLevel = watchLevels.high ?? resolvedEntryPrice;
+    const breakdownLevel = watchLevels.low ?? resolvedEntryPrice;
+    const breakoutDisplay =
+      breakoutLevel != null ? quoteFormatter.format(breakoutLevel) : "Awaiting history";
+    const breakdownDisplay =
+      breakdownLevel != null ? quoteFormatter.format(breakdownLevel) : "Awaiting history";
+    return {
+      entryDisplay: "No trade recommended right now",
+      entryMeta,
+      stopLossDisplay: "",
+      takeProfitDisplay: "",
+      positionSizeDisplay: "0 shares",
+      riskRewardDisplay: "",
+      positionSize: 0,
+      isHold: true,
+      holdNotice: "No trade recommended right now",
+      holdLevels: {
+        breakoutLevel,
+        breakdownLevel,
+        breakoutDisplay,
+        breakdownDisplay,
+        breakoutTrigger: `If price breaks above ${breakoutDisplay} => BUY`,
+        breakdownTrigger: `If price breaks below ${breakdownDisplay} => SELL`,
+      },
+    };
+  }
+
+  if (!resolvedEntryPrice) {
     return {
       entryDisplay: "Not available",
       entryMeta,
-      stopLossDisplay: "n/a",
-      takeProfitDisplay: "n/a",
+      stopLossDisplay: "Not available",
+      takeProfitDisplay: "Not available",
       positionSizeDisplay: "0 shares",
-      riskRewardDisplay: "n/a",
+      riskRewardDisplay: "Not available",
       positionSize: 0,
+      isHold: false,
+      holdLevels: null,
     };
   }
 
-  if (action === "hold") {
-    return {
-      entryDisplay: "Market",
-      entryMeta,
-      stopLossDisplay: "n/a",
-      takeProfitDisplay: "n/a",
-      positionSizeDisplay: "0 shares",
-      riskRewardDisplay: "n/a",
-      positionSize: 0,
-    };
-  }
-
-  const entryRangeLow = entryPrice * (1 - ENTRY_RANGE_PCT);
-  const entryRangeHigh = entryPrice * (1 + ENTRY_RANGE_PCT);
-  const atrLike = calculateAtrLike(prices);
-  const fallbackAtr = entryPrice * 0.02;
+  const entryRangeLow = resolvedEntryPrice * (1 - ENTRY_RANGE_PCT);
+  const entryRangeHigh = resolvedEntryPrice * (1 + ENTRY_RANGE_PCT);
+  const atrLike = calculateAtrLike(safePrices);
+  const fallbackAtr = Math.max(resolvedEntryPrice * 0.02, 0.01);
   const atrValue = atrLike ?? fallbackAtr;
-  const swingLevels = getSwingLevels(prices);
+  const swingLevels = getSwingLevels(safePrices);
   let stopLoss = null;
   if (action === "buy") {
-    const atrStop = entryPrice - atrValue * 1.2;
+    const atrStop = resolvedEntryPrice - atrValue * 1.2;
     const candidates = [atrStop, swingLevels.low].filter(
-      (value) => value != null && value < entryPrice,
+      (value) => value != null && value < resolvedEntryPrice,
     );
-    stopLoss = candidates.length ? Math.max(...candidates) : entryPrice * 0.97;
+    stopLoss = candidates.length ? Math.max(...candidates) : resolvedEntryPrice * 0.97;
   } else if (action === "sell") {
-    const atrStop = entryPrice + atrValue * 1.2;
+    const atrStop = resolvedEntryPrice + atrValue * 1.2;
     const candidates = [atrStop, swingLevels.high].filter(
-      (value) => value != null && value > entryPrice,
+      (value) => value != null && value > resolvedEntryPrice,
     );
-    stopLoss = candidates.length ? Math.min(...candidates) : entryPrice * 1.03;
+    stopLoss = candidates.length ? Math.min(...candidates) : resolvedEntryPrice * 1.03;
   }
 
-  const riskPerShare = stopLoss != null ? Math.abs(entryPrice - stopLoss) : null;
+  if (stopLoss == null) {
+    stopLoss =
+      action === "buy"
+        ? resolvedEntryPrice - atrValue
+        : action === "sell"
+          ? resolvedEntryPrice + atrValue
+          : resolvedEntryPrice;
+  }
+
+  const riskPerShare = stopLoss != null ? Math.abs(resolvedEntryPrice - stopLoss) : null;
   const riskBudget = cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
-  const maxShares = Math.max(Math.floor(cash / entryPrice), 0);
+  const maxShares = Math.max(Math.floor(cash / resolvedEntryPrice), 0);
   const positionSize =
     riskPerShare && riskPerShare > 0
       ? Math.min(Math.floor(riskBudget / riskPerShare), maxShares)
@@ -1410,28 +1463,30 @@ function calculateTradePlan({
   let riskReward = null;
   if (stopLoss != null) {
     if (action === "buy") {
-      takeProfit = entryPrice + 2 * (entryPrice - stopLoss);
-      riskReward = (takeProfit - entryPrice) / (entryPrice - stopLoss);
+      takeProfit = resolvedEntryPrice + 2 * (resolvedEntryPrice - stopLoss);
+      riskReward = (takeProfit - resolvedEntryPrice) / (resolvedEntryPrice - stopLoss);
     } else if (action === "sell") {
-      takeProfit = entryPrice - 2 * (stopLoss - entryPrice);
-      riskReward = (entryPrice - takeProfit) / (stopLoss - entryPrice);
+      takeProfit = resolvedEntryPrice - 2 * (stopLoss - resolvedEntryPrice);
+      riskReward = (resolvedEntryPrice - takeProfit) / (stopLoss - resolvedEntryPrice);
     }
   }
 
   return {
     entryDisplay: `${quoteFormatter.format(entryRangeLow)} - ${quoteFormatter.format(entryRangeHigh)}`,
     entryMeta,
-    stopLossDisplay: stopLoss != null ? quoteFormatter.format(stopLoss) : "n/a",
-    takeProfitDisplay: takeProfit != null ? quoteFormatter.format(takeProfit) : "n/a",
+    stopLossDisplay: quoteFormatter.format(stopLoss),
+    takeProfitDisplay: takeProfit != null ? quoteFormatter.format(takeProfit) : quoteFormatter.format(stopLoss),
     positionSizeDisplay:
       positionSize > 0
         ? `${positionSize} shares (risk ${quoteFormatter.format(riskBudget)})`
         : "0 shares",
-    riskRewardDisplay: riskReward != null ? `${riskReward.toFixed(2)}:1` : "n/a",
+    riskRewardDisplay: riskReward != null ? `${riskReward.toFixed(2)}:1` : "1.00:1",
     positionSize,
     stopLoss,
     takeProfit,
     riskReward,
+    isHold: false,
+    holdLevels: null,
   };
 }
 
@@ -1697,6 +1752,52 @@ function renderResult(result) {
   }
   if (planRiskReward) {
     planRiskReward.textContent = result.tradePlan.riskRewardDisplay;
+  }
+  const isHold = result.tradePlan.isHold;
+  if (planStopLossRow) {
+    planStopLossRow.classList.toggle("hidden", isHold);
+  }
+  if (planTakeProfitRow) {
+    planTakeProfitRow.classList.toggle("hidden", isHold);
+  }
+  if (planRiskRewardRow) {
+    planRiskRewardRow.classList.toggle("hidden", isHold);
+  }
+  if (planHoldLevels) {
+    planHoldLevels.classList.toggle("hidden", !isHold);
+  }
+  if (isHold && result.tradePlan.holdLevels) {
+    if (planHoldNote) {
+      planHoldNote.textContent = result.tradePlan.holdNotice ?? "";
+    }
+    if (planHoldBreakout) {
+      planHoldBreakout.textContent = result.tradePlan.holdLevels.breakoutDisplay;
+    }
+    if (planHoldBreakoutTrigger) {
+      planHoldBreakoutTrigger.textContent = result.tradePlan.holdLevels.breakoutTrigger;
+    }
+    if (planHoldBreakdown) {
+      planHoldBreakdown.textContent = result.tradePlan.holdLevels.breakdownDisplay;
+    }
+    if (planHoldBreakdownTrigger) {
+      planHoldBreakdownTrigger.textContent = result.tradePlan.holdLevels.breakdownTrigger;
+    }
+  } else {
+    if (planHoldNote) {
+      planHoldNote.textContent = "";
+    }
+    if (planHoldBreakout) {
+      planHoldBreakout.textContent = "";
+    }
+    if (planHoldBreakoutTrigger) {
+      planHoldBreakoutTrigger.textContent = "";
+    }
+    if (planHoldBreakdown) {
+      planHoldBreakdown.textContent = "";
+    }
+    if (planHoldBreakdownTrigger) {
+      planHoldBreakdownTrigger.textContent = "";
+    }
   }
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
