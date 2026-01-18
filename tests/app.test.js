@@ -8,6 +8,7 @@ const {
   deriveMarketSession,
   persistFormState,
   loadPersistedFormState,
+  bindRiskPercentField,
   getQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
@@ -66,6 +67,60 @@ function createStorage() {
     },
     removeItem: (key) => {
       delete store[key];
+    },
+  };
+}
+
+function createClassList(initial = []) {
+  const classes = new Set(initial);
+  return {
+    add: (className) => classes.add(className),
+    remove: (className) => classes.delete(className),
+    contains: (className) => classes.has(className),
+    toggle: (className, force) => {
+      if (force === undefined) {
+        if (classes.has(className)) {
+          classes.delete(className);
+          return false;
+        }
+        classes.add(className);
+        return true;
+      }
+      if (force) {
+        classes.add(className);
+        return true;
+      }
+      classes.delete(className);
+      return false;
+    },
+  };
+}
+
+function createMockElement({ value = "", classes = [] } = {}) {
+  const listeners = new Map();
+  return {
+    value,
+    required: false,
+    disabled: false,
+    textContent: "",
+    classList: createClassList(classes),
+    toggleAttribute: function toggleAttribute(attr, force) {
+      if (attr === "required") {
+        this.required = Boolean(force);
+      }
+      if (attr === "disabled") {
+        this.disabled = Boolean(force);
+      }
+    },
+    addEventListener: function addEventListener(type, handler) {
+      if (!listeners.has(type)) {
+        listeners.set(type, []);
+      }
+      listeners.get(type).push(handler);
+    },
+    dispatchEvent: function dispatchEvent(event) {
+      const handlers = listeners.get(event.type) || [];
+      handlers.forEach((handler) => handler(event));
     },
   };
 }
@@ -180,6 +235,105 @@ const tests = [
         positionSizing: "risk_percent",
         riskPercent: "1.5",
       });
+    },
+  },
+  {
+    name: "shows editable risk percent input when sizing mode is risk percent",
+    fn: async () => {
+      const storage = createStorage();
+      const positionSizingInput = createMockElement({ value: "cash" });
+      const riskPercentField = createMockElement({ classes: ["hidden"] });
+      const riskPercentInput = createMockElement({ value: "" });
+      const riskPercentError = createMockElement({ classes: ["hidden"] });
+
+      bindRiskPercentField({
+        positionSizingInput,
+        riskPercentField,
+        riskPercentInput,
+        riskPercentError,
+        storage,
+        getFormState: () => ({
+          symbol: "AAPL",
+          cash: "10000",
+          risk: "moderate",
+          positionSizing: positionSizingInput.value,
+          riskPercent: riskPercentInput.value,
+        }),
+      });
+
+      positionSizingInput.value = "risk_percent";
+      positionSizingInput.dispatchEvent({ type: "change" });
+
+      assert.strictEqual(riskPercentField.classList.contains("hidden"), false);
+      assert.strictEqual(riskPercentInput.disabled, false);
+      assert.strictEqual(riskPercentInput.required, true);
+
+      riskPercentInput.value = "1.2";
+      riskPercentInput.dispatchEvent({ type: "input" });
+      assert.strictEqual(riskPercentInput.value, "1.2");
+    },
+  },
+  {
+    name: "persists risk percent input to storage and restores on reload",
+    fn: async () => {
+      const storage = createStorage();
+      const positionSizingInput = createMockElement({ value: "risk_percent" });
+      const riskPercentField = createMockElement({ classes: [] });
+      const riskPercentInput = createMockElement({ value: "" });
+      const riskPercentError = createMockElement({ classes: ["hidden"] });
+
+      bindRiskPercentField({
+        positionSizingInput,
+        riskPercentField,
+        riskPercentInput,
+        riskPercentError,
+        storage,
+        getFormState: () => ({
+          symbol: "TSLA",
+          cash: "5000",
+          risk: "moderate",
+          positionSizing: positionSizingInput.value,
+          riskPercent: riskPercentInput.value,
+        }),
+      });
+
+      riskPercentInput.value = "1.7";
+      riskPercentInput.dispatchEvent({ type: "input" });
+
+      const restored = loadPersistedFormState(storage);
+      assert.strictEqual(restored.riskPercent, "1.7");
+      assert.strictEqual(restored.positionSizing, "risk_percent");
+    },
+  },
+  {
+    name: "allows partial risk percent typing without overwriting value",
+    fn: async () => {
+      const storage = createStorage();
+      const positionSizingInput = createMockElement({ value: "risk_percent" });
+      const riskPercentField = createMockElement({ classes: [] });
+      const riskPercentInput = createMockElement({ value: "" });
+      const riskPercentError = createMockElement({ classes: ["hidden"] });
+
+      bindRiskPercentField({
+        positionSizingInput,
+        riskPercentField,
+        riskPercentInput,
+        riskPercentError,
+        storage,
+        getFormState: () => ({
+          symbol: "NVDA",
+          cash: "15000",
+          risk: "moderate",
+          positionSizing: positionSizingInput.value,
+          riskPercent: riskPercentInput.value,
+        }),
+      });
+
+      riskPercentInput.value = "0.";
+      riskPercentInput.dispatchEvent({ type: "input" });
+
+      assert.strictEqual(riskPercentInput.value, "0.");
+      assert.strictEqual(riskPercentError.textContent, "");
     },
   },
   {
