@@ -91,6 +91,8 @@ const MARKET_SORT_OPTIONS = [
   { value: "liveChange", label: "Live change (%)" },
 ];
 const DEFAULT_SORT_KEY = "signal";
+const MARKET_HISTORY_RANGE = "1y";
+const MARKET_HISTORY_INTERVAL = "1d";
 const MARKET_TABLE_COLUMNS = [
   { key: "symbol" },
   { key: "company", className: "company-cell" },
@@ -101,6 +103,8 @@ const MARKET_TABLE_COLUMNS = [
   { key: "price", className: "num-cell" },
   { key: "change", className: "price-change change-cell num-cell" },
   { key: "change1d", className: "price-change change1d-cell num-cell" },
+  { key: "change1m", className: "price-change change1m-cell num-cell" },
+  { key: "change1y", className: "price-change change1y-cell num-cell" },
   { key: "analyze", className: "analyze-cell" },
 ];
 
@@ -2728,6 +2732,7 @@ function createSymbolEntry(symbol, fallbackName) {
     lastChangePct: null,
     monthlyChange: null,
     dailyChange: null,
+    yearlyChange: null,
     lastUpdated: null,
     lastUpdatedAt: null,
     quoteAsOf: null,
@@ -3024,6 +3029,8 @@ async function loadInitialMarketData() {
       allowFetch: !prefetchedQuote,
       forceUnavailable,
       includeHistorical: true,
+      range: MARKET_HISTORY_RANGE,
+      interval: MARKET_HISTORY_INTERVAL,
     };
   });
   results.forEach((result) => {
@@ -3259,6 +3266,7 @@ async function refreshSymbolData(symbol, options = {}) {
       change: display.changeDisplay,
       change1d: display.dayDisplay,
       change1m: display.monthDisplay,
+      change1y: display.yearDisplay,
       meta: display.meta,
     },
   });
@@ -3342,10 +3350,13 @@ async function refreshVisibleQuotes() {
 
   await Promise.all(
     symbols
-      .filter((symbol) => isHistoricalStale(symbol))
+      .filter((symbol) => isHistoricalStale(symbol, { range: MARKET_HISTORY_RANGE, interval: MARKET_HISTORY_INTERVAL }))
       .map(async (symbol) => {
         try {
-          const historyPayload = await fetchHistoricalSeries(symbol);
+          const historyPayload = await fetchHistoricalSeries(symbol, {
+            range: MARKET_HISTORY_RANGE,
+            interval: MARKET_HISTORY_INTERVAL,
+          });
           const stock = getStockEntry(symbol);
           if (stock) {
             updateStockWithHistorical(stock, historyPayload);
@@ -3488,8 +3499,10 @@ function getMarketRowDisplay(stock) {
         ? `${changePercent >= 0 ? "+" : ""}${percentFormatter.format(changePercent)}%`
         : "n/a";
   const changeClass = change === null ? "" : change >= 0 ? "positive" : "negative";
-  const dayDisplay = formatPercent(stock.dailyChange);
+  const dailyChange = stock.dailyChange ?? getLiveChangePercent(stock);
+  const dayDisplay = formatPercent(dailyChange);
   const monthDisplay = formatPercent(stock.monthlyChange);
+  const yearDisplay = formatPercent(stock.yearlyChange);
 
   return {
     priceDisplay,
@@ -3499,8 +3512,10 @@ function getMarketRowDisplay(stock) {
     changeClass,
     dayDisplay,
     monthDisplay,
-    dayClass: stock.dailyChange === null ? "" : stock.dailyChange >= 0 ? "positive" : "negative",
+    yearDisplay,
+    dayClass: dailyChange === null ? "" : dailyChange >= 0 ? "positive" : "negative",
     monthClass: stock.monthlyChange === null ? "" : stock.monthlyChange >= 0 ? "positive" : "negative",
+    yearClass: stock.yearlyChange === null ? "" : stock.yearlyChange >= 0 ? "positive" : "negative",
   };
 }
 
@@ -3669,7 +3684,11 @@ function formatChangeCellContent(cell, value, className) {
       ? "change-cell"
       : cell.dataset.col === "change1d"
         ? "change1d-cell"
-        : "";
+        : cell.dataset.col === "change1m"
+          ? "change1m-cell"
+          : cell.dataset.col === "change1y"
+            ? "change1y-cell"
+            : "";
   cell.className = `price-change ${baseClass} num-cell ${className}`.trim();
   if (value === "n/a") {
     cell.innerHTML = '<span class="muted">n/a</span>';
@@ -3678,7 +3697,16 @@ function formatChangeCellContent(cell, value, className) {
   }
 }
 
-const HEATMAP_CLASSNAMES = ["price-change", "positive", "negative", "change-cell", "change1d-cell", "num-cell"];
+const HEATMAP_CLASSNAMES = [
+  "price-change",
+  "positive",
+  "negative",
+  "change-cell",
+  "change1d-cell",
+  "change1m-cell",
+  "change1y-cell",
+  "num-cell",
+];
 
 function ensureAnalyzeCellClean(cell) {
   if (!cell) {
@@ -3720,6 +3748,10 @@ function updateMarketRowCells(row, stock) {
     changeClass,
     dayDisplay,
     dayClass,
+    monthDisplay,
+    monthClass,
+    yearDisplay,
+    yearClass,
   } = getMarketRowDisplay(stock);
 
   const symbolCell = row.querySelector('[data-col="symbol"]');
@@ -3731,6 +3763,8 @@ function updateMarketRowCells(row, stock) {
   const priceCell = row.querySelector('[data-col="price"]');
   const changeCell = row.querySelector('[data-col="change"]');
   const dayCell = row.querySelector('[data-col="change1d"]');
+  const monthCell = row.querySelector('[data-col="change1m"]');
+  const yearCell = row.querySelector('[data-col="change1y"]');
   const analyzeCell = row.querySelector('[data-col="analyze"]');
 
   if (symbolCell) {
@@ -3755,6 +3789,24 @@ function updateMarketRowCells(row, stock) {
     `;
   }
   if (priceCell) {
+    const performanceMarkup = `
+      <div class="price-performance" aria-label="Performance">
+        <span class="performance-item">
+          <span class="performance-label">1D</span>
+          <span class="performance-value ${dayDisplay === "n/a" ? "muted" : dayClass}">${dayDisplay}</span>
+        </span>
+        <span class="performance-separator">|</span>
+        <span class="performance-item">
+          <span class="performance-label">1M</span>
+          <span class="performance-value ${monthDisplay === "n/a" ? "muted" : monthClass}">${monthDisplay}</span>
+        </span>
+        <span class="performance-separator">|</span>
+        <span class="performance-item">
+          <span class="performance-label">1Y</span>
+          <span class="performance-value ${yearDisplay === "n/a" ? "muted" : yearClass}">${yearDisplay}</span>
+        </span>
+      </div>
+    `;
     priceCell.innerHTML = `
       <div class="price-cell">
         <div class="price-main">
@@ -3766,11 +3818,14 @@ function updateMarketRowCells(row, stock) {
           }
         </div>
         <div class="price-meta">${meta}</div>
+        ${performanceMarkup}
       </div>
     `;
   }
   formatChangeCellContent(changeCell, changeDisplay, changeClass);
   formatChangeCellContent(dayCell, dayDisplay, dayClass);
+  formatChangeCellContent(monthCell, monthDisplay, monthClass);
+  formatChangeCellContent(yearCell, yearDisplay, yearClass);
   if (analyzeCell) {
     ensureAnalyzeCellClean(analyzeCell);
     analyzeCell.innerHTML = `
@@ -3788,7 +3843,7 @@ function renderMarketTable() {
   ensureSortControl();
   const filtered = marketState.filter(matchesFilters);
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="10">No stocks match these filters.</td></tr>`;
+    marketBody.innerHTML = `<tr><td colspan="12">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
     return;
   }
