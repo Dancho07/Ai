@@ -11,6 +11,7 @@ const {
   createWatchlistStore,
   createFavoritesStore,
   deriveMarketSession,
+  normalizeQuote,
   persistFormState,
   loadPersistedFormState,
   bindRiskPercentField,
@@ -195,7 +196,7 @@ function createStockEntry({
   dailyChange = null,
   monthlyChange = null,
   previousClose = null,
-  dataSource = "live",
+  dataSource = "REALTIME",
   quoteSession = "REGULAR",
   sector = "Technology",
   cap = "Large",
@@ -248,6 +249,122 @@ const tests = [
         getSymbolValidationMessage("NVDA!!!"),
         "Stock symbols must start with a letter and include up to 10 letters, numbers, dots, or hyphens (e.g. BRK.B).",
       );
+    },
+  },
+  {
+    name: "normalizes realtime regular quotes",
+    fn: async () => {
+      const now = Date.now();
+      const quote = normalizeQuote(
+        {
+          symbol: "AAPL",
+          regularMarketPrice: 150,
+          regularMarketChange: 1.2,
+          regularMarketChangePercent: 0.8,
+          regularMarketTime: Math.floor(now / 1000),
+          marketState: "REGULAR",
+        },
+        now,
+      );
+      assert.strictEqual(quote.source, "REALTIME");
+      assert.strictEqual(quote.session, "REGULAR");
+      assert.strictEqual(quote.price, 150);
+    },
+  },
+  {
+    name: "normalizes premarket quotes with delayed source",
+    fn: async () => {
+      const now = Date.now();
+      const quote = normalizeQuote(
+        {
+          symbol: "MSFT",
+          preMarketPrice: 300,
+          preMarketChange: 2,
+          preMarketChangePercent: 0.5,
+          preMarketTime: Math.floor((now - 10 * 60 * 1000) / 1000),
+          marketState: "PRE",
+        },
+        now,
+      );
+      assert.strictEqual(quote.session, "PRE");
+      assert.strictEqual(quote.source, "DELAYED");
+    },
+  },
+  {
+    name: "normalizes cached fallback quotes",
+    fn: async () => {
+      const now = Date.now();
+      const quote = normalizeQuote(
+        {
+          symbol: "NVDA",
+          price: 410,
+          change: 5,
+          changePct: 1.2,
+          asOfTimestamp: now - 60 * 1000,
+          session: "REGULAR",
+          source: "CACHED",
+        },
+        now,
+      );
+      assert.strictEqual(quote.source, "CACHED");
+      assert.strictEqual(quote.asOfTs, now - 60 * 1000);
+    },
+  },
+  {
+    name: "normalizes historical fallback quotes",
+    fn: async () => {
+      const now = Date.now();
+      const quote = normalizeQuote(
+        {
+          symbol: "TSLA",
+          price: 220,
+          change: -3,
+          changePct: -1.4,
+          asOfTimestamp: now - 24 * 60 * 60 * 1000,
+          session: "CLOSED",
+          source: "LAST_CLOSE",
+        },
+        now,
+      );
+      assert.strictEqual(quote.source, "LAST_CLOSE");
+      assert.strictEqual(quote.session, "CLOSED");
+    },
+  },
+  {
+    name: "does not overwrite known session on transient failures",
+    fn: async () => {
+      const stock = createStockEntry({
+        symbol: "AMZN",
+        history: [100, 110],
+        lastPrice: 110,
+      });
+      stock.quoteSession = "REGULAR";
+      updateStockWithQuote(stock, {
+        price: 110,
+        asOfTimestamp: Date.now(),
+        session: "UNKNOWN",
+        source: "CACHED",
+      });
+      assert.strictEqual(stock.quoteSession, "REGULAR");
+    },
+  },
+  {
+    name: "warns when market open but cached quote is used",
+    fn: async () => {
+      const now = Date.now();
+      const quote = normalizeQuote(
+        {
+          symbol: "META",
+          price: 280,
+          change: 0.5,
+          changePct: 0.2,
+          asOfTimestamp: now - 60 * 1000,
+          session: "REGULAR",
+          source: "CACHED",
+        },
+        now,
+      );
+      assert.ok(quote.warnings.includes("Market open but live quote unavailable — using cached data."));
     },
   },
   {
@@ -538,7 +655,7 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
 
       const fetchFn = createFetchSequence([
@@ -549,7 +666,7 @@ const tests = [
       ]);
 
       const result = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
-      assert.strictEqual(result.source, "cache");
+      assert.strictEqual(result.source, "CACHED");
     },
   },
   {
@@ -672,7 +789,7 @@ const tests = [
           symbol: "AAPL",
           marketState: "PRE",
           preMarketPrice: 181,
-          preMarketTime: 1700000100,
+          preMarketTime: Math.floor(Date.now() / 1000),
           shortName: "Apple",
         },
       });
@@ -683,7 +800,7 @@ const tests = [
           symbol: "AAPL",
           marketState: "POST",
           postMarketPrice: 179,
-          postMarketTime: 1700000200,
+          postMarketTime: Math.floor(Date.now() / 1000),
           shortName: "Apple",
         },
       });
@@ -761,13 +878,13 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
       const fetchFn = createFetchSequence([
         createResponse({ ok: false, status: 429, json: {} }),
       ]);
       const result = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
-      assert.strictEqual(result.source, "cache");
+      assert.strictEqual(result.source, "CACHED");
     },
   },
   {
@@ -781,7 +898,7 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
       const fetchFn = (url, { signal }) =>
         new Promise((resolve, reject) => {
@@ -792,7 +909,7 @@ const tests = [
           });
         });
       const result = await getQuote("MSFT", { fetchFn, maxAttempts: 1, timeoutMs: 5 });
-      assert.strictEqual(result.source, "cache");
+      assert.strictEqual(result.source, "CACHED");
     },
   },
   {
@@ -845,7 +962,7 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: true,
         session: "REGULAR",
-        source: "cache",
+        source: "CACHED",
       });
       const fetchFn = createFetchSequence([
         createResponse({ ok: true, status: 200, json: { quoteResponse: { result: [] } } }),
@@ -853,7 +970,7 @@ const tests = [
       const quote = await getQuote("TSLA", { fetchFn, maxAttempts: 1 });
       assert.strictEqual(quote.session, "REGULAR");
       assert.strictEqual(quote.unavailable, true);
-      assert.strictEqual(quote.source, "cache");
+      assert.strictEqual(quote.source, "CACHED");
     },
   },
   {
@@ -861,12 +978,12 @@ const tests = [
     fn: async () => {
       const indicator = getMarketIndicatorData({
         quoteSession: "PRE",
-        dataSource: "primary",
+        dataSource: "REALTIME",
         quoteAsOf: Date.now(),
       });
       const cachedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
-        dataSource: "cache",
+        dataSource: "CACHED",
         quoteAsOf: Date.now(),
         lastPrice: 101,
       });
@@ -882,7 +999,7 @@ const tests = [
       assert.strictEqual(asOf, "As of 12:30 UTC");
       const indicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
-        dataSource: "primary",
+        dataSource: "REALTIME",
         quoteAsOf: timestamp,
       });
       assert.strictEqual(indicator.asOfLabel, "As of 12:30 UTC");
@@ -893,14 +1010,14 @@ const tests = [
     fn: async () => {
       const realtimeIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
-        dataSource: "primary",
+        dataSource: "REALTIME",
         quoteAsOf: Date.now(),
         isRealtime: true,
         lastPrice: 188,
       });
       const delayedIndicator = getMarketIndicatorData({
-        quoteSession: "DELAYED",
-        dataSource: "delayed",
+        quoteSession: "REGULAR",
+        dataSource: "DELAYED",
         quoteAsOf: Date.now(),
         isRealtime: false,
         lastPrice: 188,
@@ -916,7 +1033,7 @@ const tests = [
     fn: async () => {
       const cachedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
-        dataSource: "cache",
+        dataSource: "CACHED",
         quoteAsOf: Date.now(),
         lastPrice: 150,
       });
@@ -946,14 +1063,14 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
       hydrateMarketStateFromCache();
       const stock = getStockEntry("AAPL");
       const display = getMarketRowDisplay(stock);
       assert.notStrictEqual(display.priceDisplay, "Price unavailable");
       assert.notStrictEqual(display.changeDisplay, "n/a");
-      assert.strictEqual(display.badge.label, "CACHED");
+      assert.strictEqual(display.sourceBadge.label, "CACHED");
     },
   },
   {
@@ -967,7 +1084,7 @@ const tests = [
         asOfTimestamp: Date.now() - 60000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
       hydrateMarketStateFromCache();
       const stock = getStockEntry("MSFT");
@@ -1009,7 +1126,7 @@ const tests = [
         asOfTimestamp: Date.now() - 30000,
         isRealtime: false,
         session: "CLOSED",
-        source: "cache",
+        source: "CACHED",
       });
       const fetchFn = createFetchSequence([
         createResponse({ ok: false, status: 503, json: {} }),
@@ -1018,7 +1135,7 @@ const tests = [
       const stock = getStockEntry("AAPL");
       updateStockWithQuote(stock, quote);
       const display = getMarketRowDisplay(stock);
-      assert.strictEqual(quote.source, "cache");
+      assert.strictEqual(quote.source, "CACHED");
       assert.notStrictEqual(display.priceDisplay, "Price unavailable");
     },
   },
@@ -1033,7 +1150,7 @@ const tests = [
         asOfTimestamp: Date.now(),
         isRealtime: true,
         session: "REGULAR",
-        source: "primary",
+        source: "REALTIME",
       });
       updateStockWithHistorical(stock, {
         closes: [100, 99, 98],
@@ -1118,7 +1235,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
@@ -1144,7 +1261,7 @@ const tests = [
         asOfTimestamp: Date.now() - 30000,
         isRealtime: false,
         session: "REGULAR",
-        source: "cache",
+        source: "CACHED",
       });
       updateStockWithQuote(stock, {
         price: 148.1,
@@ -1153,7 +1270,7 @@ const tests = [
         asOfTimestamp: Date.now() - 10000,
         isRealtime: false,
         session: "UNKNOWN",
-        source: "cache",
+        source: "CACHED",
         unavailable: true,
       });
       const indicator = getMarketIndicatorData(stock);
@@ -1173,7 +1290,7 @@ const tests = [
         asOfTimestamp: Date.now() - 30000,
         isRealtime: true,
         session: "REGULAR",
-        source: "cache",
+        source: "CACHED",
       });
       const fetchFn = createFetchSequence([createResponse({ ok: false, status: 503, json: {} })]);
       const quote = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
@@ -1196,7 +1313,7 @@ const tests = [
         asOfTimestamp: Date.now(),
         isRealtime: true,
         session: "REGULAR",
-        source: "primary",
+        source: "REALTIME",
       });
       const preStock = getStockEntry("MSFT");
       updateStockWithQuote(preStock, {
@@ -1255,7 +1372,7 @@ const tests = [
         asOfTimestamp: Date.now(),
         isRealtime: true,
         session: "REGULAR",
-        source: "primary",
+        source: "REALTIME",
       });
       applyRateLimitBackoff();
       assert.strictEqual(isRateLimitBackoffActive(), true);
@@ -1487,7 +1604,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: null,
       });
 
@@ -1522,7 +1639,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: null,
       });
 
@@ -1584,7 +1701,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
@@ -1637,7 +1754,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
@@ -1672,7 +1789,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
@@ -1707,7 +1824,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
@@ -1742,7 +1859,7 @@ const tests = [
         lastUpdatedAt: null,
         lastHistoricalTimestamp: null,
         quoteSession: "REGULAR",
-        dataSource: "live",
+        dataSource: "REALTIME",
         exchangeTimezoneName: "America/New_York",
       });
 
