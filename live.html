@@ -45,10 +45,10 @@
               Auto-run analysis on click
             </label>
           </div>
-          <div class="refresh-pill">
+          <button type="button" class="refresh-pill" id="refresh-pill">
             <span class="dot"></span>
             <span id="refresh-status">Updating…</span>
-          </div>
+          </button>
         </div>
         <div class="market-indicator" id="market-indicator">
           <div class="market-indicator-group">
@@ -64,6 +64,10 @@
           <span id="market-cache-note" class="market-indicator-note hidden">Using cached data</span>
         </div>
         <p class="market-debug hidden" id="market-debug"></p>
+        <div class="quote-status-banner hidden" id="quote-status-banner" role="status" aria-live="polite">
+          <span id="quote-status-message">Live quotes unavailable.</span>
+          <button type="button" id="quote-status-retry" class="secondary-button">Retry now</button>
+        </div>
 
         <div class="watchlist-controls">
           <label class="watchlist-input">

@@ -77,6 +77,10 @@ const marketEmptyState = isBrowser ? document.getElementById("market-empty-state
 const marketEmptyMessage = isBrowser ? document.getElementById("market-empty-message") : null;
 const clearFiltersButton = isBrowser ? document.getElementById("clear-filters") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
+const refreshPill = isBrowser ? document.getElementById("refresh-pill") : null;
+const quoteStatusBanner = isBrowser ? document.getElementById("quote-status-banner") : null;
+const quoteStatusMessage = isBrowser ? document.getElementById("quote-status-message") : null;
+const quoteStatusRetry = isBrowser ? document.getElementById("quote-status-retry") : null;
 const marketOpenText = isBrowser ? document.getElementById("market-open-text") : null;
 const marketSessionBadge = isBrowser ? document.getElementById("market-session-badge") : null;
 const marketAsOf = isBrowser ? document.getElementById("market-as-of") : null;
@@ -206,9 +210,11 @@ const percentFormatter = new Intl.NumberFormat("en-US", {
 const PROVIDER = "Yahoo Finance";
 const MAX_RETRIES = 4;
 const REQUEST_TIMEOUT_MS = 8000;
+const REFRESH_TIMEOUT_MS = 10000;
 const BACKOFF_BASE_MS = 500;
 const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_PARALLEL_REQUESTS = 3;
+const QUOTE_BATCH_SIZE = 8;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
@@ -241,6 +247,38 @@ const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
 const YAHOO_CHART_URL = (symbol, range, interval = "1d") =>
   `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=${interval}&includePrePost=false`;
+const QUOTE_PROXY_CHAIN = [
+  {
+    label: "Server proxy",
+    build: (symbols) => `/api/quote?symbols=${encodeURIComponent(symbols.join(","))}`,
+  },
+  {
+    label: "Corsproxy",
+    build: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  {
+    label: "Isomorphic proxy",
+    build: (url) => `https://cors.isomorphic-git.org/${url}`,
+  },
+  {
+    label: "AllOrigins",
+    build: (url, cacheBust) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
+  },
+];
+const CHART_PROXY_CHAIN = [
+  {
+    label: "Corsproxy",
+    build: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  {
+    label: "Isomorphic proxy",
+    build: (url) => `https://cors.isomorphic-git.org/${url}`,
+  },
+  {
+    label: "AllOrigins",
+    build: (url, cacheBust) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
+  },
+];
 
 const quoteCache = new Map();
 const lastKnownQuotes = new Map();
@@ -252,6 +290,17 @@ const analysisCache = new Map();
 const ANALYSIS_CACHE_PREFIX = "analysis_cache_v1_";
 const ANALYSIS_CACHE_TTL_MS = 3 * 60 * 1000;
 const marketIndicatorState = { usingCached: false };
+const refreshState = {
+  status: "idle",
+  lastAttemptTs: null,
+  lastSuccessTs: null,
+  lastError: null,
+};
+let lastRefreshSummary = {
+  okCount: 0,
+  errorCount: 0,
+  lastError: null,
+};
 const lastQuoteRequestStatus = new Map();
 const indicatorCache = new Map();
 
@@ -1299,6 +1348,40 @@ function parseJsonPayload(raw) {
   }
 }
 
+function isCorsError(error) {
+  const message = error?.message?.toLowerCase?.() ?? "";
+  return (
+    error?.name === "TypeError" &&
+    (message.includes("failed to fetch") ||
+      message.includes("networkerror") ||
+      message.includes("cors") ||
+      message.includes("fetch"))
+  );
+}
+
+function classifyFetchError(error) {
+  if (error instanceof MarketDataError) {
+    return error;
+  }
+  if (error?.name === "AbortError") {
+    return new MarketDataError("timeout", "Request timed out.");
+  }
+  if (isCorsError(error)) {
+    return new MarketDataError("cors", "CORS/proxy error.");
+  }
+  return new MarketDataError("network_error", error?.message || "Network error.");
+}
+
+function shouldFallbackAfterError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.type === "invalid_symbol") {
+    return false;
+  }
+  return true;
+}
+
 async function fetchWithTimeout(fetchFn, url, timeoutMs) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -1336,7 +1419,12 @@ async function fetchJsonWithRetry(
         if (shouldBackoffFromStatus(response.status)) {
           applyRateLimitBackoff();
         }
-        const errorType = RETRYABLE_STATUS.has(response.status) ? "unavailable" : "http_error";
+        const errorType =
+          response.status === 429
+            ? "rate_limit"
+            : RETRYABLE_STATUS.has(response.status)
+              ? "unavailable"
+              : "http_error";
         throw new MarketDataError(errorType, `Request failed: ${response.status}`, {
           statusCode: response.status,
         });
@@ -1373,10 +1461,7 @@ async function fetchJsonWithRetry(
       }
       return payload;
     } catch (error) {
-      const marketError =
-        error instanceof MarketDataError
-          ? error
-          : new MarketDataError("network_error", error.message || "Network error.");
+      const marketError = classifyFetchError(error);
       const shouldRetry = RETRYABLE_ERRORS.has(marketError.type) && attempt < maxAttempts;
       logMarketDataEvent(shouldRetry ? "warn" : "error", {
         event: "market_data_fetch_failure",
@@ -1400,6 +1485,21 @@ async function fetchJsonWithRetry(
     }
   }
   throw new MarketDataError("unavailable", "Failed to fetch market data.");
+}
+
+async function fetchJsonWithFallback(entries, options = {}) {
+  let lastError = null;
+  for (const entry of entries) {
+    try {
+      return await fetchJsonWithRetry(entry.url, { ...options, provider: entry.provider });
+    } catch (error) {
+      lastError = error;
+      if (!shouldFallbackAfterError(error)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new MarketDataError("unavailable", "Failed to fetch market data.");
 }
 
 function buildQuoteFromYahoo(quote) {
@@ -3068,12 +3168,14 @@ function updateResultLivePriceDisplay(symbol) {
 
 async function fetchJson(url, options = {}) {
   const cacheBust = Date.now();
-  return requestLimiter(() =>
-    fetchJsonWithRetry(
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
-      options,
-    ),
-  );
+  const fallbackEntries = CHART_PROXY_CHAIN.map((entry) => ({
+    url: entry.build(url, cacheBust),
+    provider: entry.label,
+  }));
+  if (!isBrowser) {
+    fallbackEntries.unshift({ url, provider: PROVIDER });
+  }
+  return requestLimiter(() => fetchJsonWithFallback(fallbackEntries, options));
 }
 
 function calculatePercentChange(latest, previous) {
@@ -3317,7 +3419,12 @@ function isHistoricalStale(symbol, { range = "1mo", interval = "1d" } = {}) {
 async function fetchYahooQuotes(symbols, options = {}) {
   const uniqueSymbols = [...new Set(symbols)];
   if (!uniqueSymbols.length) {
-    return [];
+    return { quotes: [], hadFailure: false, errors: [] };
+  }
+  const batchSize = options.batchSize ?? QUOTE_BATCH_SIZE;
+  const batches = [];
+  for (let i = 0; i < uniqueSymbols.length; i += batchSize) {
+    batches.push(uniqueSymbols.slice(i, i + batchSize));
   }
   const recordStatus = ({ status, ok }) => {
     const timestamp = Date.now();
@@ -3325,21 +3432,53 @@ async function fetchYahooQuotes(symbols, options = {}) {
       lastQuoteRequestStatus.set(symbol, { status, ok, timestamp });
     });
   };
-  const quoteData = await fetchJson(YAHOO_QUOTE_URL(uniqueSymbols), {
-    provider: PROVIDER,
-    symbol: uniqueSymbols.join(","),
-    fetchFn: options.fetchFn,
-    maxAttempts: options.maxAttempts,
-    timeoutMs: options.timeoutMs,
-    onStatus: recordStatus,
+  const results = await Promise.allSettled(
+    batches.map(async (batch) => {
+      const cacheBust = Date.now();
+      const quoteUrl = YAHOO_QUOTE_URL(batch);
+      const plan = [];
+      if (isBrowser) {
+        plan.push({
+          url: QUOTE_PROXY_CHAIN[0].build(batch),
+          provider: QUOTE_PROXY_CHAIN[0].label,
+        });
+      }
+      if (!isBrowser) {
+        plan.push({ url: quoteUrl, provider: PROVIDER });
+      }
+      plan.push(
+        ...QUOTE_PROXY_CHAIN.slice(1).map((entry) => ({
+          url: entry.build(quoteUrl, cacheBust),
+          provider: entry.label,
+        })),
+      );
+      const quoteData = await fetchJsonWithFallback(plan, {
+        provider: PROVIDER,
+        symbol: batch.join(","),
+        fetchFn: options.fetchFn,
+        maxAttempts: options.maxAttempts,
+        timeoutMs: options.timeoutMs,
+        onStatus: recordStatus,
+      });
+      const quoteResponse = quoteData?.quoteResponse;
+      if (!quoteResponse || !Array.isArray(quoteResponse.result)) {
+        throw new MarketDataError("provider_error", "Malformed quote response.", {
+          hasQuoteResponse: Boolean(quoteResponse),
+        });
+      }
+      return quoteResponse.result;
+    }),
+  );
+  const quotes = [];
+  const errors = [];
+  results.forEach((result) => {
+    if (result.status === "fulfilled") {
+      quotes.push(...result.value);
+    } else {
+      errors.push(result.reason);
+    }
   });
-  const quoteResponse = quoteData?.quoteResponse;
-  if (!quoteResponse || !Array.isArray(quoteResponse.result)) {
-    throw new MarketDataError("provider_error", "Malformed quote response.", {
-      hasQuoteResponse: Boolean(quoteResponse),
-    });
-  }
-  return quoteResponse.result;
+  return { quotes, hadFailure: errors.length > 0, errors };
 }
 
 async function fetchHistoricalSeries(symbol, options = {}) {
@@ -3442,7 +3581,7 @@ async function getQuoteInternal(symbol, options = {}) {
   const lastKnown = getLastKnownQuote(symbol);
   if (!providerQuote && options.allowFetch !== false) {
     try {
-      const quotes = await fetchYahooQuotes([symbol], options);
+      const { quotes } = await fetchYahooQuotes([symbol], options);
       providerQuote =
         quotes.find((entry) => entry.symbol?.toUpperCase?.() === symbol) ??
         quotes.find((entry) => entry.symbol === symbol) ??
@@ -3579,11 +3718,14 @@ async function loadInitialMarketData() {
   const symbols = marketState.map((stock) => stock.symbol);
   let hadQuoteFailure = false;
   let quoteResults = [];
+  let quoteErrors = [];
   let forceUnavailable = false;
   try {
-    quoteResults = await fetchYahooQuotes(symbols);
+    const batchResult = await fetchYahooQuotes(symbols);
+    quoteResults = batchResult.quotes;
+    quoteErrors = batchResult.errors;
     forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
-    if (forceUnavailable) {
+    if (forceUnavailable || batchResult.hadFailure) {
       hadQuoteFailure = true;
     }
   } catch (error) {
@@ -3609,10 +3751,13 @@ async function loadInitialMarketData() {
     };
   });
   results.forEach((result) => {
-    if (result?.error) {
+    if (result?.error || result?.hadQuoteFailure) {
       hadQuoteFailure = true;
     }
   });
+  if (quoteErrors.length) {
+    hadQuoteFailure = true;
+  }
 
   marketIndicatorState.usingCached = hadQuoteFailure;
 }
@@ -3884,6 +4029,7 @@ async function refreshSymbolData(symbol, options = {}) {
   let quote = null;
   let historyPayload = null;
   let quoteError = null;
+  let quoteErrorType = null;
 
   try {
     quote = await getQuote(symbol, options);
@@ -3892,6 +4038,7 @@ async function refreshSymbolData(symbol, options = {}) {
     }
   } catch (error) {
     quoteError = error;
+    quoteErrorType = error?.type ?? "unknown";
     if (error?.type === "invalid_symbol") {
       throw error;
     }
@@ -3943,7 +4090,7 @@ async function refreshSymbolData(symbol, options = {}) {
     },
   });
 
-  return { symbol, quote, historyPayload };
+  return { symbol, quote, historyPayload, hadQuoteFailure: Boolean(quoteError), quoteErrorType };
 }
 
 async function refreshSymbolsWithLimiter(symbols, getOptions) {
@@ -3959,6 +4106,14 @@ async function refreshSymbolsWithLimiter(symbols, getOptions) {
 
 async function refreshVisibleQuotes() {
   const symbols = getVisibleSymbols();
+  const summary = {
+    symbolsCount: symbols.length,
+    okCount: 0,
+    errorCount: 0,
+    hadQuoteFailure: false,
+    error: null,
+    errorTypes: [],
+  };
   const symbolsToFetch = symbols.filter((symbol) => {
     if (!isSymbolInWatchlist(symbol)) {
       return false;
@@ -3975,7 +4130,7 @@ async function refreshVisibleQuotes() {
   });
   if (!symbolsToFetch.length) {
     renderMarketTable();
-    return;
+    return summary;
   }
 
   let hadQuoteFailure = false;
@@ -3983,14 +4138,19 @@ async function refreshVisibleQuotes() {
   let forceUnavailable = false;
   let bulkError = null;
   try {
-    quoteResults = await fetchYahooQuotes(symbolsToFetch);
+    const batchResult = await fetchYahooQuotes(symbolsToFetch);
+    quoteResults = batchResult.quotes;
     forceUnavailable = quoteResults.length === 0 && symbolsToFetch.length > 0;
-    if (forceUnavailable) {
+    if (forceUnavailable || batchResult.hadFailure) {
       hadQuoteFailure = true;
+      summary.errorTypes.push(
+        ...batchResult.errors.map((error) => error?.type ?? "unknown").filter(Boolean),
+      );
     }
   } catch (error) {
     bulkError = error;
     hadQuoteFailure = true;
+    summary.errorTypes.push(error?.type ?? "unknown");
     if (shouldBackoffFromStatus(error?.details?.statusCode)) {
       applyRateLimitBackoff();
     }
@@ -4014,14 +4174,26 @@ async function refreshVisibleQuotes() {
     };
   });
   results.forEach((result) => {
-    if (result?.error) {
+    if (result?.error || result?.hadQuoteFailure) {
       hadQuoteFailure = true;
+      summary.errorCount += 1;
+      if (result?.quoteErrorType) {
+        summary.errorTypes.push(result.quoteErrorType);
+      }
+      if (result?.error?.type) {
+        summary.errorTypes.push(result.error.type);
+      }
+    }
+    if (result?.quote) {
+      summary.okCount += 1;
     }
   });
   if (bulkError && isRateLimitBackoffActive()) {
     logMarketDebug("bulk", "backoff_active", { until: rateLimitBackoffUntil });
   }
   marketIndicatorState.usingCached = hadQuoteFailure;
+  summary.hadQuoteFailure = hadQuoteFailure;
+  summary.error = bulkError ?? (hadQuoteFailure ? results.find((result) => result?.error)?.error : null);
 
   await Promise.all(
     symbols
@@ -4056,6 +4228,7 @@ async function refreshVisibleQuotes() {
   if (resultCard && !resultCard.classList.contains("hidden")) {
     updateResultLivePriceDisplay(resultSymbol.textContent);
   }
+  return summary;
 }
 
 function formatIntervalLabel(intervalMs) {
@@ -4067,21 +4240,179 @@ function formatIntervalLabel(intervalMs) {
   return `${seconds}s`;
 }
 
+function formatElapsedLabel(elapsedMs) {
+  if (elapsedMs == null) {
+    return "just now";
+  }
+  if (elapsedMs < 60 * 1000) {
+    return `${Math.max(1, Math.round(elapsedMs / 1000))}s`;
+  }
+  if (elapsedMs < 60 * 60 * 1000) {
+    return `${Math.round(elapsedMs / 60000)}m`;
+  }
+  return `${Math.round(elapsedMs / 3600000)}h`;
+}
+
+function setQuoteStatusBanner(message, options = {}) {
+  if (!quoteStatusBanner || !quoteStatusMessage) {
+    return;
+  }
+  if (!message) {
+    quoteStatusBanner.classList.add("hidden");
+    quoteStatusBanner.dataset.reason = "";
+    quoteStatusMessage.textContent = "";
+    return;
+  }
+  quoteStatusBanner.classList.remove("hidden");
+  quoteStatusMessage.textContent = message;
+  if (options.reason) {
+    quoteStatusBanner.dataset.reason = options.reason;
+  }
+}
+
+function getQuoteFailureMessage(errorType) {
+  if (errorType === "cors") {
+    return "Live quotes unavailable (CORS/proxy). Showing cached/last close.";
+  }
+  if (errorType === "rate_limit") {
+    return "Live quotes unavailable (rate limit). Showing cached/last close.";
+  }
+  if (errorType === "invalid_symbol") {
+    return "Live quotes unavailable (invalid symbol). Showing cached/last close.";
+  }
+  if (errorType === "timeout") {
+    return "Live quotes unavailable (timeout). Showing cached/last close.";
+  }
+  return "Live quotes unavailable (network). Showing cached/last close.";
+}
+
+function setRefreshState(partial) {
+  Object.assign(refreshState, partial);
+  updateRefreshStatus();
+}
+
 function updateRefreshStatus() {
   if (!refreshStatus) {
     return;
   }
   if (!isPageVisible()) {
     refreshStatus.textContent = "Updates paused";
+    refreshPill?.classList?.remove("loading", "ok", "error");
     return;
   }
-  const symbols = getVisibleSymbols();
-  const intervalMs = getEffectiveRefreshInterval(symbols);
-  if (isRateLimitBackoffActive()) {
-    refreshStatus.textContent = `Backoff active • next update ~${formatIntervalLabel(intervalMs)}`;
+  if (refreshState.status === "loading") {
+    refreshStatus.textContent = "Loading…";
+    refreshPill?.classList?.remove("ok", "error");
+    refreshPill?.classList?.add("loading");
     return;
   }
-  refreshStatus.textContent = `Updating every ${formatIntervalLabel(intervalMs)}`;
+  if (refreshState.status === "error") {
+    refreshStatus.textContent = "Error (tap for details)";
+    refreshPill?.classList?.remove("ok", "loading");
+    refreshPill?.classList?.add("error");
+    return;
+  }
+  const lastSuccess = refreshState.lastSuccessTs;
+  if (lastSuccess) {
+    const elapsed = Date.now() - lastSuccess;
+    refreshStatus.textContent = `Updated ${formatElapsedLabel(elapsed)} ago`;
+    refreshPill?.classList?.remove("loading", "error");
+    refreshPill?.classList?.add("ok");
+    return;
+  }
+  refreshStatus.textContent = "Idle";
+  refreshPill?.classList?.remove("loading", "error");
+  refreshPill?.classList?.add("ok");
+}
+
+async function withTimeout(promise, timeoutMs) {
+  let timeoutId = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new MarketDataError("timeout", "Refresh cycle timed out."));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = refreshVisibleQuotes } = {}) {
+  const startedAt = Date.now();
+  setRefreshState({ status: "loading", lastAttemptTs: startedAt, lastError: null });
+  setQuoteStatusBanner(null);
+  let summary = null;
+  let error = null;
+  try {
+    summary = await withTimeout(refreshFn(), timeoutMs);
+  } catch (err) {
+    error = err instanceof MarketDataError ? err : new MarketDataError("unavailable", err?.message ?? "Refresh failed.");
+  }
+
+  if (summary) {
+    lastRefreshSummary = {
+      okCount: summary.okCount,
+      errorCount: summary.errorCount,
+      lastError: summary.error ?? null,
+    };
+  }
+
+  const hadFailure = summary?.hadQuoteFailure === true || Boolean(error);
+  if (hadFailure) {
+    const errorType = error?.type ?? summary?.errorTypes?.[0] ?? summary?.error?.type ?? "network_error";
+    const message = getQuoteFailureMessage(errorType);
+    setRefreshState({
+      status: error ? "error" : summary?.okCount ? "ok" : "error",
+      lastError: error ?? summary?.error ?? null,
+      lastSuccessTs: summary?.okCount ? Date.now() : refreshState.lastSuccessTs,
+    });
+    setQuoteStatusBanner(message, { reason: errorType });
+  } else {
+    setRefreshState({ status: "ok", lastSuccessTs: Date.now(), lastError: null });
+    setQuoteStatusBanner(null);
+  }
+  updateMarketDebugReadout({ filteredCount: getFilteredMarketEntries().length });
+  return { summary, error };
+}
+
+async function triggerImmediateRefresh() {
+  if (!isBrowser) {
+    return;
+  }
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+  }
+  if (refreshInProgress) {
+    return;
+  }
+  refreshInProgress = true;
+  try {
+    await runRefreshCycle();
+  } finally {
+    refreshInProgress = false;
+    scheduleNextMarketRefresh();
+  }
+}
+
+function resetRefreshState() {
+  refreshState.status = "idle";
+  refreshState.lastAttemptTs = null;
+  refreshState.lastSuccessTs = null;
+  refreshState.lastError = null;
+  lastRefreshSummary = { okCount: 0, errorCount: 0, lastError: null };
+  updateRefreshStatus();
+}
+
+function getRefreshState() {
+  return { ...refreshState };
+}
+
+function getLastRefreshSummary() {
+  return { ...lastRefreshSummary };
 }
 
 function scheduleNextMarketRefresh(delayOverride) {
@@ -4109,7 +4440,7 @@ function scheduleNextMarketRefresh(delayOverride) {
     }
     refreshInProgress = true;
     try {
-      await refreshVisibleQuotes();
+      await runRefreshCycle();
     } finally {
       refreshInProgress = false;
     }
@@ -4708,8 +5039,15 @@ function updateMarketDebugReadout({ filteredCount = 0 } = {}) {
     return;
   }
   const watchlistCount = marketState.length;
+  const renderedRows =
+    marketBody?.querySelectorAll?.("tr[data-symbol]")?.length ??
+    (Array.isArray(marketBody?.children) ? marketBody.children.length : 0);
   const quotesLoaded = marketState.filter((stock) => hasAnyMarketData(stock)).length;
-  debugLine.textContent = `Watchlist: ${watchlistCount} symbols | Visible after filters: ${filteredCount} | Quotes loaded: ${quotesLoaded}`;
+  const quotesOk = lastRefreshSummary?.okCount ?? 0;
+  const lastErrorLabel = refreshState.lastError
+    ? `${refreshState.lastError.type ?? "unknown"}: ${refreshState.lastError.message ?? "error"}`
+    : "—";
+  debugLine.textContent = `Watchlist: ${watchlistCount} | Rendered rows: ${renderedRows} | Quotes ok: ${quotesOk} | Last error: ${lastErrorLabel}`;
   debugLine.classList.remove("hidden");
 }
 
@@ -4762,11 +5100,14 @@ async function refreshMarketBoard() {
   const symbols = marketState.map((stock) => stock.symbol);
   let hadQuoteFailure = false;
   let quoteResults = [];
+  let quoteErrors = [];
   let forceUnavailable = false;
   try {
-    quoteResults = await fetchYahooQuotes(symbols);
+    const batchResult = await fetchYahooQuotes(symbols);
+    quoteResults = batchResult.quotes;
+    quoteErrors = batchResult.errors;
     forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
-    if (forceUnavailable) {
+    if (forceUnavailable || batchResult.hadFailure) {
       hadQuoteFailure = true;
     }
   } catch (error) {
@@ -4793,10 +5134,13 @@ async function refreshMarketBoard() {
     };
   });
   results.forEach((result) => {
-    if (result?.error) {
+    if (result?.error || result?.hadQuoteFailure) {
       hadQuoteFailure = true;
     }
   });
+  if (quoteErrors.length) {
+    hadQuoteFailure = true;
+  }
   marketIndicatorState.usingCached = hadQuoteFailure;
 
   renderMarketTable();
@@ -5119,8 +5463,26 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
       filteredCount: getFilteredMarketEntries().length,
       didRender: true,
     });
+    updateRefreshStatus();
   }
   sortBySelect = ensureSortControl() ?? sortBySelect;
+  if (refreshPill) {
+    didInit = true;
+    refreshPill.addEventListener("click", () => {
+      if (refreshState.status === "error" && refreshState.lastError) {
+        const errorType = refreshState.lastError.type ?? "network_error";
+        setQuoteStatusBanner(getQuoteFailureMessage(errorType), { reason: errorType });
+        return;
+      }
+      triggerImmediateRefresh();
+    });
+  }
+  if (quoteStatusRetry) {
+    didInit = true;
+    quoteStatusRetry.addEventListener("click", () => {
+      triggerImmediateRefresh();
+    });
+  }
   [
     filterSearch,
     filterSector,
@@ -5377,6 +5739,12 @@ const appCore = {
   getCachedAnalysis,
   setCachedAnalysis,
   resetAnalysisCache,
+  fetchYahooQuotes,
+  refreshVisibleQuotes,
+  runRefreshCycle,
+  getRefreshState,
+  resetRefreshState,
+  getLastRefreshSummary,
   buildAnalyzeUrl,
   initTradePage,
   initLivePage,
