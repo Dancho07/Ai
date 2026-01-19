@@ -1328,10 +1328,12 @@ const tests = [
       const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
+      const headerTextIncludes1d = html.includes(">1D change<");
       const columnKeys = getMarketTableColumnKeys();
       const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
+      assert.strictEqual(headerTextIncludes1d, true);
       assert.deepStrictEqual(columnKeys, headerCols);
       assert.deepStrictEqual(rowCols, columnKeys);
     },
@@ -1366,7 +1368,7 @@ const tests = [
       const change1dCell = cells.get("change1d");
       const analyzeCell = cells.get("analyze");
       assert.ok(change1dCell.textContent.includes("%"));
-      assert.ok(!analyzeCell.textContent.includes("%"));
+      assert.strictEqual(analyzeCell.textContent.trim(), "Analyze");
     },
   },
   {

@@ -101,7 +101,6 @@ const MARKET_TABLE_COLUMNS = [
   { key: "price", className: "num-cell" },
   { key: "change", className: "price-change change-cell num-cell" },
   { key: "change1d", className: "price-change change1d-cell num-cell" },
-  { key: "change1m", className: "price-change num-cell" },
   { key: "analyze", className: "analyze-cell" },
 ];
 
@@ -3636,6 +3635,31 @@ function buildMarketRowMarkup() {
   }).join("");
 }
 
+function validateMarketTableStructure(table) {
+  if (!table) {
+    return null;
+  }
+  const headerCount = table.querySelectorAll("thead th").length;
+  const expectedCount = MARKET_TABLE_COLUMNS.length;
+  if (headerCount !== expectedCount) {
+    console.warn(
+      `[market-table] Header column count ${headerCount} does not match expected ${expectedCount}.`,
+    );
+  }
+  table.querySelectorAll("tbody tr").forEach((row) => {
+    if (row.querySelector("td[colspan]")) {
+      return;
+    }
+    const cellCount = row.querySelectorAll("td").length;
+    if (cellCount !== headerCount) {
+      console.warn(
+        `[market-table] Row ${row.dataset.symbol ?? "unknown"} has ${cellCount} cells (expected ${headerCount}).`,
+      );
+    }
+  });
+  return { headerCount, expectedCount };
+}
+
 function formatChangeCellContent(cell, value, className) {
   if (!cell) {
     return;
@@ -3667,9 +3691,7 @@ function updateMarketRowCells(row, stock) {
     changeDisplay,
     changeClass,
     dayDisplay,
-    monthDisplay,
     dayClass,
-    monthClass,
   } = getMarketRowDisplay(stock);
 
   const symbolCell = row.querySelector('[data-col="symbol"]');
@@ -3681,7 +3703,6 @@ function updateMarketRowCells(row, stock) {
   const priceCell = row.querySelector('[data-col="price"]');
   const changeCell = row.querySelector('[data-col="change"]');
   const dayCell = row.querySelector('[data-col="change1d"]');
-  const monthCell = row.querySelector('[data-col="change1m"]');
   const analyzeCell = row.querySelector('[data-col="analyze"]');
 
   if (symbolCell) {
@@ -3722,7 +3743,6 @@ function updateMarketRowCells(row, stock) {
   }
   formatChangeCellContent(changeCell, changeDisplay, changeClass);
   formatChangeCellContent(dayCell, dayDisplay, dayClass);
-  formatChangeCellContent(monthCell, monthDisplay, monthClass);
   if (analyzeCell) {
     analyzeCell.innerHTML = `
       <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
@@ -3739,7 +3759,7 @@ function renderMarketTable() {
   ensureSortControl();
   const filtered = marketState.filter(matchesFilters);
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="11">No stocks match these filters.</td></tr>`;
+    marketBody.innerHTML = `<tr><td colspan="10">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
     return;
   }
@@ -3760,6 +3780,7 @@ function renderMarketTable() {
     marketBody.appendChild(row);
     updateMarketRowCells(row, stock);
   });
+  validateMarketTableStructure(marketBody.closest("table"));
   updateMarketIndicator();
 }
 

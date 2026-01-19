@@ -336,7 +336,7 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  min-width: 1520px;
+  min-width: 1450px;
   table-layout: fixed;
 }
 
@@ -513,6 +513,7 @@ tbody tr:hover td:last-child {
 
 .num-cell {
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 th[data-col="symbol"],
@@ -560,14 +561,12 @@ td[data-col="price"] {
 
 th[data-col="change"],
 td[data-col="change"] {
-  width: 160px;
-  min-width: 160px;
+  width: 180px;
+  min-width: 180px;
 }
 
 th[data-col="change1d"],
-td[data-col="change1d"],
-th[data-col="change1m"],
-td[data-col="change1m"] {
+td[data-col="change1d"] {
   width: 120px;
   min-width: 120px;
 }
