@@ -4,7 +4,10 @@ if (typeof document !== "undefined") {
       window.AppCore.initLivePage({
         onAnalyze: (symbol) => {
           const url = window.AppCore.buildAnalyzeUrl(symbol, { autoRun: true });
-          window.location.href = url;
+          if (!url) {
+            return;
+          }
+          window.location.assign(url);
         },
       });
     }
