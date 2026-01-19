@@ -140,6 +140,12 @@ const MARKET_TABLE_COLUMNS = [
 
 const FORM_STATE_KEY = "trade_form_state_v1";
 const WATCHLIST_STORAGE_KEY = "watchlist_v1";
+const WATCHLIST_STORAGE_KEYS = [
+  WATCHLIST_STORAGE_KEY,
+  "watchlist",
+  "pulse_watchlist",
+  "marketPulse.watchlist",
+];
 const FAVORITES_STORAGE_KEY = "favorites_v1";
 const BACKTEST_CACHE_PREFIX = "backtest30d_v1";
 const POSITION_SIZING_MODES = {
@@ -218,6 +224,7 @@ const MARKET_DEBUG_ENABLED =
   isBrowser && typeof window !== "undefined"
     ? new URLSearchParams(window.location.search).get(MARKET_DEBUG_PARAM) === "1"
     : false;
+const DEBUG = true;
 const PERF_DEBUG_ENABLED = MARKET_DEBUG_ENABLED;
 const QUOTE_FAST_FALLBACK_MS = 800;
 const INDICATOR_CACHE_TTL_MS = 60 * 1000;
@@ -506,17 +513,31 @@ function sanitizeSymbolList(list) {
   return [...new Set(filtered)];
 }
 
+function getWatchlist({ storage = storageAdapter, defaultSymbols = DEFAULT_WATCHLIST_SYMBOLS } = {}) {
+  const fallback = sanitizeSymbolList(defaultSymbols);
+  const keys = WATCHLIST_STORAGE_KEYS;
+  for (const key of keys) {
+    const stored = storage?.get?.(key);
+    const normalized = sanitizeSymbolList(stored);
+    if (normalized.length) {
+      return { symbols: normalized, sourceKey: key };
+    }
+  }
+  return { symbols: fallback, sourceKey: "default" };
+}
+
 function createWatchlistStore({ storage, defaultSymbols }) {
   let cached = null;
+  let sourceKey = "default";
   const defaults = sanitizeSymbolList(defaultSymbols);
 
   const load = () => {
     if (cached) {
       return cached;
     }
-    const stored = storage?.get?.(WATCHLIST_STORAGE_KEY);
-    const normalized = sanitizeSymbolList(stored);
-    cached = normalized.length ? normalized : defaults;
+    const loaded = getWatchlist({ storage, defaultSymbols: defaults });
+    cached = loaded.symbols.length ? loaded.symbols : defaults;
+    sourceKey = loaded.sourceKey;
     return cached;
   };
 
@@ -555,6 +576,7 @@ function createWatchlistStore({ storage, defaultSymbols }) {
       persist();
       return [...cached];
     },
+    getWatchlistMeta: () => ({ sourceKey, count: cached ? cached.length : 0 }),
   };
 
   return store;
@@ -835,6 +857,7 @@ const QUOTE_SOURCES = {
   DELAYED: "DELAYED",
   CACHED: "CACHED",
   LAST_CLOSE: "LAST_CLOSE",
+  UNAVAILABLE: "UNAVAILABLE",
 };
 
 const QUOTE_SESSIONS = {
@@ -1554,6 +1577,9 @@ function getMarketSourceBadge(entry, hasData = true) {
   if (source === QUOTE_SOURCES.LAST_CLOSE) {
     return { label: "LAST CLOSE", className: "historical" };
   }
+  if (source === QUOTE_SOURCES.UNAVAILABLE) {
+    return { label: "UNAVAILABLE", className: "delayed" };
+  }
   return { label: "UNAVAILABLE", className: "delayed" };
 }
 
@@ -1659,6 +1685,9 @@ function getSourceBadge(source) {
   }
   if (source === QUOTE_SOURCES.REALTIME) {
     return { label: "REALTIME", className: "realtime", tooltip: "Live quote." };
+  }
+  if (source === QUOTE_SOURCES.UNAVAILABLE) {
+    return { label: "UNAVAILABLE", className: "delayed", tooltip: "Live quote unavailable." };
   }
   return { label: "UNAVAILABLE", className: "delayed", tooltip: "Live quote unavailable." };
 }
@@ -3092,6 +3121,7 @@ function updateStockWithQuote(stock, quote) {
   if (!quote) {
     return;
   }
+  stock.quoteUnavailable = Boolean(quote.unavailable);
   if (quote.name) {
     stock.name = quote.name;
   }
@@ -3118,6 +3148,9 @@ function updateStockWithQuote(stock, quote) {
   stock.lastUpdated = formatTime(stock.quoteAsOf);
   stock.lastUpdatedAt = quote.asOfTimestamp ?? stock.lastUpdatedAt ?? Date.now();
   stock.dataSource = quote.source ?? stock.dataSource;
+  if (quote.unavailable && quote.price == null && quote.previousClose == null) {
+    stock.dataSource = QUOTE_SOURCES.UNAVAILABLE;
+  }
   const fallbackWarnings = shouldShowCacheWarning(
     normalizeSession(quote.session) ?? stock.quoteSession ?? QUOTE_SESSIONS.CLOSED,
     quote.source ?? stock.dataSource ?? QUOTE_SOURCES.CACHED,
@@ -3191,6 +3224,7 @@ function createSymbolEntry(symbol, fallbackName) {
     quoteAsOf: null,
     quoteSession: null,
     isRealtime: false,
+    quoteUnavailable: false,
     dataSource: QUOTE_SOURCES.REALTIME,
     quoteWarnings: [],
   };
@@ -3887,6 +3921,12 @@ async function refreshSymbolData(symbol, options = {}) {
     }
   }
 
+  if (!hasAnyMarketData(stock) && quoteError) {
+    stock.quoteUnavailable = true;
+    stock.dataSource = QUOTE_SOURCES.UNAVAILABLE;
+    stock.quoteSession = QUOTE_SESSIONS.CLOSED;
+  }
+
   const display = getMarketRowDisplay(stock);
   logMarketDebug(symbol, "fetch_end", {
     durationMs: Date.now() - startedAt,
@@ -4101,6 +4141,7 @@ function hasAnyMarketData(stock) {
 
 function getMarketRowDisplay(stock) {
   const hasAnyData = hasAnyMarketData(stock);
+  const isUnavailable = stock?.quoteUnavailable === true || stock?.dataSource === QUOTE_SOURCES.UNAVAILABLE;
   const computedChange =
     stock.lastPrice !== null && stock.previousClose !== null
       ? stock.lastPrice - stock.previousClose
@@ -4112,11 +4153,15 @@ function getMarketRowDisplay(stock) {
       ? (computedChange / stock.previousClose) * 100
       : null);
   const priceDisplay =
-    stock.lastPrice !== null ? quoteFormatter.format(stock.lastPrice) : hasAnyData ? "Price unavailable" : "—";
+    stock.lastPrice !== null
+      ? quoteFormatter.format(stock.lastPrice)
+      : hasAnyData || isUnavailable
+        ? "Price unavailable"
+        : "—";
   const source = stock.dataSource ?? QUOTE_SOURCES.CACHED;
   const session = stock.quoteSession ?? QUOTE_SESSIONS.CLOSED;
-  const sourceBadge = stock.lastPrice !== null ? getSourceBadge(source) : null;
-  const sessionBadge = stock.lastPrice !== null ? getSessionBadgeForSession(session) : null;
+  const sourceBadge = hasAnyData || isUnavailable ? getSourceBadge(source) : null;
+  const sessionBadge = hasAnyData ? getSessionBadgeForSession(session) : null;
   const showWarning =
     stock.lastPrice !== null &&
     (stock.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source));
@@ -4125,7 +4170,9 @@ function getMarketRowDisplay(stock) {
         stock.quoteAsOf || stock.lastUpdatedAt || stock.lastHistoricalTimestamp,
         { tz: "UTC" },
       )}`
-    : "Loading…";
+    : isUnavailable
+      ? "Quote unavailable"
+      : "Loading…";
   const changeDisplay =
     change !== null && changePercent !== null
       ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
@@ -4133,14 +4180,14 @@ function getMarketRowDisplay(stock) {
         )}%)`
       : changePercent !== null
         ? `${changePercent >= 0 ? "+" : ""}${percentFormatter.format(changePercent)}%`
-        : hasAnyData
+        : hasAnyData || isUnavailable
           ? "n/a"
           : "—";
   const changeClass = change === null ? "" : change >= 0 ? "positive" : "negative";
   const dailyChange = stock.dailyChange ?? getLiveChangePercent(stock);
-  const dayDisplay = hasAnyData ? formatPercent(dailyChange) : "—";
-  const monthDisplay = hasAnyData ? formatPercent(stock.monthlyChange) : "—";
-  const yearDisplay = hasAnyData ? formatPercent(stock.yearlyChange) : "—";
+  const dayDisplay = hasAnyData ? formatPercent(dailyChange) : isUnavailable ? "n/a" : "—";
+  const monthDisplay = hasAnyData ? formatPercent(stock.monthlyChange) : isUnavailable ? "n/a" : "—";
+  const yearDisplay = hasAnyData ? formatPercent(stock.yearlyChange) : isUnavailable ? "n/a" : "—";
 
   return {
     priceDisplay,
@@ -4617,6 +4664,55 @@ function renderTopOpportunities(filtered) {
   renderOpportunityGroup(opportunityMoversList, opportunityMoversNote, groups.movers);
 }
 
+function clearMarketBodyRows() {
+  if (!marketBody) {
+    return;
+  }
+  if (typeof marketBody.replaceChildren === "function") {
+    marketBody.replaceChildren();
+    return;
+  }
+  marketBody.innerHTML = "";
+  if (Array.isArray(marketBody.children)) {
+    marketBody.children.length = 0;
+  }
+}
+
+function renderSkeletonRows(symbols = marketState.map((stock) => stock.symbol)) {
+  if (!marketBody) {
+    return;
+  }
+  const existingRows = new Map();
+  marketBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
+    existingRows.set(row.dataset.symbol, row);
+  });
+  const rows = symbols.map((symbol) => {
+    const entry = marketStateIndex.get(symbol) ?? createSymbolEntry(symbol, symbol);
+    const row = existingRows.get(symbol) ?? createMarketRowSkeleton(entry);
+    updateMarketRowCells(row, entry);
+    row.classList.remove("hidden");
+    return row;
+  });
+  clearMarketBodyRows();
+  rows.forEach((row) => marketBody.appendChild(row));
+  validateMarketTableStructure(marketBody.closest("table"));
+}
+
+function updateMarketDebugReadout({ filteredCount = 0 } = {}) {
+  const debugLine = isBrowser ? document.getElementById("market-debug") : null;
+  if (!debugLine) {
+    return;
+  }
+  if (!DEBUG) {
+    debugLine.classList.add("hidden");
+    return;
+  }
+  const watchlistCount = marketState.length;
+  const quotesLoaded = marketState.filter((stock) => hasAnyMarketData(stock)).length;
+  debugLine.textContent = `Watchlist: ${watchlistCount} symbols | Visible after filters: ${filteredCount} | Quotes loaded: ${quotesLoaded}`;
+  debugLine.classList.remove("hidden");
+}
+
 function renderMarketTable() {
   if (!marketBody) {
     return;
@@ -4625,39 +4721,40 @@ function renderMarketTable() {
   const filtered = getFilteredMarketEntries();
   renderTopOpportunities(filtered);
   logMarketSummary({ filteredCount: filtered.length, totalCount: marketState.length });
-  if (!filtered.length) {
-    const hasWatchlist = marketState.length > 0;
-    marketBody.innerHTML = hasWatchlist
-      ? `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">No stocks match these filters.</td></tr>`
-      : `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">Your watchlist is empty.</td></tr>`;
-    if (marketEmptyState && marketEmptyMessage) {
-      marketEmptyState.classList.toggle("hidden", !hasWatchlist);
-      marketEmptyMessage.textContent = "No matches for current filters.";
+  const hasWatchlist = marketState.length > 0;
+  if (marketEmptyState && marketEmptyMessage) {
+    if (!hasWatchlist) {
+      marketEmptyMessage.textContent = "Your watchlist is empty.";
+      marketEmptyState.classList.remove("hidden");
+    } else if (!filtered.length) {
+      marketEmptyMessage.textContent = "Empty filters — no matches for current filters.";
+      marketEmptyState.classList.remove("hidden");
+    } else {
+      marketEmptyState.classList.add("hidden");
     }
-    updateMarketIndicator();
-    return;
-  }
-  if (marketEmptyState) {
-    marketEmptyState.classList.add("hidden");
   }
 
   const sortKey = sortBySelect?.value ?? DEFAULT_SORT_KEY;
-  const sorted = sortMarketEntries(filtered, sortKey);
+  const sortedVisible = sortMarketEntries(filtered, sortKey);
+  const visibleSymbols = new Set(sortedVisible.map((stock) => stock.symbol));
+  const ordered = [...sortedVisible, ...marketState.filter((stock) => !visibleSymbols.has(stock.symbol))];
   const existingRows = new Map();
   marketBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
     existingRows.set(row.dataset.symbol, row);
   });
 
-  marketBody.innerHTML = "";
-  sorted.forEach((stock) => {
+  clearMarketBodyRows();
+  ordered.forEach((stock) => {
     const row = existingRows.get(stock.symbol) ?? createMarketRowSkeleton(stock);
     if (!row) {
       return;
     }
+    row.classList.toggle("hidden", !visibleSymbols.has(stock.symbol));
     marketBody.appendChild(row);
     updateMarketRowCells(row, stock);
   });
   validateMarketTableStructure(marketBody.closest("table"));
+  updateMarketDebugReadout({ filteredCount: filtered.length });
   updateMarketIndicator();
 }
 
@@ -5005,7 +5102,24 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     setWatchlistError("Missing symbol.");
   };
   const shouldRender = !skipRender;
+  const initialSymbols = watchlistStore.getWatchlist();
+  const watchlistMeta = watchlistStore.getWatchlistMeta?.() ?? { sourceKey: WATCHLIST_STORAGE_KEY };
+  console.info("[Market Init]", {
+    stage: "watchlist_loaded",
+    sourceKey: watchlistMeta.sourceKey,
+    watchlistCount: initialSymbols.length,
+  });
   syncMarketStateWithWatchlist();
+  if (shouldRender) {
+    renderSkeletonRows(initialSymbols);
+    console.info("[Market Init]", { stage: "skeleton_rendered", rowCount: initialSymbols.length });
+    renderMarketTable();
+    console.info("[Market Init]", {
+      stage: "render_market_table",
+      filteredCount: getFilteredMarketEntries().length,
+      didRender: true,
+    });
+  }
   sortBySelect = ensureSortControl() ?? sortBySelect;
   [
     filterSearch,
@@ -5021,11 +5135,11 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     if (input) {
       didInit = true;
       input.addEventListener("input", () => {
-        if (shouldRender) {
-          renderMarketTable();
-          updateRefreshStatus();
-          scheduleNextMarketRefresh();
-        }
+      if (shouldRender) {
+        renderMarketTable();
+        updateRefreshStatus();
+        scheduleNextMarketRefresh();
+      }
       });
     }
   });
@@ -5076,6 +5190,7 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
       setWatchlistError("");
       syncMarketStateWithWatchlist();
       if (shouldRender) {
+        renderSkeletonRows(watchlistStore.getWatchlist());
         renderMarketTable();
       }
       if (shouldRender) {
@@ -5149,6 +5264,7 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
           if (removed) {
             syncMarketStateWithWatchlist();
             if (shouldRender) {
+              renderSkeletonRows(watchlistStore.getWatchlist());
               renderMarketTable();
               updateRefreshStatus();
               scheduleNextMarketRefresh(0);
@@ -5172,9 +5288,15 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     loadPersistentQuoteCache();
     loadPersistentHistoricalCache();
     hydrateMarketStateFromCache();
-    renderMarketTable();
+    if (shouldRender) {
+      renderMarketTable();
+    }
     loadInitialMarketData()
-      .then(renderMarketTable)
+      .then(() => {
+        if (shouldRender) {
+          renderMarketTable();
+        }
+      })
       .catch((error) => {
         logMarketDataEvent("error", {
           event: "market_data_initial_failure",
@@ -5198,6 +5320,7 @@ const appCore = {
   fetchWithTimeout,
   isValidSymbol,
   isValidWatchlistSymbol,
+  getWatchlist,
   normalizeSymbolInput,
   normalizeWatchlistSymbol,
   getSymbolValidationMessage,
