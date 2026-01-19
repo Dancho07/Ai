@@ -73,6 +73,9 @@ const planHoldBreakdownTrigger = isBrowser
   : null;
 
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
+const marketEmptyState = isBrowser ? document.getElementById("market-empty-state") : null;
+const marketEmptyMessage = isBrowser ? document.getElementById("market-empty-message") : null;
+const clearFiltersButton = isBrowser ? document.getElementById("clear-filters") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
 const marketOpenText = isBrowser ? document.getElementById("market-open-text") : null;
 const marketSessionBadge = isBrowser ? document.getElementById("market-session-badge") : null;
@@ -167,16 +170,6 @@ const DEFAULT_WATCHLIST = [
   { symbol: "UNH", name: "UnitedHealth", sector: "Healthcare", cap: "Large" },
   { symbol: "PFE", name: "Pfizer", sector: "Healthcare", cap: "Large" },
   { symbol: "XOM", name: "Exxon Mobil", sector: "Energy", cap: "Large" },
-  { symbol: "OXY", name: "Occidental", sector: "Energy", cap: "Mid" },
-  { symbol: "PLTR", name: "Palantir", sector: "Technology", cap: "Mid" },
-  { symbol: "SHOP", name: "Shopify", sector: "Technology", cap: "Mid" },
-  { symbol: "SQ", name: "Block", sector: "Finance", cap: "Mid" },
-  { symbol: "ROKU", name: "Roku", sector: "Consumer", cap: "Mid" },
-  { symbol: "F", name: "Ford", sector: "Consumer", cap: "Mid" },
-  { symbol: "DKNG", name: "DraftKings", sector: "Consumer", cap: "Small" },
-  { symbol: "ENPH", name: "Enphase", sector: "Energy", cap: "Small" },
-  { symbol: "CRSP", name: "CRISPR", sector: "Healthcare", cap: "Small" },
-  { symbol: "UPST", name: "Upstart", sector: "Finance", cap: "Small" },
 ];
 
 const DEFAULT_WATCHLIST_SYMBOLS = DEFAULT_WATCHLIST.map((stock) => stock.symbol);
@@ -498,7 +491,17 @@ function sanitizeSymbolList(list) {
   if (!Array.isArray(list)) {
     return [];
   }
-  const normalized = list.map((symbol) => normalizeWatchlistSymbol(symbol)).filter(Boolean);
+  const normalized = list
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return normalizeWatchlistSymbol(entry);
+      }
+      if (entry && typeof entry === "object" && typeof entry.symbol === "string") {
+        return normalizeWatchlistSymbol(entry.symbol);
+      }
+      return "";
+    })
+    .filter(Boolean);
   const filtered = normalized.filter((symbol) => isValidWatchlistSymbol(symbol));
   return [...new Set(filtered)];
 }
@@ -3704,6 +3707,33 @@ function getMarketFilterValues() {
   };
 }
 
+function clearMarketFilters() {
+  if (filterSearch) {
+    filterSearch.value = "";
+  }
+  if (filterSector) {
+    filterSector.value = "all";
+  }
+  if (filterCap) {
+    filterCap.value = "all";
+  }
+  if (filterSignal) {
+    filterSignal.value = "all";
+  }
+  if (filterMin) {
+    filterMin.value = "";
+  }
+  if (filterMax) {
+    filterMax.value = "";
+  }
+  if (filterMonth) {
+    filterMonth.value = "";
+  }
+  if (filterFavorites) {
+    filterFavorites.checked = false;
+  }
+}
+
 function matchesFilters(stock, filters = getMarketFilterValues()) {
   const searchValue = (filters.search ?? "").trim().toUpperCase();
   const sectorValue = filters.sector ?? "all";
@@ -3758,6 +3788,35 @@ function getFilteredMarketEntries() {
   const favorites = favoritesStore.getFavorites();
   const filters = getMarketFilterValues();
   return applyMarketFilters(marketState, { favoritesOnly, favorites, filters });
+}
+
+function getQuoteStatusSummary(symbols) {
+  const counts = { ok: 0, error: 0, unknown: 0 };
+  symbols.forEach((symbol) => {
+    const status = lastQuoteRequestStatus.get(symbol);
+    if (!status) {
+      counts.unknown += 1;
+    } else if (status.ok) {
+      counts.ok += 1;
+    } else {
+      counts.error += 1;
+    }
+  });
+  return counts;
+}
+
+function logMarketSummary({ filteredCount, totalCount } = {}) {
+  if (!MARKET_DEBUG_ENABLED) {
+    return;
+  }
+  const symbols = watchlistStore.getWatchlist();
+  console.info("[Market Debug]", {
+    stage: "render",
+    watchlistCount: symbols.length,
+    marketStateCount: totalCount,
+    filteredCount,
+    quoteStatus: getQuoteStatusSummary(symbols),
+  });
 }
 
 function getVisibleSymbols() {
@@ -4053,7 +4112,7 @@ function getMarketRowDisplay(stock) {
       ? (computedChange / stock.previousClose) * 100
       : null);
   const priceDisplay =
-    stock.lastPrice !== null ? quoteFormatter.format(stock.lastPrice) : "Price unavailable";
+    stock.lastPrice !== null ? quoteFormatter.format(stock.lastPrice) : hasAnyData ? "Price unavailable" : "—";
   const source = stock.dataSource ?? QUOTE_SOURCES.CACHED;
   const session = stock.quoteSession ?? QUOTE_SESSIONS.CLOSED;
   const sourceBadge = stock.lastPrice !== null ? getSourceBadge(source) : null;
@@ -4061,13 +4120,12 @@ function getMarketRowDisplay(stock) {
   const showWarning =
     stock.lastPrice !== null &&
     (stock.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source));
-  const meta =
-    hasAnyData
-      ? `As of ${formatAsOf(
-          stock.quoteAsOf || stock.lastUpdatedAt || stock.lastHistoricalTimestamp,
-          { tz: "UTC" },
-        )}`
-      : "Awaiting quote";
+  const meta = hasAnyData
+    ? `As of ${formatAsOf(
+        stock.quoteAsOf || stock.lastUpdatedAt || stock.lastHistoricalTimestamp,
+        { tz: "UTC" },
+      )}`
+    : "Loading…";
   const changeDisplay =
     change !== null && changePercent !== null
       ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
@@ -4075,12 +4133,14 @@ function getMarketRowDisplay(stock) {
         )}%)`
       : changePercent !== null
         ? `${changePercent >= 0 ? "+" : ""}${percentFormatter.format(changePercent)}%`
-        : "n/a";
+        : hasAnyData
+          ? "n/a"
+          : "—";
   const changeClass = change === null ? "" : change >= 0 ? "positive" : "negative";
   const dailyChange = stock.dailyChange ?? getLiveChangePercent(stock);
-  const dayDisplay = formatPercent(dailyChange);
-  const monthDisplay = formatPercent(stock.monthlyChange);
-  const yearDisplay = formatPercent(stock.yearlyChange);
+  const dayDisplay = hasAnyData ? formatPercent(dailyChange) : "—";
+  const monthDisplay = hasAnyData ? formatPercent(stock.monthlyChange) : "—";
+  const yearDisplay = hasAnyData ? formatPercent(stock.yearlyChange) : "—";
 
   return {
     priceDisplay,
@@ -4224,7 +4284,7 @@ function compareScoreConfidence(a, b) {
 }
 
 function buildTopOpportunitiesGroups(entries) {
-  const safeEntries = Array.isArray(entries) ? entries : [];
+  const safeEntries = Array.isArray(entries) ? [...entries] : [];
   const decorated = safeEntries.map((stock) => {
     const signal = calculateSignal(stock.history);
     const score = getSignalScoreForStock(stock);
@@ -4564,10 +4624,21 @@ function renderMarketTable() {
   ensureSortControl();
   const filtered = getFilteredMarketEntries();
   renderTopOpportunities(filtered);
+  logMarketSummary({ filteredCount: filtered.length, totalCount: marketState.length });
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">No stocks match these filters.</td></tr>`;
+    const hasWatchlist = marketState.length > 0;
+    marketBody.innerHTML = hasWatchlist
+      ? `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">No stocks match these filters.</td></tr>`
+      : `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">Your watchlist is empty.</td></tr>`;
+    if (marketEmptyState && marketEmptyMessage) {
+      marketEmptyState.classList.toggle("hidden", !hasWatchlist);
+      marketEmptyMessage.textContent = "No matches for current filters.";
+    }
     updateMarketIndicator();
     return;
+  }
+  if (marketEmptyState) {
+    marketEmptyState.classList.add("hidden");
   }
 
   const sortKey = sortBySelect?.value ?? DEFAULT_SORT_KEY;
@@ -5022,6 +5093,18 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     };
     opportunitiesToggle.addEventListener("change", updateToggleState);
     updateToggleState();
+  }
+
+  if (clearFiltersButton) {
+    didInit = true;
+    clearFiltersButton.addEventListener("click", () => {
+      clearMarketFilters();
+      if (shouldRender) {
+        renderMarketTable();
+        updateRefreshStatus();
+        scheduleNextMarketRefresh(0);
+      }
+    });
   }
 
   if (opportunitiesContent) {
