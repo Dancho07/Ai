@@ -70,6 +70,14 @@ const filterMin = isBrowser ? document.getElementById("filter-min") : null;
 const filterMax = isBrowser ? document.getElementById("filter-max") : null;
 const filterMonth = isBrowser ? document.getElementById("filter-month") : null;
 let sortBySelect = isBrowser ? document.getElementById("sort-by") : null;
+const opportunitiesToggle = isBrowser ? document.getElementById("opportunities-toggle") : null;
+const opportunitiesContent = isBrowser ? document.getElementById("opportunities-content") : null;
+const opportunityBuyList = isBrowser ? document.getElementById("opportunity-buy-list") : null;
+const opportunitySellList = isBrowser ? document.getElementById("opportunity-sell-list") : null;
+const opportunityMoversList = isBrowser ? document.getElementById("opportunity-movers-list") : null;
+const opportunityBuyNote = isBrowser ? document.getElementById("opportunity-buy-note") : null;
+const opportunitySellNote = isBrowser ? document.getElementById("opportunity-sell-note") : null;
+const opportunityMoversNote = isBrowser ? document.getElementById("opportunity-movers-note") : null;
 
 const riskLimits = {
   low: 0.2,
@@ -3583,6 +3591,30 @@ function getSignalScoreForStock(stock) {
   });
 }
 
+function getSignalConfidenceForStock(stock, action) {
+  if (!stock) {
+    return null;
+  }
+  const prices = stock.history ?? [];
+  const recent = stock.lastPrice ?? (prices.length ? prices[prices.length - 1] : null);
+  const average =
+    prices.length >= 10
+      ? prices.slice(-10).reduce((sum, value) => sum + value, 0) / 10
+      : recent;
+  const atrLike = calculateAtrLike(prices);
+  const atrPercent = atrLike && recent != null ? (atrLike / recent) * 100 : null;
+  const confidence = calculateSignalConfidence({
+    action,
+    recent,
+    average,
+    dailyChange: stock.dailyChange ?? null,
+    monthlyChange: stock.monthlyChange ?? null,
+    atrPercent,
+    prices,
+  });
+  return confidence?.score ?? null;
+}
+
 function getSortValue(stock, sortKey) {
   switch (sortKey) {
     case "change1d":
@@ -3623,6 +3655,72 @@ function sortMarketEntries(entries, sortKey = DEFAULT_SORT_KEY) {
     return a.index - b.index;
   });
   return keyed.map((entry) => entry.stock);
+}
+
+function getOpportunityBadge(stock) {
+  if (!stock) {
+    return null;
+  }
+  if (stock.dataSource === "cache") {
+    return { label: "CACHED", className: "cached", tooltip: "Cached last-known quote." };
+  }
+  if (stock.dataSource === "historical") {
+    return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from historical data." };
+  }
+  const session = stock.quoteSession ?? "CLOSED";
+  if (session === "DELAYED") {
+    return { label: "DELAYED", className: "delayed", tooltip: "Delayed quote." };
+  }
+  if (session === "REGULAR" || session === "PRE" || session === "POST") {
+    return { label: "REALTIME", className: "realtime", tooltip: "Live quote." };
+  }
+  return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from recent data." };
+}
+
+function compareScoreConfidence(a, b) {
+  const aScore = a.score ?? -Infinity;
+  const bScore = b.score ?? -Infinity;
+  if (bScore !== aScore) {
+    return bScore - aScore;
+  }
+  const aConfidence = a.confidence ?? -Infinity;
+  const bConfidence = b.confidence ?? -Infinity;
+  if (bConfidence !== aConfidence) {
+    return bConfidence - aConfidence;
+  }
+  return a.stock.symbol.localeCompare(b.stock.symbol);
+}
+
+function buildTopOpportunitiesGroups(entries) {
+  const safeEntries = Array.isArray(entries) ? entries : [];
+  const decorated = safeEntries.map((stock) => {
+    const signal = calculateSignal(stock.history);
+    const score = getSignalScoreForStock(stock);
+    const confidence = getSignalConfidenceForStock(stock, signal);
+    const dailyChange = stock.dailyChange ?? getLiveChangePercent(stock);
+    return {
+      stock,
+      signal,
+      score,
+      confidence,
+      dailyChange,
+    };
+  });
+
+  const buy = decorated
+    .filter((entry) => entry.signal === "buy")
+    .sort(compareScoreConfidence)
+    .slice(0, 3);
+  const sell = decorated
+    .filter((entry) => entry.signal === "sell")
+    .sort(compareScoreConfidence)
+    .slice(0, 3);
+  const movers = decorated
+    .filter((entry) => Number.isFinite(entry.dailyChange))
+    .sort((a, b) => Math.abs(b.dailyChange) - Math.abs(a.dailyChange))
+    .slice(0, 3);
+
+  return { buy, sell, movers };
 }
 
 function createMarketRowSkeleton(stock) {
@@ -3836,12 +3934,71 @@ function updateMarketRowCells(row, stock) {
   }
 }
 
+function renderOpportunityGroup(listEl, noteEl, entries) {
+  if (!listEl || !noteEl) {
+    return;
+  }
+  if (!entries.length) {
+    listEl.innerHTML = "";
+    noteEl.classList.remove("hidden");
+    return;
+  }
+  listEl.innerHTML = entries
+    .map((entry) => {
+      const { stock, score, confidence } = entry;
+      const display = getMarketRowDisplay(stock);
+      const badge = getOpportunityBadge(stock);
+      const changeClass = display.dayDisplay === "n/a" ? "muted" : display.dayClass;
+      const changeMarkup =
+        display.dayDisplay === "n/a"
+          ? `<span class="muted">n/a</span>`
+          : `<span class="opportunity-change ${changeClass}">${display.dayDisplay}</span>`;
+      const scoreValue = score == null ? "n/a" : Math.round(score);
+      const confidenceValue = confidence == null ? "n/a" : Math.round(confidence);
+      return `
+        <div class="opportunity-item">
+          <div class="opportunity-main">
+            <div class="opportunity-top">
+              <span>${stock.symbol}</span>
+              ${
+                badge
+                  ? `<span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span>`
+                  : ""
+              }
+            </div>
+            <div class="opportunity-metrics">
+              <span class="opportunity-price">${display.priceDisplay}</span>
+              ${changeMarkup}
+              <span class="opportunity-score">${scoreValue} / ${confidenceValue}</span>
+            </div>
+          </div>
+          <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
+            Analyze
+          </button>
+        </div>
+      `;
+    })
+    .join("");
+  noteEl.classList.toggle("hidden", entries.length >= 3);
+}
+
+function renderTopOpportunities(filtered) {
+  if (!opportunityBuyList || !opportunitySellList || !opportunityMoversList) {
+    return;
+  }
+  const groups = buildTopOpportunitiesGroups(filtered);
+  renderOpportunityGroup(opportunityBuyList, opportunityBuyNote, groups.buy);
+  renderOpportunityGroup(opportunitySellList, opportunitySellNote, groups.sell);
+  renderOpportunityGroup(opportunityMoversList, opportunityMoversNote, groups.movers);
+}
+
 function renderMarketTable() {
   if (!marketBody) {
     return;
   }
   ensureSortControl();
   const filtered = marketState.filter(matchesFilters);
+  renderTopOpportunities(filtered);
   if (!filtered.length) {
     marketBody.innerHTML = `<tr><td colspan="12">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
@@ -4207,6 +4364,29 @@ function initLivePage({ onAnalyze } = {}) {
     }
   });
 
+  if (opportunitiesToggle && opportunitiesContent) {
+    didInit = true;
+    const updateToggleState = () => {
+      opportunitiesContent.classList.toggle("hidden", !opportunitiesToggle.checked);
+    };
+    opportunitiesToggle.addEventListener("change", updateToggleState);
+    updateToggleState();
+  }
+
+  if (opportunitiesContent) {
+    didInit = true;
+    opportunitiesContent.addEventListener("click", (event) => {
+      const analyzeButton = event.target.closest("button[data-action='analyze']");
+      if (!analyzeButton) {
+        return;
+      }
+      event.preventDefault();
+      if (onAnalyze) {
+        onAnalyze(analyzeButton.dataset.symbol);
+      }
+    });
+  }
+
   if (marketBody) {
     didInit = true;
     marketBody.addEventListener("click", (event) => {
@@ -4312,6 +4492,7 @@ const appCore = {
   scheduleResultScroll,
   sortMarketEntries,
   getSortValue,
+  buildTopOpportunitiesGroups,
   buildAnalyzeUrl,
   initTradePage,
   initLivePage,
