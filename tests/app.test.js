@@ -2089,6 +2089,18 @@ const tests = [
     },
   },
   {
+    name: "watchlist store never persists an empty list",
+    fn: async () => {
+      const backing = createStorage();
+      const storage = createStorageAdapter(backing);
+      const store = createWatchlistStore({ storage, defaultSymbols: ["AAPL", "MSFT"] });
+      store.removeSymbol("AAPL");
+      store.removeSymbol("MSFT");
+      const reloaded = createWatchlistStore({ storage, defaultSymbols: ["AAPL", "MSFT"] });
+      assert.deepStrictEqual(reloaded.getWatchlist(), ["AAPL", "MSFT"]);
+    },
+  },
+  {
     name: "watchlist addSymbol normalizes and rejects invalid symbols",
     fn: async () => {
       const storage = createStorageAdapter(createStorage());
@@ -2239,6 +2251,7 @@ const tests = [
       await runRefreshCycle({ timeoutMs: 10, refreshFn });
       const state = getRefreshState();
       assert.strictEqual(state.status, "error");
+      assert.notStrictEqual(state.status, "loading");
       assert.strictEqual(state.lastError.type, "timeout");
     },
   },
@@ -2325,6 +2338,27 @@ const tests = [
       const { core, restore } = loadCoreWithDocument(mockDocument);
       try {
         core.initLivePage();
+        assert.strictEqual(marketBody.children.length, 10);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "live page renders default watchlist rows immediately when storage is empty",
+    fn: async () => {
+      const storage = createStorage();
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async () => new Promise(() => {});
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        core.initLivePage({ skipInitialLoad: true });
         assert.strictEqual(marketBody.children.length, 10);
       } finally {
         restore();
