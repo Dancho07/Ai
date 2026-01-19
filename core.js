@@ -21,8 +21,8 @@ const strategyModule =
     : typeof window !== "undefined"
       ? window.Strategy
       : null;
-const computeIndicators = strategyModule?.computeIndicators ?? null;
-const scoreSignal = strategyModule?.scoreSignal ?? null;
+const strategyComputeIndicators = strategyModule?.computeIndicators ?? null;
+const strategyScoreSignal = strategyModule?.scoreSignal ?? null;
 
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
@@ -230,7 +230,7 @@ const MARKET_DEBUG_ENABLED =
   isBrowser && typeof window !== "undefined"
     ? new URLSearchParams(window.location.search).get(MARKET_DEBUG_PARAM) === "1"
     : false;
-const DEBUG = true;
+const DEBUG = MARKET_DEBUG_ENABLED;
 const PERF_DEBUG_ENABLED = MARKET_DEBUG_ENABLED;
 const QUOTE_FAST_FALLBACK_MS = 800;
 const INDICATOR_CACHE_TTL_MS = 60 * 1000;
@@ -591,6 +591,9 @@ function createWatchlistStore({ storage, defaultSymbols }) {
   };
 
   const persist = () => {
+    if (!cached || cached.length === 0) {
+      return;
+    }
     storage?.set?.(WATCHLIST_STORAGE_KEY, cached);
   };
 
@@ -616,7 +619,7 @@ function createWatchlistStore({ storage, defaultSymbols }) {
       if (next.length === current.length) {
         return false;
       }
-      cached = next;
+      cached = next.length ? next : [...defaults];
       persist();
       return true;
     },
@@ -1382,11 +1385,31 @@ function shouldFallbackAfterError(error) {
   return true;
 }
 
-async function fetchWithTimeout(fetchFn, url, timeoutMs) {
+function mergeAbortSignals(signals = []) {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  const activeSignals = signals.filter(Boolean);
+  activeSignals.forEach((signal) => {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      activeSignals.forEach((signal) => signal.removeEventListener("abort", onAbort));
+    },
+  };
+}
+
+async function fetchWithTimeout(fetchFn, url, timeoutMs, { signal } = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const { signal: mergedSignal, cleanup } = mergeAbortSignals([controller.signal, signal]);
   try {
-    return await fetchFn(url, { signal: controller.signal });
+    return await fetchFn(url, { signal: mergedSignal });
   } catch (error) {
     if (error.name === "AbortError") {
       throw new MarketDataError("timeout", "Request timed out.");
@@ -1394,6 +1417,7 @@ async function fetchWithTimeout(fetchFn, url, timeoutMs) {
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    cleanup();
   }
 }
 
@@ -1406,12 +1430,13 @@ async function fetchJsonWithRetry(
     provider,
     symbol,
     onStatus,
+    signal,
   },
 ) {
   const requestId = createRequestId();
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(fetchFn, url, timeoutMs);
+      const response = await fetchWithTimeout(fetchFn, url, timeoutMs, { signal });
       if (onStatus) {
         onStatus({ status: response.status, ok: response.ok });
       }
@@ -1803,12 +1828,12 @@ function getSessionBadgeForSession(session) {
 }
 
 function calculateSignal(prices) {
-  if (!prices || prices.length < 5 || !computeIndicators || !scoreSignal) {
+  if (!prices || prices.length < 5 || !strategyComputeIndicators || !strategyScoreSignal) {
     return "hold";
   }
   const recent = prices[prices.length - 1];
-  const indicators = computeIndicators(prices);
-  const scored = scoreSignal(indicators, { price: recent });
+  const indicators = strategyComputeIndicators(prices);
+  const scored = strategyScoreSignal(indicators, { price: recent });
   return scored?.signal ?? "hold";
 }
 
@@ -2308,14 +2333,14 @@ function calculateMomentumDirection(changes) {
 }
 
 function calculateSignalScore({ prices, price, indicators, signalResult } = {}) {
-  if (!computeIndicators || !scoreSignal) {
+  if (!strategyComputeIndicators || !strategyScoreSignal) {
     return { total: 0, label: getSignalScoreLabel(0), components: [] };
   }
   const resolvedIndicators =
-    indicators ?? computeIndicators(Array.isArray(prices) ? prices : []);
+    indicators ?? strategyComputeIndicators(Array.isArray(prices) ? prices : []);
   const resolvedPrice =
     price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
-  const scored = signalResult ?? scoreSignal(resolvedIndicators, { price: resolvedPrice });
+  const scored = signalResult ?? strategyScoreSignal(resolvedIndicators, { price: resolvedPrice });
   const totalScore = scored?.score ?? 0;
   return {
     total: totalScore,
@@ -2362,7 +2387,7 @@ function calculateSignalConfidence({
   indicators,
   signalResult,
 }) {
-  if (!computeIndicators || !scoreSignal) {
+  if (!strategyComputeIndicators || !strategyScoreSignal) {
     return {
       score: 25,
       label: "Low",
@@ -2374,10 +2399,10 @@ function calculateSignalConfidence({
     };
   }
   const resolvedIndicators =
-    indicators ?? computeIndicators(Array.isArray(prices) ? prices : []);
+    indicators ?? strategyComputeIndicators(Array.isArray(prices) ? prices : []);
   const resolvedPrice =
     price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
-  const scored = signalResult ?? scoreSignal(resolvedIndicators, { price: resolvedPrice });
+  const scored = signalResult ?? strategyScoreSignal(resolvedIndicators, { price: resolvedPrice });
   const confidenceScore = scored?.confidence ?? 0;
   const label = getConfidenceLabel(confidenceScore);
   const reasons = [
@@ -2595,8 +2620,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const backtestSummary = getBacktestSummary(symbol, prices);
   const priceContext = resolvePriceContext(marketEntry);
   const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
-  const indicators = computeIndicators ? computeIndicators(prices) : null;
-  const scoredSignal = scoreSignal ? scoreSignal(indicators, { price: recent }) : null;
+  const indicators = strategyComputeIndicators ? strategyComputeIndicators(prices) : null;
+  const scoredSignal = strategyScoreSignal ? strategyScoreSignal(indicators, { price: recent }) : null;
   let action = "hold";
   let thesis = [
     "Signal is neutral with limited confirmation.",
@@ -3458,6 +3483,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
         fetchFn: options.fetchFn,
         maxAttempts: options.maxAttempts,
         timeoutMs: options.timeoutMs,
+        signal: options.signal,
         onStatus: recordStatus,
       });
       const quoteResponse = quoteData?.quoteResponse;
@@ -3500,6 +3526,7 @@ async function fetchHistoricalSeries(symbol, options = {}) {
       fetchFn: options.fetchFn,
       maxAttempts: options.maxAttempts,
       timeoutMs: options.timeoutMs,
+      signal: options.signal,
     });
     const chart = chartData?.chart?.result?.[0];
     const { closes, timestamps } = extractCloseSeries(chart);
@@ -4104,7 +4131,7 @@ async function refreshSymbolsWithLimiter(symbols, getOptions) {
   return results.map((result) => (result.status === "fulfilled" ? result.value : { error: result.reason }));
 }
 
-async function refreshVisibleQuotes() {
+async function refreshVisibleQuotes(options = {}) {
   const symbols = getVisibleSymbols();
   const summary = {
     symbolsCount: symbols.length,
@@ -4138,7 +4165,7 @@ async function refreshVisibleQuotes() {
   let forceUnavailable = false;
   let bulkError = null;
   try {
-    const batchResult = await fetchYahooQuotes(symbolsToFetch);
+    const batchResult = await fetchYahooQuotes(symbolsToFetch, { signal: options.signal });
     quoteResults = batchResult.quotes;
     forceUnavailable = quoteResults.length === 0 && symbolsToFetch.length > 0;
     if (forceUnavailable || batchResult.hadFailure) {
@@ -4171,6 +4198,7 @@ async function refreshVisibleQuotes() {
       allowFetch: !prefetchedQuote,
       forceUnavailable,
       includeHistorical: false,
+      signal: options.signal,
     };
   });
   results.forEach((result) => {
@@ -4207,6 +4235,7 @@ async function refreshVisibleQuotes() {
           const historyPayload = await fetchHistoricalSeries(symbol, {
             range: MARKET_HISTORY_RANGE,
             interval: MARKET_HISTORY_INTERVAL,
+            signal: options.signal,
           });
           const stock = getStockEntry(symbol);
           if (stock && isSymbolInWatchlist(symbol)) {
@@ -4325,32 +4354,45 @@ function updateRefreshStatus() {
   refreshPill?.classList?.add("ok");
 }
 
-async function withTimeout(promise, timeoutMs) {
-  let timeoutId = null;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new MarketDataError("timeout", "Refresh cycle timed out."));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
+function groupErrorTypes(errorTypes = []) {
+  return errorTypes.reduce((acc, type) => {
+    if (!type) {
+      return acc;
     }
-  }
+    acc[type] = (acc[type] ?? 0) + 1;
+    return acc;
+  }, {});
 }
 
 async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = refreshVisibleQuotes } = {}) {
   const startedAt = Date.now();
+  const cycleId = createRequestId();
   setRefreshState({ status: "loading", lastAttemptTs: startedAt, lastError: null });
   setQuoteStatusBanner(null);
+  console.info("[Market Refresh]", {
+    stage: "start",
+    cycleId,
+    timeoutMs,
+    visibleSymbols: getVisibleSymbols().length,
+  });
   let summary = null;
   let error = null;
+  const controller = new AbortController();
+  let timeoutId = null;
   try {
-    summary = await withTimeout(refreshFn(), timeoutMs);
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new MarketDataError("timeout", "Refresh cycle timed out."));
+      }, timeoutMs);
+    });
+    summary = await Promise.race([refreshFn({ signal: controller.signal }), timeoutPromise]);
   } catch (err) {
     error = err instanceof MarketDataError ? err : new MarketDataError("unavailable", err?.message ?? "Refresh failed.");
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
   }
 
   if (summary) {
@@ -4362,19 +4404,31 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
   }
 
   const hadFailure = summary?.hadQuoteFailure === true || Boolean(error);
+  const finalStatus = hadFailure ? (error ? "error" : summary?.okCount ? "ok" : "error") : "ok";
   if (hadFailure) {
     const errorType = error?.type ?? summary?.errorTypes?.[0] ?? summary?.error?.type ?? "network_error";
     const message = getQuoteFailureMessage(errorType);
     setRefreshState({
-      status: error ? "error" : summary?.okCount ? "ok" : "error",
+      status: finalStatus,
       lastError: error ?? summary?.error ?? null,
       lastSuccessTs: summary?.okCount ? Date.now() : refreshState.lastSuccessTs,
     });
     setQuoteStatusBanner(message, { reason: errorType });
   } else {
-    setRefreshState({ status: "ok", lastSuccessTs: Date.now(), lastError: null });
+    setRefreshState({ status: finalStatus, lastSuccessTs: Date.now(), lastError: null });
     setQuoteStatusBanner(null);
   }
+  const durationMs = Date.now() - startedAt;
+  console.info("[Market Refresh]", {
+    stage: "end",
+    cycleId,
+    status: finalStatus,
+    durationMs,
+    okCount: summary?.okCount ?? 0,
+    errorCount: summary?.errorCount ?? 0,
+    errorTypes: groupErrorTypes(summary?.errorTypes ?? []),
+    lastError: error?.type ?? summary?.error?.type ?? null,
+  });
   updateMarketDebugReadout({ filteredCount: getFilteredMarketEntries().length });
   return { summary, error };
 }
@@ -4584,7 +4638,7 @@ function getSignalScoreForStock(stock) {
   if (recent == null) {
     return null;
   }
-  const indicators = computeIndicators ? computeIndicators(prices) : null;
+  const indicators = strategyComputeIndicators ? strategyComputeIndicators(prices) : null;
   return calculateSignalScore({ prices, price: recent, indicators }).total;
 }
 
@@ -4594,8 +4648,8 @@ function getSignalConfidenceForStock(stock, action) {
   }
   const prices = stock.history ?? [];
   const recent = stock.lastPrice ?? (prices.length ? prices[prices.length - 1] : null);
-  const indicators = computeIndicators ? computeIndicators(prices) : null;
-  const signalResult = scoreSignal ? scoreSignal(indicators, { price: recent }) : null;
+  const indicators = strategyComputeIndicators ? strategyComputeIndicators(prices) : null;
+  const signalResult = strategyScoreSignal ? strategyScoreSignal(indicators, { price: recent }) : null;
   const confidence = calculateSignalConfidence({
     prices,
     price: recent,
@@ -5042,12 +5096,20 @@ function updateMarketDebugReadout({ filteredCount = 0 } = {}) {
   const renderedRows =
     marketBody?.querySelectorAll?.("tr[data-symbol]")?.length ??
     (Array.isArray(marketBody?.children) ? marketBody.children.length : 0);
-  const quotesLoaded = marketState.filter((stock) => hasAnyMarketData(stock)).length;
   const quotesOk = lastRefreshSummary?.okCount ?? 0;
+  const visibleRows = Math.max(0, filteredCount);
+  const lastCycleStatus =
+    refreshState.status === "loading"
+      ? lastRefreshSummary?.errorCount
+        ? "error"
+        : lastRefreshSummary?.okCount
+          ? "ok"
+          : "—"
+      : refreshState.status ?? "idle";
   const lastErrorLabel = refreshState.lastError
     ? `${refreshState.lastError.type ?? "unknown"}: ${refreshState.lastError.message ?? "error"}`
     : "—";
-  debugLine.textContent = `Watchlist: ${watchlistCount} | Rendered rows: ${renderedRows} | Quotes ok: ${quotesOk} | Last error: ${lastErrorLabel}`;
+  debugLine.textContent = `Watchlist: ${watchlistCount} | Rendered: ${renderedRows} | Visible: ${visibleRows} | Quotes ok: ${quotesOk} | Last cycle: ${lastCycleStatus} | Last error: ${lastErrorLabel}`;
   debugLine.classList.remove("hidden");
 }
 
@@ -5456,7 +5518,11 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
   syncMarketStateWithWatchlist();
   if (shouldRender) {
     renderSkeletonRows(initialSymbols);
-    console.info("[Market Init]", { stage: "skeleton_rendered", rowCount: initialSymbols.length });
+    console.info("[Market Init]", {
+      stage: "skeleton_rendered",
+      rowCount: initialSymbols.length,
+      renderRowsCalled: true,
+    });
     renderMarketTable();
     console.info("[Market Init]", {
       stage: "render_market_table",
@@ -5464,6 +5530,8 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
       didRender: true,
     });
     updateRefreshStatus();
+  } else {
+    console.info("[Market Init]", { stage: "skeleton_rendered", renderRowsCalled: false });
   }
   sortBySelect = ensureSortControl() ?? sortBySelect;
   if (refreshPill) {
