@@ -52,6 +52,11 @@ const {
   getCachedAnalysis,
   setCachedAnalysis,
   resetAnalysisCache,
+  fetchYahooQuotes,
+  runRefreshCycle,
+  getRefreshState,
+  resetRefreshState,
+  getLastRefreshSummary,
   initTradePage,
   initLivePage,
 } = require("../core");
@@ -2224,6 +2229,37 @@ const tests = [
       });
       assert.strictEqual(summary.hasEnoughData, true);
       assert.deepStrictEqual(lengths, [1, 2, 3, 4, 5]);
+    },
+  },
+  {
+    name: "refresh cycle transitions to error on timeout",
+    fn: async () => {
+      resetRefreshState();
+      const refreshFn = () => new Promise(() => {});
+      await runRefreshCycle({ timeoutMs: 10, refreshFn });
+      const state = getRefreshState();
+      assert.strictEqual(state.status, "error");
+      assert.strictEqual(state.lastError.type, "timeout");
+    },
+  },
+  {
+    name: "quote batch uses allSettled and keeps successful results",
+    fn: async () => {
+      const responses = [
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: { result: [{ symbol: "AAPL", regularMarketPrice: 100 }] },
+          },
+        }),
+        new Error("proxy down"),
+      ];
+      const fetchFn = createFetchSequence(responses);
+      const result = await fetchYahooQuotes(["AAPL", "MSFT"], { fetchFn, batchSize: 1, maxAttempts: 1 });
+      assert.strictEqual(result.quotes.length, 1);
+      assert.strictEqual(result.quotes[0].symbol, "AAPL");
+      assert.strictEqual(result.hadFailure, true);
     },
   },
   {
