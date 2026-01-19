@@ -15,6 +15,15 @@ const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
 const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
 const autoRunToggle = isBrowser ? document.getElementById("auto-run-toggle") : null;
 
+const strategyModule =
+  typeof module !== "undefined" && module.exports
+    ? require("./strategy")
+    : typeof window !== "undefined"
+      ? window.Strategy
+      : null;
+const computeIndicators = strategyModule?.computeIndicators ?? null;
+const scoreSignal = strategyModule?.scoreSignal ?? null;
+
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
 const resultConfidence = isBrowser ? document.getElementById("result-confidence") : null;
@@ -1662,18 +1671,13 @@ function getSessionBadgeForSession(session) {
 }
 
 function calculateSignal(prices) {
-  if (!prices || prices.length < 10) {
+  if (!prices || prices.length < 5 || !computeIndicators || !scoreSignal) {
     return "hold";
   }
   const recent = prices[prices.length - 1];
-  const average = prices.slice(-10).reduce((total, value) => total + value, 0) / 10;
-  if (recent > average * 1.03) {
-    return "sell";
-  }
-  if (recent < average * 0.97) {
-    return "buy";
-  }
-  return "hold";
+  const indicators = computeIndicators(prices);
+  const scored = scoreSignal(indicators, { price: recent });
+  return scored?.signal ?? "hold";
 }
 
 function getBacktestDateStamp(date = new Date()) {
@@ -2150,10 +2154,10 @@ function redistributeWeights(weights, excludedKey) {
 }
 
 function getSignalScoreLabel(score) {
-  if (score >= 70) {
+  if (score >= 65) {
     return "Strong";
   }
-  if (score >= 40) {
+  if (score > 35) {
     return "Ok";
   }
   return "Weak";
@@ -2171,133 +2175,20 @@ function calculateMomentumDirection(changes) {
   return average > 0 ? 1 : -1;
 }
 
-function calculateSignalScore({
-  recent,
-  average,
-  dailyChange,
-  monthlyChange,
-  atrPercent,
-  prices,
-  tradePlan,
-  atrLike,
-  recentReturns,
-}) {
-  const baseWeights = {
-    trend: 30,
-    momentum: 25,
-    volatility: 20,
-    volume: 15,
-    risk: 10,
-  };
-  const resolvedReturns = Array.isArray(recentReturns)
-    ? recentReturns
-    : getRecentReturns(prices, 5);
-  const averageAbsReturn = resolvedReturns.length
-    ? resolvedReturns.reduce((sum, value) => sum + Math.abs(value), 0) / resolvedReturns.length
-    : null;
-  const dailyAbs = dailyChange != null ? Math.abs(dailyChange) : null;
-  const monthlyAbs = monthlyChange != null ? Math.abs(monthlyChange) / 4 : null;
-  const entryPrice = recent ?? (prices?.length ? prices[prices.length - 1] : null);
-  const resolvedAtrLike = atrLike ?? calculateAtrLike(prices ?? []);
-  const resolvedAtrPercent =
-    atrPercent ?? (entryPrice && resolvedAtrLike ? (resolvedAtrLike / entryPrice) * 100 : null);
-
-  const hasVolumeProxy =
-    averageAbsReturn != null || dailyAbs != null || monthlyAbs != null || (prices?.length ?? 0) >= 2;
-  const weights = hasVolumeProxy ? baseWeights : redistributeWeights(baseWeights, "volume");
-
-  const diffPct =
-    entryPrice != null && average != null ? ((entryPrice - average) / average) * 100 : null;
-  const slopePct =
-    prices?.length >= 6 && entryPrice != null
-      ? ((entryPrice - prices[prices.length - 6]) / prices[prices.length - 6]) * 100
-      : diffPct;
-  const trendRatio =
-    diffPct == null ? 0.4 : clampNumber((Math.abs(diffPct) + Math.abs(slopePct ?? 0)) / 10);
-
-  const momentumInputs = {
-    averageAbsReturn,
-    dailyAbs,
-    monthlyAbs,
-  };
-  const hasMomentumInputs =
-    momentumInputs.averageAbsReturn != null ||
-    momentumInputs.dailyAbs != null ||
-    momentumInputs.monthlyAbs != null;
-  const momentumSignal = hasMomentumInputs
-    ? (momentumInputs.averageAbsReturn ?? 0) * 0.5 +
-      (momentumInputs.dailyAbs ?? 0) * 0.3 +
-      (momentumInputs.monthlyAbs ?? 0) * 0.2
-    : 1.4;
-  const momentumRatio = hasMomentumInputs ? clampNumber(momentumSignal / 4) : 0.35;
-
-  const volatilityRatio =
-    resolvedAtrPercent == null ? 0.5 : clampNumber((6 - resolvedAtrPercent) / 6);
-
-  let volumeRatio = null;
-  if (hasVolumeProxy) {
-    const baseActivity =
-      averageAbsReturn ?? dailyAbs ?? monthlyAbs ?? 0;
-    if (resolvedAtrPercent != null) {
-      const confirmation = baseActivity / Math.max(resolvedAtrPercent, 0.1);
-      volumeRatio = clampNumber(confirmation / 1.2);
-    } else {
-      volumeRatio = clampNumber(baseActivity / 4);
-    }
+function calculateSignalScore({ prices, price, indicators, signalResult } = {}) {
+  if (!computeIndicators || !scoreSignal) {
+    return { total: 0, label: getSignalScoreLabel(0), components: [] };
   }
-
-  let riskRatio = 0.45;
-  if (entryPrice != null && tradePlan?.stopLoss != null) {
-    const atrReference = resolvedAtrLike ?? entryPrice * 0.02;
-    const riskDistance = Math.abs(entryPrice - tradePlan.stopLoss) / atrReference;
-    riskRatio = clampNumber(1 - (riskDistance - 1) / 2);
-  }
-
-  const components = [
-    {
-      key: "trend",
-      label: "Trend",
-      max: weights.trend,
-      score: Math.round(trendRatio * weights.trend),
-    },
-    {
-      key: "momentum",
-      label: "Momentum",
-      max: weights.momentum,
-      score: Math.round(momentumRatio * weights.momentum),
-    },
-    {
-      key: "volatility",
-      label: "Volatility regime",
-      max: weights.volatility,
-      score: Math.round(volatilityRatio * weights.volatility),
-    },
-    ...(hasVolumeProxy
-      ? [
-          {
-            key: "volume",
-            label: "Volume confirmation",
-            max: weights.volume,
-            score: Math.round((volumeRatio ?? 0.4) * weights.volume),
-          },
-        ]
-      : []),
-    {
-      key: "risk",
-      label: "Risk quality",
-      max: weights.risk,
-      score: Math.round(riskRatio * weights.risk),
-    },
-  ];
-
-  const totalScore = components.reduce((sum, component) => sum + component.score, 0);
-  const label = getSignalScoreLabel(totalScore);
-
+  const resolvedIndicators =
+    indicators ?? computeIndicators(Array.isArray(prices) ? prices : []);
+  const resolvedPrice =
+    price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
+  const scored = signalResult ?? scoreSignal(resolvedIndicators, { price: resolvedPrice });
+  const totalScore = scored?.score ?? 0;
   return {
     total: totalScore,
-    label,
-    components,
-    weights,
+    label: getSignalScoreLabel(totalScore),
+    components: Array.isArray(scored?.components) ? scored.components : [],
   };
 }
 
@@ -2334,80 +2225,40 @@ function getVolatilityRegime(atrPercent) {
 }
 
 function calculateSignalConfidence({
-  action,
-  recent,
-  average,
-  dailyChange,
-  monthlyChange,
-  atrPercent,
   prices,
+  price,
+  indicators,
+  signalResult,
 }) {
-  if (recent == null || average == null) {
+  if (!computeIndicators || !scoreSignal) {
     return {
       score: 25,
       label: "Low",
       reasons: [
-        "Price history is incomplete, limiting signal strength.",
-        "Trend alignment cannot be fully confirmed.",
-        "Volatility regime is unclear, so confidence stays low.",
+        "Signal confidence is unavailable while strategy modules load.",
+        "Trend confirmation is pending additional data.",
       ],
       caution: "Limited data: keep size small until fresh history loads.",
     };
   }
-
-  const diffPct = ((recent - average) / average) * 100;
-  const trendAligned =
-    action === "buy"
-      ? diffPct <= -0.7
-      : action === "sell"
-        ? diffPct >= 0.7
-        : Math.abs(diffPct) < 0.7;
-  const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange]);
-  const momentumAligned =
-    action === "buy"
-      ? momentumDirection <= 0
-      : action === "sell"
-        ? momentumDirection >= 0
-        : momentumDirection === 0;
-  const volatilityAgreement = atrPercent != null ? atrPercent <= 3.5 : false;
-  const alignmentScore =
-    ((trendAligned ? 1 : 0) + (momentumAligned ? 1 : 0) + (volatilityAgreement ? 1 : 0)) * (40 / 3);
-
-  const baseStrength = Math.min(Math.abs(diffPct) / 5, 1);
-  const swingLevels = getSwingLevels(prices ?? []);
-  let breakoutBoost = 0;
-  if (swingLevels.low != null && swingLevels.high != null) {
-    if (action === "buy" && recent <= swingLevels.low * 1.01) {
-      breakoutBoost = 0.2;
-    }
-    if (action === "sell" && recent >= swingLevels.high * 0.99) {
-      breakoutBoost = 0.2;
-    }
-  }
-  const strengthScore = (baseStrength * 0.8 + breakoutBoost) * 35;
-
-  const volatility = getVolatilityRegime(atrPercent);
-  const totalScore = Math.round(Math.min(100, alignmentScore + strengthScore + volatility.score));
-  const label = getConfidenceLabel(totalScore);
-
+  const resolvedIndicators =
+    indicators ?? computeIndicators(Array.isArray(prices) ? prices : []);
+  const resolvedPrice =
+    price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
+  const scored = signalResult ?? scoreSignal(resolvedIndicators, { price: resolvedPrice });
+  const confidenceScore = scored?.confidence ?? 0;
+  const label = getConfidenceLabel(confidenceScore);
   const reasons = [
-    `Trend alignment: price is ${Math.abs(diffPct).toFixed(2)}% ${diffPct >= 0 ? "above" : "below"} the 10-day average.`,
-    `Momentum bias: ${momentumDirection === 0 ? "mixed" : momentumDirection > 0 ? "upward" : "downward"} recent moves.`,
-    `Signal strength: ${Math.abs(diffPct).toFixed(2)}% from the short-term average.`,
-    `Volatility regime: ${volatility.label.toLowerCase()} (${atrPercent != null ? `${atrPercent.toFixed(2)}%` : "n/a"}).`,
+    `Aligned factors: ${Array.isArray(scored?.components) ? scored.components.length : 0} indicators weighted.`,
+    `Signal distance: ${Math.abs((scored?.score ?? 50) - 50).toFixed(1)} from neutral.`,
+    scored?.caution ?? "Volatility regime is stable enough to trade with caution.",
   ];
 
-  const unique = [...new Set(reasons)];
-  const trimmed = unique.slice(0, 5);
-  while (trimmed.length < 3) {
-    trimmed.push("Multiple indicators are blended to confirm the signal.");
-  }
-
   return {
-    score: totalScore,
+    score: confidenceScore,
     label,
-    reasons: trimmed,
-    caution: volatility.caution,
+    reasons,
+    caution: scored?.caution ?? "Stay disciplined with sizing.",
   };
 }
 
@@ -2612,13 +2463,11 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const backtestSummary = getBacktestSummary(symbol, prices);
   const priceContext = resolvePriceContext(marketEntry);
   const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
-  const hasHistory = prices.length >= 10;
-  const average = hasHistory
-    ? indicatorSnapshot?.average10 ?? prices.slice(-10).reduce((a, b) => a + b, 0) / 10
-    : recent;
+  const indicators = computeIndicators ? computeIndicators(prices) : null;
+  const scoredSignal = scoreSignal ? scoreSignal(indicators, { price: recent }) : null;
   let action = "hold";
   let thesis = [
-    "Price is near the short-term average.",
+    "Signal is neutral with limited confirmation.",
     "No strong edge detected for aggressive trades.",
   ];
 
@@ -2634,26 +2483,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       positionSizingMode,
       riskPercent,
     });
-    const signalScore = calculateSignalScore({
-      recent,
-      average: average ?? null,
-      dailyChange: marketEntry?.dailyChange ?? null,
-      monthlyChange: marketEntry?.monthlyChange ?? null,
-      atrPercent: null,
-      prices,
-      atrLike: indicatorSnapshot?.atrLike ?? null,
-      recentReturns: indicatorSnapshot?.recentReturns ?? null,
-      tradePlan,
-    });
-    const confidence = calculateSignalConfidence({
-      action: "hold",
-      recent: null,
-      average: null,
-      dailyChange: marketEntry?.dailyChange ?? null,
-      monthlyChange: marketEntry?.monthlyChange ?? null,
-      atrPercent: null,
-      prices,
-    });
+    const signalScore = calculateSignalScore({ prices });
+    const confidence = calculateSignalConfidence({ prices });
     return {
       symbol,
       ...analysisMeta,
@@ -2670,18 +2501,11 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
         "Signals are paused until a fresh quote is retrieved.",
       ],
       tradePlan,
-      signalReasons: buildSignalReasons({
-        action: "hold",
-        recent,
-        average,
-        dailyChange: marketEntry?.dailyChange ?? null,
-        monthlyChange: marketEntry?.monthlyChange ?? null,
-        atrPercent: null,
-      }),
+      signalReasons: scoredSignal?.reasons ?? [],
       invalidationRules: buildInvalidationRules({
         action: "hold",
         recent,
-        average,
+        average: null,
         dailyChange: marketEntry?.dailyChange ?? null,
         monthlyChange: marketEntry?.monthlyChange ?? null,
         atrPercent: null,
@@ -2693,35 +2517,20 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     };
   }
 
-  if (!hasHistory) {
-    thesis = [
-      "Live pricing is available, but full 10-day history has not loaded.",
-      "Signals remain neutral until the latest history refreshes.",
-    ];
-  } else if (recent > average * 1.03) {
-    action = "sell";
-    thesis = [
-      "Price is extended above the short-term average.",
-      "Momentum suggests trimming exposure.",
-    ];
-  } else if (recent < average * 0.97) {
-    action = "buy";
-    thesis = [
-      "Price is below the short-term average.",
-      "Mean reversion offers a potential entry.",
-    ];
+  if (scoredSignal?.signal) {
+    action = scoredSignal.signal;
+  }
+  if (scoredSignal?.reasons?.length) {
+    thesis = scoredSignal.reasons.slice(0, 2);
   }
 
   const atrLike = indicatorSnapshot?.atrLike ?? calculateAtrLike(prices);
   const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
   const confidence = calculateSignalConfidence({
-    action,
-    recent,
-    average,
-    dailyChange: marketEntry?.dailyChange ?? null,
-    monthlyChange: marketEntry?.monthlyChange ?? null,
-    atrPercent,
     prices,
+    price: recent,
+    indicators,
+    signalResult: scoredSignal,
   });
   const tradePlan = calculateTradePlan({
     action,
@@ -2736,15 +2545,10 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     atrLike,
   });
   const signalScore = calculateSignalScore({
-    recent,
-    average,
-    dailyChange: marketEntry?.dailyChange ?? null,
-    monthlyChange: marketEntry?.monthlyChange ?? null,
-    atrPercent,
     prices,
-    atrLike,
-    recentReturns: indicatorSnapshot?.recentReturns ?? null,
-    tradePlan,
+    price: recent,
+    indicators,
+    signalResult: scoredSignal,
   });
   const shares = tradePlan.positionSize;
 
@@ -2761,18 +2565,11 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     signalScore,
     thesis,
     tradePlan,
-    signalReasons: buildSignalReasons({
-      action,
-      recent,
-      average,
-      dailyChange: marketEntry?.dailyChange ?? null,
-      monthlyChange: marketEntry?.monthlyChange ?? null,
-      atrPercent,
-    }),
+    signalReasons: scoredSignal?.reasons ?? [],
     invalidationRules: buildInvalidationRules({
       action,
       recent,
-      average,
+      average: null,
       dailyChange: marketEntry?.dailyChange ?? null,
       monthlyChange: marketEntry?.monthlyChange ?? null,
       atrPercent,
@@ -4349,21 +4146,8 @@ function getSignalScoreForStock(stock) {
   if (recent == null) {
     return null;
   }
-  const average =
-    prices.length >= 10
-      ? prices.slice(-10).reduce((sum, value) => sum + value, 0) / 10
-      : recent;
-  const atrLike = calculateAtrLike(prices);
-  const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
-  return calculateSignalScore({
-    recent,
-    average,
-    dailyChange: stock.dailyChange ?? null,
-    monthlyChange: stock.monthlyChange ?? null,
-    atrPercent,
-    prices,
-    atrLike,
-  });
+  const indicators = computeIndicators ? computeIndicators(prices) : null;
+  return calculateSignalScore({ prices, price: recent, indicators }).total;
 }
 
 function getSignalConfidenceForStock(stock, action) {
@@ -4372,20 +4156,13 @@ function getSignalConfidenceForStock(stock, action) {
   }
   const prices = stock.history ?? [];
   const recent = stock.lastPrice ?? (prices.length ? prices[prices.length - 1] : null);
-  const average =
-    prices.length >= 10
-      ? prices.slice(-10).reduce((sum, value) => sum + value, 0) / 10
-      : recent;
-  const atrLike = calculateAtrLike(prices);
-  const atrPercent = atrLike && recent != null ? (atrLike / recent) * 100 : null;
+  const indicators = computeIndicators ? computeIndicators(prices) : null;
+  const signalResult = scoreSignal ? scoreSignal(indicators, { price: recent }) : null;
   const confidence = calculateSignalConfidence({
-    action,
-    recent,
-    average,
-    dailyChange: stock.dailyChange ?? null,
-    monthlyChange: stock.monthlyChange ?? null,
-    atrPercent,
     prices,
+    price: recent,
+    indicators,
+    signalResult,
   });
   return confidence?.score ?? null;
 }
