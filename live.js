@@ -4,9 +4,13 @@ if (typeof document !== "undefined") {
     if (window.AppCore?.initLivePage) {
       window.AppCore.initLivePage({
         onAnalyze: (symbol) => {
-          const autoRun = autoRunToggle?.checked ?? true;
-          const url = window.AppCore.buildAnalyzeUrl(symbol, { autoRun });
-          window.location.href = url;
+          if (window.AppCore?.openSignalDrawer) {
+            window.AppCore.openSignalDrawer(symbol);
+          } else {
+            const autoRun = autoRunToggle?.checked ?? true;
+            const url = window.AppCore.buildAnalyzeUrl(symbol, { autoRun });
+            window.location.href = url;
+          }
         },
       });
     }

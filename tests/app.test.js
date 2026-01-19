@@ -49,6 +49,10 @@ const {
   buildTopOpportunitiesGroups,
   applyMarketFilters,
   removeSymbolFromWatchlist,
+  getCachedAnalysis,
+  setCachedAnalysis,
+  resetAnalysisCache,
+  createSignalDrawerController,
   initTradePage,
   initLivePage,
 } = require("../core");
@@ -139,6 +143,122 @@ function createMockElement({ value = "", classes = [] } = {}) {
       const handlers = listeners.get(event.type) || [];
       handlers.forEach((handler) => handler(event));
     },
+  };
+}
+
+function createMockDomElement({ tagName = "DIV", classes = [], dataset = {} } = {}) {
+  const listeners = new Map();
+  const element = {
+    tagName: tagName.toUpperCase(),
+    dataset: { ...dataset },
+    classList: createClassList(classes),
+    style: {},
+    className: "",
+    textContent: "",
+    innerHTML: "",
+    parentElement: null,
+    children: [],
+    addEventListener: function addEventListener(type, handler) {
+      if (!listeners.has(type)) {
+        listeners.set(type, []);
+      }
+      listeners.get(type).push(handler);
+    },
+    dispatchEvent: function dispatchEvent(event) {
+      const handlers = listeners.get(event.type) || [];
+      handlers.forEach((handler) => handler(event));
+    },
+    closest: function closest(selector) {
+      if (selector === "tr[data-symbol]" && this.tagName === "TR" && this.dataset.symbol) {
+        return this;
+      }
+      if (selector === "button[data-action]" && this.tagName === "BUTTON" && this.dataset.action) {
+        return this;
+      }
+      if (selector === "button[data-action='analyze']" && this.tagName === "BUTTON" && this.dataset.action === "analyze") {
+        return this;
+      }
+      return this.parentElement?.closest ? this.parentElement.closest(selector) : null;
+    },
+    focus: function focus() {
+      if (this.ownerDocument) {
+        this.ownerDocument.activeElement = this;
+      }
+    },
+    appendChild: function appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      return child;
+    },
+    querySelector: function querySelector() {
+      return null;
+    },
+    querySelectorAll: function querySelectorAll() {
+      return [];
+    },
+    setAttribute: function setAttribute() {},
+  };
+  return element;
+}
+
+function createMockDocument(elements = {}) {
+  const listeners = new Map();
+  const doc = {
+    body: createMockDomElement({ tagName: "BODY" }),
+    activeElement: null,
+    addEventListener: function addEventListener(type, handler) {
+      if (!listeners.has(type)) {
+        listeners.set(type, []);
+      }
+      listeners.get(type).push(handler);
+    },
+    dispatchEvent: function dispatchEvent(event) {
+      const handlers = listeners.get(event.type) || [];
+      handlers.forEach((handler) => handler(event));
+    },
+    getElementById: (id) => elements[id] ?? null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: (tagName) => createMockDomElement({ tagName }),
+  };
+  doc.body.ownerDocument = doc;
+  Object.values(elements).forEach((element) => {
+    element.ownerDocument = doc;
+  });
+  return doc;
+}
+
+function loadCoreWithDocument(mockDocument) {
+  const originalDocument = global.document;
+  const originalWindow = global.window;
+  global.document = mockDocument;
+  global.window = { location: { search: "" } };
+  delete require.cache[require.resolve("../core")];
+  const core = require("../core");
+  const restore = () => {
+    global.document = originalDocument;
+    global.window = originalWindow;
+  };
+  return { core, restore };
+}
+
+function createAnalysisResult(symbol = "AAPL") {
+  return {
+    symbol,
+    action: "buy",
+    signalScore: { total: 72, label: "Strong", components: [] },
+    confidenceLabel: "High",
+    confidenceScore: 84,
+    confidenceReasons: ["Momentum is positive."],
+    invalidationRules: ["Breakdown below support."],
+    tradePlan: {
+      entryDisplay: "$100 - $101",
+      stopLossDisplay: "$96",
+      takeProfitDisplay: "$110",
+      positionSizeDisplay: "15 shares",
+      isHold: false,
+    },
+    backtest: { hasEnoughData: false },
   };
 }
 
@@ -2043,6 +2163,271 @@ const tests = [
       });
       assert.strictEqual(summary.hasEnoughData, true);
       assert.deepStrictEqual(lengths, [1, 2, 3, 4, 5]);
+    },
+  },
+  {
+    name: "live page opens drawer on row click",
+    fn: async () => {
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        let calledSymbol = null;
+        core.initLivePage({
+          onAnalyze: (symbol) => {
+            calledSymbol = symbol;
+          },
+          skipInitialLoad: true,
+          skipRender: true,
+        });
+        const row = createMockDomElement({ tagName: "TR", dataset: { symbol: "AAPL" } });
+        marketBody.dispatchEvent({ type: "click", target: row, preventDefault: () => {} });
+        assert.strictEqual(calledSymbol, "AAPL");
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "live page does not open drawer for favorite/remove clicks",
+    fn: async () => {
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        let calledCount = 0;
+        core.initLivePage({
+          onAnalyze: () => {
+            calledCount += 1;
+          },
+          skipInitialLoad: true,
+          skipRender: true,
+        });
+        const favoriteButton = createMockDomElement({
+          tagName: "BUTTON",
+          dataset: { action: "favorite", symbol: "AAPL" },
+        });
+        marketBody.dispatchEvent({ type: "click", target: favoriteButton, preventDefault: () => {} });
+        const removeButton = createMockDomElement({
+          tagName: "BUTTON",
+          dataset: { action: "remove", symbol: "AAPL" },
+        });
+        marketBody.dispatchEvent({ type: "click", target: removeButton, preventDefault: () => {} });
+        assert.strictEqual(calledCount, 0);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer closes via button, escape, and overlay",
+    fn: async () => {
+      const drawer = createMockDomElement({ tagName: "ASIDE", classes: ["hidden"] });
+      const overlay = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+      const closeButton = createMockDomElement({ tagName: "BUTTON" });
+      const openFull = createMockDomElement({ tagName: "A" });
+      drawer.querySelectorAll = () => [closeButton, openFull];
+      const elements = {
+        "signal-drawer": drawer,
+        "signal-drawer-overlay": overlay,
+        "signal-drawer-close": closeButton,
+        "signal-drawer-body": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+        "signal-drawer-skeleton": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+        "drawer-action": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-symbol": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-session-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-source-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-as-of": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-score": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-confidence": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-entry": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-stop-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-stop": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-take-profit-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-take-profit": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-position": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-reasoning": createMockDomElement({ tagName: "UL" }),
+        "drawer-invalidation": createMockDomElement({ tagName: "UL" }),
+        "drawer-backtest": createMockDomElement({ tagName: "DIV" }),
+        "drawer-backtest-status": createMockDomElement({ tagName: "P" }),
+        "drawer-backtest-list": createMockDomElement({ tagName: "DL", classes: ["hidden"] }),
+        "drawer-backtest-trades": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-win-rate": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-avg-return": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-drawdown": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-buy-hold": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-open-full": openFull,
+      };
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const controller = core.createSignalDrawerController({
+        documentRef: mockDocument,
+        body: mockDocument.body,
+        loadSnapshot: async () => {},
+        analyze: () => createAnalysisResult(),
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        await controller.open("AAPL");
+        closeButton.dispatchEvent({ type: "click" });
+        assert.strictEqual(controller.isOpen, false);
+        await controller.open("AAPL");
+        mockDocument.dispatchEvent({ type: "keydown", key: "Escape", preventDefault: () => {} });
+        assert.strictEqual(controller.isOpen, false);
+        await controller.open("AAPL");
+        overlay.dispatchEvent({ type: "click" });
+        assert.strictEqual(controller.isOpen, false);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer cache avoids recompute within ttl",
+    fn: async () => {
+      const drawer = createMockDomElement({ tagName: "ASIDE", classes: ["hidden"] });
+      const overlay = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+      const closeButton = createMockDomElement({ tagName: "BUTTON" });
+      const openFull = createMockDomElement({ tagName: "A" });
+      drawer.querySelectorAll = () => [closeButton, openFull];
+      const elements = {
+        "signal-drawer": drawer,
+        "signal-drawer-overlay": overlay,
+        "signal-drawer-close": closeButton,
+        "signal-drawer-body": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+        "signal-drawer-skeleton": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+        "drawer-action": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-symbol": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-session-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-source-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-as-of": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-score": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-confidence": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-entry": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-stop-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-stop": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-take-profit-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-take-profit": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-position": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-reasoning": createMockDomElement({ tagName: "UL" }),
+        "drawer-invalidation": createMockDomElement({ tagName: "UL" }),
+        "drawer-backtest": createMockDomElement({ tagName: "DIV" }),
+        "drawer-backtest-status": createMockDomElement({ tagName: "P" }),
+        "drawer-backtest-list": createMockDomElement({ tagName: "DL", classes: ["hidden"] }),
+        "drawer-backtest-trades": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-win-rate": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-avg-return": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-drawdown": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-buy-hold": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-open-full": openFull,
+      };
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const storage = createStorage();
+      const storageAdapter = core.createStorageAdapter(storage);
+      core.resetAnalysisCache({ storage: storageAdapter });
+      let analyzeCount = 0;
+      const controller = core.createSignalDrawerController({
+        documentRef: mockDocument,
+        body: mockDocument.body,
+        loadSnapshot: async () => {},
+        analyze: () => {
+          analyzeCount += 1;
+          return createAnalysisResult();
+        },
+        getCached: (symbol) => core.getCachedAnalysis(symbol, { storage: storageAdapter }),
+        setCached: (symbol, payload) => core.setCachedAnalysis(symbol, payload, { storage: storageAdapter }),
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        await controller.open("AAPL");
+        await controller.open("AAPL");
+        assert.strictEqual(analyzeCount, 1);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer shows skeleton while analysis is pending",
+    fn: async () => {
+      const drawer = createMockDomElement({ tagName: "ASIDE", classes: ["hidden"] });
+      const overlay = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+      const closeButton = createMockDomElement({ tagName: "BUTTON" });
+      const openFull = createMockDomElement({ tagName: "A" });
+      const skeleton = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+      drawer.querySelectorAll = () => [closeButton, openFull];
+      const elements = {
+        "signal-drawer": drawer,
+        "signal-drawer-overlay": overlay,
+        "signal-drawer-close": closeButton,
+        "signal-drawer-body": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+        "signal-drawer-skeleton": skeleton,
+        "drawer-action": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-symbol": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-session-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-source-badge": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-as-of": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-score": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-confidence": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-entry": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-stop-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-stop": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-take-profit-row": createMockDomElement({ tagName: "DIV" }),
+        "drawer-take-profit": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-position": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-reasoning": createMockDomElement({ tagName: "UL" }),
+        "drawer-invalidation": createMockDomElement({ tagName: "UL" }),
+        "drawer-backtest": createMockDomElement({ tagName: "DIV" }),
+        "drawer-backtest-status": createMockDomElement({ tagName: "P" }),
+        "drawer-backtest-list": createMockDomElement({ tagName: "DL", classes: ["hidden"] }),
+        "drawer-backtest-trades": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-win-rate": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-avg-return": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-drawdown": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-backtest-buy-hold": createMockDomElement({ tagName: "SPAN" }),
+        "drawer-open-full": openFull,
+      };
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      let resolveAnalysis;
+      const analysisPromise = new Promise((resolve) => {
+        resolveAnalysis = resolve;
+      });
+      const controller = core.createSignalDrawerController({
+        documentRef: mockDocument,
+        body: mockDocument.body,
+        loadSnapshot: async () => {},
+        analyze: () => analysisPromise,
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        const openPromise = controller.open("AAPL");
+        assert.strictEqual(skeleton.classList.contains("hidden"), false);
+        resolveAnalysis(createAnalysisResult());
+        await openPromise;
+      } finally {
+        restore();
+      }
     },
   },
   {
