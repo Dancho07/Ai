@@ -118,8 +118,7 @@ const MARKET_TABLE_COLUMNS = [
   { key: "change1d", className: "price-change change1d-cell num-cell" },
   { key: "change1m", className: "price-change change1m-cell num-cell" },
   { key: "change1y", className: "price-change change1y-cell num-cell" },
-  { key: "remove", className: "remove-cell" },
-  { key: "analyze", className: "analyze-cell" },
+  { key: "actions", className: "actions-cell" },
 ];
 
 const FORM_STATE_KEY = "trade_form_state_v1";
@@ -4061,19 +4060,19 @@ const HEATMAP_CLASSNAMES = [
   "num-cell",
 ];
 
-function ensureAnalyzeCellClean(cell) {
+function ensureActionsCellClean(cell) {
   if (!cell) {
     return;
   }
   if (cell.classList) {
     HEATMAP_CLASSNAMES.forEach((className) => cell.classList.remove(className));
-    cell.classList.add("analyze-cell");
+    cell.classList.add("actions-cell");
   } else if (typeof cell.className === "string") {
     const filtered = cell.className
       .split(/\s+/)
       .filter((className) => className && !HEATMAP_CLASSNAMES.includes(className));
-    if (!filtered.includes("analyze-cell")) {
-      filtered.push("analyze-cell");
+    if (!filtered.includes("actions-cell")) {
+      filtered.push("actions-cell");
     }
     cell.className = filtered.join(" ");
   }
@@ -4118,9 +4117,8 @@ function updateMarketRowCells(row, stock) {
   const dayCell = row.querySelector('[data-col="change1d"]');
   const monthCell = row.querySelector('[data-col="change1m"]');
   const yearCell = row.querySelector('[data-col="change1y"]');
-  const analyzeCell = row.querySelector('[data-col="analyze"]');
+  const actionsCell = row.querySelector('[data-col="actions"]');
   const favoriteCell = row.querySelector('[data-col="favorite"]');
-  const removeCell = row.querySelector('[data-col="remove"]');
 
   const isFavorite = favoritesStore.isFavorite(stock.symbol);
 
@@ -4197,25 +4195,23 @@ function updateMarketRowCells(row, stock) {
   formatChangeCellContent(dayCell, dayDisplay, dayClass);
   formatChangeCellContent(monthCell, monthDisplay, monthClass);
   formatChangeCellContent(yearCell, yearDisplay, yearClass);
-  if (analyzeCell) {
-    ensureAnalyzeCellClean(analyzeCell);
-    analyzeCell.innerHTML = `
-      <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
-        Analyze
-      </button>
-    `;
-  }
-  if (removeCell) {
-    removeCell.innerHTML = `
-      <button
-        type="button"
-        class="icon-button remove-button"
-        data-action="remove"
-        data-symbol="${stock.symbol}"
-        aria-label="Remove ${stock.symbol} from watchlist"
-      >
-        ✕
-      </button>
+  if (actionsCell) {
+    ensureActionsCellClean(actionsCell);
+    actionsCell.innerHTML = `
+      <div class="actions-group">
+        <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
+          Analyze
+        </button>
+        <button
+          type="button"
+          class="icon-button remove-button"
+          data-action="remove"
+          data-symbol="${stock.symbol}"
+          aria-label="Remove ${stock.symbol} from watchlist"
+        >
+          ✕
+        </button>
+      </div>
     `;
   }
 }

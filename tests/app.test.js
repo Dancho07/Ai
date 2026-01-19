@@ -1045,12 +1045,12 @@ const tests = [
     },
   },
   {
-    name: "keeps analyze cells free of heatmap classes and inline background styles",
+    name: "keeps actions cells free of heatmap classes and inline background styles",
     fn: async () => {
       const changeCell = createMockCell("change");
       const dayCell = createMockCell("change1d");
-      const analyzeCell = createMockCell("analyze");
-      analyzeCell.className = "analyze-cell price-change positive num-cell";
+      const analyzeCell = createMockCell("actions");
+      analyzeCell.className = "actions-cell price-change positive num-cell";
       analyzeCell.style.background = "rgba(29, 122, 74, 0.2)";
       analyzeCell.style.backgroundColor = "rgba(29, 122, 74, 0.2)";
       const cells = new Map([
@@ -1063,7 +1063,7 @@ const tests = [
         ["price", createMockCell("price")],
         ["change", changeCell],
         ["change1d", dayCell],
-        ["analyze", analyzeCell],
+        ["actions", analyzeCell],
       ]);
       const row = createMockRow(cells);
       const stock = {
@@ -1088,10 +1088,50 @@ const tests = [
       assert.strictEqual(dayCell.className.includes("positive"), true);
       assert.strictEqual(analyzeCell.className.includes("price-change"), false);
       assert.strictEqual(analyzeCell.className.includes("positive"), false);
-      assert.strictEqual(analyzeCell.className.includes("analyze-cell"), true);
+      assert.strictEqual(analyzeCell.className.includes("actions-cell"), true);
       assert.strictEqual(analyzeCell.style.background, "");
       assert.strictEqual(analyzeCell.style.backgroundColor, "");
       assert.strictEqual(analyzeCell.innerHTML.includes("Analyze"), true);
+      assert.strictEqual(analyzeCell.innerHTML.includes("data-action=\"remove\""), true);
+    },
+  },
+  {
+    name: "renders actions cell with analyze and remove controls without wrapping",
+    fn: async () => {
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "NFLX",
+        name: "Netflix",
+        sector: "Technology",
+        cap: "Large",
+        history: [320, 330, 325],
+        lastPrice: 325,
+        previousClose: 320,
+        lastChange: 5,
+        lastChangePct: 1.56,
+        dailyChange: 0.8,
+        monthlyChange: 2.4,
+        yearlyChange: 12.1,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const actionsCell = cells.get("actions");
+      assert.ok(actionsCell.innerHTML.includes("class=\"actions-group\""));
+      assert.ok(actionsCell.innerHTML.includes("class=\"analyze-button\""));
+      assert.ok(actionsCell.innerHTML.includes("class=\"icon-button remove-button\""));
+      assert.ok(actionsCell.innerHTML.includes("data-action=\"analyze\""));
+      assert.ok(actionsCell.innerHTML.includes("data-action=\"remove\""));
+      assert.ok(actionsCell.innerHTML.includes("Analyze"));
+      assert.strictEqual(actionsCell.innerHTML.includes("hidden"), false);
+      assert.strictEqual(actionsCell.innerHTML.includes("<br"), false);
     },
   },
   {
@@ -1518,7 +1558,7 @@ const tests = [
     },
   },
   {
-    name: "keeps market table rows aligned and analyze cell isolated",
+    name: "keeps market table rows aligned and actions cell isolated",
     fn: async () => {
       const html = fs.readFileSync(path.join(__dirname, "..", "live.html"), "utf8");
       const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
@@ -1535,10 +1575,10 @@ const tests = [
       const cells = new Map(
         getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
       );
-      const analyzeCell = cells.get("analyze");
-      analyzeCell.className = "analyze-cell price-change positive num-cell";
-      analyzeCell.style.background = "rgba(29, 122, 74, 0.2)";
-      analyzeCell.style.backgroundColor = "rgba(29, 122, 74, 0.2)";
+      const actionsCell = cells.get("actions");
+      actionsCell.className = "actions-cell price-change positive num-cell";
+      actionsCell.style.background = "rgba(29, 122, 74, 0.2)";
+      actionsCell.style.backgroundColor = "rgba(29, 122, 74, 0.2)";
       const row = createMockRow(cells);
       updateMarketRowCells(row, {
         symbol: "META",
@@ -1561,15 +1601,16 @@ const tests = [
         exchangeTimezoneName: "America/New_York",
       });
 
-      const analyzeMarkup = analyzeCell.innerHTML.trim();
-      assert.ok(/^<button[^>]*>[\s\S]*Analyze[\s\S]*<\/button>$/.test(analyzeMarkup));
-      assert.strictEqual(analyzeCell.className.includes("price-change"), false);
-      assert.strictEqual(analyzeCell.style.background, "");
-      assert.strictEqual(analyzeCell.style.backgroundColor, "");
+      const actionsMarkup = actionsCell.innerHTML.trim();
+      assert.ok(actionsMarkup.includes("Analyze"));
+      assert.ok(actionsMarkup.includes("data-action=\"remove\""));
+      assert.strictEqual(actionsCell.className.includes("price-change"), false);
+      assert.strictEqual(actionsCell.style.background, "");
+      assert.strictEqual(actionsCell.style.backgroundColor, "");
     },
   },
   {
-    name: "writes 1D change into its own cell and keeps analyze clean",
+    name: "writes 1D change into its own cell and keeps actions clean",
     fn: async () => {
       const cells = new Map(
         getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
@@ -1596,9 +1637,9 @@ const tests = [
       });
 
       const change1dCell = cells.get("change1d");
-      const analyzeCell = cells.get("analyze");
+      const actionsCell = cells.get("actions");
       assert.ok(change1dCell.textContent.includes("%"));
-      assert.strictEqual(analyzeCell.textContent.trim(), "Analyze");
+      assert.ok(actionsCell.textContent.includes("Analyze"));
     },
   },
   {
