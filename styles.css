@@ -323,6 +323,148 @@ button.is-loading .button-progress {
   width: 100%;
 }
 
+.opportunities-card {
+  border-radius: 16px;
+  border: 1px solid #e4e7f7;
+  background: #f7f8ff;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.opportunities-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.opportunities-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #1d1f2c;
+}
+
+.opportunities-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4a5170;
+}
+
+.opportunities-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.opportunities-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.opportunity-card {
+  background: #ffffff;
+  border-radius: 14px;
+  border: 1px solid #e6e9f7;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 120px;
+}
+
+.opportunity-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.opportunity-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  color: #2f3550;
+  font-size: 0.95rem;
+}
+
+.opportunity-list {
+  display: grid;
+  gap: 8px;
+}
+
+.opportunity-item {
+  border: 1px solid #eef1ff;
+  border-radius: 12px;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 12px;
+  align-items: center;
+  background: #ffffff;
+}
+
+.opportunity-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.opportunity-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.opportunity-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: #4d516d;
+}
+
+.opportunity-price {
+  font-weight: 700;
+  color: #1d1f2c;
+}
+
+.opportunity-change {
+  font-weight: 600;
+}
+
+.opportunity-change.positive {
+  color: #1d7a4a;
+}
+
+.opportunity-change.negative {
+  color: #b54141;
+}
+
+.opportunity-score {
+  font-weight: 600;
+}
+
+.opportunity-item .analyze-button {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+}
+
+.opportunity-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #6c728d;
+}
+
 .market-table {
   flex: 1;
   min-height: 0;

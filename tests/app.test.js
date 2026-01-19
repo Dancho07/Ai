@@ -41,6 +41,7 @@ const {
   buildMarketRowMarkup,
   scheduleResultScroll,
   sortMarketEntries,
+  buildTopOpportunitiesGroups,
   initTradePage,
   initLivePage,
 } = require("../core");
@@ -181,6 +182,31 @@ function createMockRow(cells) {
   };
 }
 
+function createStockEntry({
+  symbol,
+  history,
+  lastPrice = null,
+  dailyChange = null,
+  monthlyChange = null,
+  previousClose = null,
+  dataSource = "live",
+  quoteSession = "REGULAR",
+}) {
+  return {
+    symbol,
+    name: symbol,
+    sector: "Technology",
+    cap: "Large",
+    history,
+    lastPrice,
+    dailyChange,
+    monthlyChange,
+    previousClose,
+    dataSource,
+    quoteSession,
+  };
+}
+
 async function runTest(name, testFn) {
   try {
     await testFn();
@@ -235,6 +261,83 @@ const tests = [
     fn: async () => {
       const horizon = classifyTimeHorizon({ volatilityLevel: "low", trendStrength: "strong" });
       assert.strictEqual(horizon.label, "Position (weeks)");
+    },
+  },
+  {
+    name: "top opportunities movers exclude n/a",
+    fn: async () => {
+      const entries = [
+        createStockEntry({
+          symbol: "AAA",
+          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
+          lastPrice: null,
+          dailyChange: null,
+          previousClose: null,
+        }),
+        createStockEntry({
+          symbol: "BBB",
+          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 110],
+          lastPrice: 110,
+          dailyChange: 2.5,
+        }),
+        createStockEntry({
+          symbol: "CCC",
+          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 95],
+          lastPrice: 95,
+          dailyChange: -3.1,
+        }),
+      ];
+      const groups = buildTopOpportunitiesGroups(entries);
+      assert.strictEqual(groups.movers.length, 2);
+      assert.deepStrictEqual(
+        groups.movers.map((entry) => entry.stock.symbol).sort(),
+        ["BBB", "CCC"],
+      );
+    },
+  },
+  {
+    name: "top opportunities buy/sell groups respect filtered entries",
+    fn: async () => {
+      const buyEntry = createStockEntry({
+        symbol: "BUY1",
+        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
+        lastPrice: 90,
+        dailyChange: 1.2,
+      });
+      const sellEntry = createStockEntry({
+        symbol: "SELL1",
+        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 110],
+        lastPrice: 110,
+      });
+      const filtered = [buyEntry];
+      const groups = buildTopOpportunitiesGroups(filtered);
+      assert.strictEqual(groups.buy.length, 1);
+      assert.strictEqual(groups.buy[0].stock.symbol, "BUY1");
+      assert.strictEqual(groups.sell.length, 0);
+      assert.strictEqual(groups.movers.length, 1);
+      const unfilteredGroups = buildTopOpportunitiesGroups([buyEntry, sellEntry]);
+      assert.strictEqual(unfilteredGroups.sell.length, 1);
+    },
+  },
+  {
+    name: "top opportunities update when filtered list changes",
+    fn: async () => {
+      const buyEntry = createStockEntry({
+        symbol: "BUY2",
+        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
+        lastPrice: 90,
+      });
+      const sellEntry = createStockEntry({
+        symbol: "SELL2",
+        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 110],
+        lastPrice: 110,
+      });
+      const initialGroups = buildTopOpportunitiesGroups([buyEntry]);
+      assert.strictEqual(initialGroups.buy[0].stock.symbol, "BUY2");
+      assert.strictEqual(initialGroups.sell.length, 0);
+      const updatedGroups = buildTopOpportunitiesGroups([sellEntry]);
+      assert.strictEqual(updatedGroups.buy.length, 0);
+      assert.strictEqual(updatedGroups.sell[0].stock.symbol, "SELL2");
     },
   },
   {
