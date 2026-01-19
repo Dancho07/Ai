@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Market Pulse Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Live markets</p>
+          <h1>Market Pulse Dashboard</h1>
+          <p class="subtitle">
+            Monitor the live watchlist, filter by sector and signal strength, and jump straight into
+            a fresh trade analysis.
+          </p>
+          <p class="meta">
+            Quotes refresh automatically based on market session and fall back to cached or historical
+            data when live feeds are unavailable.
+          </p>
+          <a class="hero-link" href="./index.html">Back to Trade Analysis</a>
+        </div>
+        <div class="hero-card">
+          <h2>Quick actions</h2>
+          <ul>
+            <li>Filter by sector, cap size, and signal.</li>
+            <li>Sort by momentum and signal score.</li>
+            <li>Analyze any symbol in one click.</li>
+          </ul>
+        </div>
+      </header>
+
+      <section class="market-card">
+        <div class="market-header">
+          <div>
+            <p class="eyebrow">Live prices</p>
+            <h2>Market pulse board</h2>
+            <p class="subtitle">
+              Track live prices across the watchlist and refine results with detailed filters.
+            </p>
+            <label class="auto-run-toggle">
+              <input type="checkbox" id="auto-run-toggle" checked />
+              Auto-run analysis on click
+            </label>
+          </div>
+          <div class="refresh-pill">
+            <span class="dot"></span>
+            <span id="refresh-status">Updating…</span>
+          </div>
+        </div>
+        <div class="market-indicator" id="market-indicator">
+          <div class="market-indicator-group">
+            <span class="market-indicator-label">Market Status</span>
+            <span id="market-open-text">Closed</span>
+            <span id="market-session-badge" class="session-badge closed">CLOSED</span>
+          </div>
+          <div class="market-indicator-group">
+            <span class="market-indicator-label">Data Freshness</span>
+            <span id="market-as-of">As of unknown UTC</span>
+            <span id="market-source-badge" class="session-badge closed">HISTORICAL</span>
+          </div>
+          <span id="market-cache-note" class="market-indicator-note hidden">Using cached data</span>
+        </div>
+
+        <div class="filters">
+          <label>
+            Search symbol
+            <input type="text" id="filter-search" placeholder="e.g. TSLA" />
+          </label>
+          <label>
+            Sector
+            <select id="filter-sector">
+              <option value="all" selected>All sectors</option>
+              <option value="Technology">Technology</option>
+              <option value="Finance">Finance</option>
+              <option value="Healthcare">Healthcare</option>
+              <option value="Consumer">Consumer</option>
+              <option value="Energy">Energy</option>
+            </select>
+          </label>
+          <label>
+            Market cap
+            <select id="filter-cap">
+              <option value="all" selected>All caps</option>
+              <option value="Large">Large</option>
+              <option value="Mid">Mid</option>
+              <option value="Small">Small</option>
+            </select>
+          </label>
+          <label>
+            Signal
+            <select id="filter-signal">
+              <option value="all" selected>All signals</option>
+              <option value="buy">Buy</option>
+              <option value="hold">Hold</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+          <label>
+            Min price
+            <input type="number" id="filter-min" min="0" step="0.01" placeholder="0" />
+          </label>
+          <label>
+            Max price
+            <input type="number" id="filter-max" min="0" step="0.01" placeholder="500" />
+          </label>
+          <label>
+            Min 1M change %
+            <input type="number" id="filter-month" step="0.1" placeholder="0" />
+          </label>
+        </div>
+
+        <div class="market-table">
+          <table>
+            <colgroup>
+              <col style="width: 90px" />
+              <col style="width: 260px" />
+              <col style="width: 140px" />
+              <col style="width: 110px" />
+              <col style="width: 110px" />
+              <col style="width: 150px" />
+              <col style="width: 170px" />
+              <col style="width: 180px" />
+              <col style="width: 120px" />
+              <col style="width: 120px" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th data-col="symbol">Symbol</th>
+                <th data-col="company">Company</th>
+                <th data-col="sector">Sector</th>
+                <th data-col="cap">Market cap</th>
+                <th data-col="signal">Signal</th>
+                <th data-col="horizon">Time horizon</th>
+                <th data-col="price" class="num-cell">Live price</th>
+                <th data-col="change" class="num-cell">Change</th>
+                <th data-col="change1d" class="num-cell">1D change</th>
+                <th data-col="analyze">Analyze</th>
+              </tr>
+            </thead>
+            <tbody id="market-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="core.js"></script>
+    <script src="live.js"></script>
+  </body>
+</html>
