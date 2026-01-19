@@ -45,10 +45,16 @@
               Auto-run analysis on click
             </label>
           </div>
-          <button type="button" class="refresh-pill" id="refresh-pill">
-            <span class="dot"></span>
-            <span id="refresh-status">Updating…</span>
-          </button>
+          <div class="refresh-panel">
+            <button type="button" class="refresh-pill" id="refresh-pill">
+              <span class="dot"></span>
+              <span id="refresh-status">Updating…</span>
+            </button>
+            <div class="refresh-meta">
+              <span id="refresh-count">Quotes loaded 0/0</span>
+              <span id="refresh-time">Last refresh —</span>
+            </div>
+          </div>
         </div>
         <div class="market-indicator" id="market-indicator">
           <div class="market-indicator-group">

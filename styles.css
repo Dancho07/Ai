@@ -206,6 +206,22 @@ h1 {
   transition: background 0.2s ease, color 0.2s ease;
 }
 
+.refresh-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.refresh-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: #6c728d;
+}
+
 .refresh-pill .dot {
   width: 8px;
   height: 8px;

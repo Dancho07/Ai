@@ -78,6 +78,8 @@ const marketEmptyMessage = isBrowser ? document.getElementById("market-empty-mes
 const clearFiltersButton = isBrowser ? document.getElementById("clear-filters") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
 const refreshPill = isBrowser ? document.getElementById("refresh-pill") : null;
+const refreshCount = isBrowser ? document.getElementById("refresh-count") : null;
+const refreshTime = isBrowser ? document.getElementById("refresh-time") : null;
 const quoteStatusBanner = isBrowser ? document.getElementById("quote-status-banner") : null;
 const quoteStatusMessage = isBrowser ? document.getElementById("quote-status-message") : null;
 const quoteStatusRetry = isBrowser ? document.getElementById("quote-status-retry") : null;
@@ -295,17 +297,20 @@ const refreshState = {
   lastAttemptTs: null,
   lastSuccessTs: null,
   lastError: null,
+  lastCompletedTs: null,
 };
 let lastRefreshSummary = {
   okCount: 0,
   errorCount: 0,
   lastError: null,
+  totalCount: 0,
 };
 const lastQuoteRequestStatus = new Map();
 const indicatorCache = new Map();
 
 let refreshTimerId = null;
 let refreshInProgress = false;
+let refreshAbortController = null;
 let rateLimitBackoffUntil = 0;
 let isSubmitting = false;
 const RESULT_HIGHLIGHT_CLASS = "result-highlight";
@@ -859,6 +864,18 @@ function formatTime(timestamp) {
     return "unknown time";
   }
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatClockTime(timestamp) {
+  if (!timestamp) {
+    return "—";
+  }
+  return new Date(timestamp).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function formatTimestamp(timestamp) {
@@ -3697,6 +3714,7 @@ async function getQuoteInternal(symbol, options = {}) {
   }
 
   if (providerQuote) {
+    const wasUnavailable = providerQuote.unavailable === true;
     const normalized = normalizeQuote(
       {
         ...providerQuote,
@@ -3711,6 +3729,9 @@ async function getQuoteInternal(symbol, options = {}) {
         changePct: normalized.changePct,
         asOfTimestamp: normalized.asOfTs,
       };
+      if (wasUnavailable) {
+        fullQuote.unavailable = true;
+      }
       logYahooQuoteDebug(providerQuote, fullQuote.session, fullQuote.source);
       updateQuoteCache(symbol, fullQuote);
       setLastKnownQuote(symbol, fullQuote);
@@ -3797,6 +3818,26 @@ async function getQuote(symbol, options = {}) {
   }
 }
 
+function buildBatchPrefetch(symbols, quoteResults, { forceUnavailable = false } = {}) {
+  const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+  const unavailableMap = new Map();
+  const missingSymbols = [];
+  symbols.forEach((symbol) => {
+    if (quoteMap.has(symbol)) {
+      return;
+    }
+    missingSymbols.push(symbol);
+    if (!forceUnavailable && quoteResults.length === 0) {
+      return;
+    }
+    const stock = getStockEntry(symbol);
+    const lastKnown = getLastKnownQuote(symbol);
+    const sessionFallback = stock?.quoteSession ?? lastKnown?.session ?? QUOTE_SESSIONS.CLOSED;
+    unavailableMap.set(symbol, buildUnavailableQuote(lastKnown, sessionFallback));
+  });
+  return { quoteMap, unavailableMap, missingSymbols };
+}
+
 async function loadInitialMarketData() {
   const symbols = marketState.map((stock) => stock.symbol);
   let hadQuoteFailure = false;
@@ -3821,16 +3862,22 @@ async function loadInitialMarketData() {
       message: error.message ?? "Quote fetch failed.",
     });
   }
-  const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+  const { quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbols, quoteResults, {
+    forceUnavailable,
+  });
+  if (missingSymbols.length) {
+    hadQuoteFailure = true;
+  }
   const results = await refreshSymbolsWithLimiter(symbols, (symbol) => {
-    const prefetchedQuote = quoteMap.get(symbol) ?? null;
+    const prefetchedQuote = quoteMap.get(symbol) ?? unavailableMap.get(symbol) ?? null;
     return {
       prefetchedQuote,
-      allowFetch: !prefetchedQuote,
+      allowFetch: false,
       forceUnavailable,
       includeHistorical: true,
       range: MARKET_HISTORY_RANGE,
       interval: MARKET_HISTORY_INTERVAL,
+      useCache: false,
     };
   });
   results.forEach((result) => {
@@ -4132,6 +4179,7 @@ async function refreshSymbolData(symbol, options = {}) {
       errorType: error.type ?? "unknown",
       message: error.message ?? "Quote fetch failed.",
     });
+    stock.quoteUnavailable = true;
   }
 
   if (options.includeHistorical) {
@@ -4212,6 +4260,7 @@ async function refreshVisibleQuotes(options = {}) {
     return !isQuoteFreshForInterval(symbol, session);
   });
   if (!symbolsToFetch.length) {
+    summary.okCount = symbols.filter((symbol) => hasAnyMarketData(getStockEntry(symbol))).length;
     renderMarketTable();
     return summary;
   }
@@ -4246,19 +4295,26 @@ async function refreshVisibleQuotes(options = {}) {
     });
   }
 
-  const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+  const { quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbolsToFetch, quoteResults, {
+    forceUnavailable,
+  });
+  if (missingSymbols.length) {
+    hadQuoteFailure = true;
+    summary.errorTypes.push("unavailable");
+  }
   const results = await refreshSymbolsWithLimiter(symbolsToFetch, (symbol) => {
-    const prefetchedQuote = quoteMap.get(symbol) ?? null;
+    const prefetchedQuote = quoteMap.get(symbol) ?? unavailableMap.get(symbol) ?? null;
     return {
       prefetchedQuote,
-      allowFetch: !prefetchedQuote,
+      allowFetch: false,
       forceUnavailable,
       includeHistorical: false,
       signal: options.signal,
+      useCache: false,
     };
   });
   results.forEach((result) => {
-    if (result?.error || result?.hadQuoteFailure) {
+    if (result?.error || result?.hadQuoteFailure || result?.quote?.unavailable) {
       hadQuoteFailure = true;
       summary.errorCount += 1;
       if (result?.quoteErrorType) {
@@ -4267,8 +4323,11 @@ async function refreshVisibleQuotes(options = {}) {
       if (result?.error?.type) {
         summary.errorTypes.push(result.error.type);
       }
+      if (result?.quote?.unavailable) {
+        summary.errorTypes.push("unavailable");
+      }
     }
-    if (result?.quote) {
+    if (result?.quote && !result?.quote?.unavailable) {
       summary.okCount += 1;
     }
   });
@@ -4376,25 +4435,40 @@ function setRefreshState(partial) {
   updateRefreshStatus();
 }
 
+function updateRefreshMeta() {
+  if (refreshCount) {
+    const total = lastRefreshSummary.totalCount ?? 0;
+    const okCount = lastRefreshSummary.okCount ?? 0;
+    refreshCount.textContent = `Quotes loaded ${okCount}/${total}`;
+  }
+  if (refreshTime) {
+    refreshTime.textContent = `Last refresh ${formatClockTime(refreshState.lastCompletedTs)}`;
+  }
+}
+
 function updateRefreshStatus() {
   if (!refreshStatus) {
+    updateRefreshMeta();
     return;
   }
   if (!isPageVisible()) {
     refreshStatus.textContent = "Updates paused";
     refreshPill?.classList?.remove("loading", "ok", "error");
+    updateRefreshMeta();
     return;
   }
   if (refreshState.status === "loading") {
     refreshStatus.textContent = "Loading…";
     refreshPill?.classList?.remove("ok", "error");
     refreshPill?.classList?.add("loading");
+    updateRefreshMeta();
     return;
   }
   if (refreshState.status === "error") {
     refreshStatus.textContent = "Error (tap for details)";
     refreshPill?.classList?.remove("ok", "loading");
     refreshPill?.classList?.add("error");
+    updateRefreshMeta();
     return;
   }
   const lastSuccess = refreshState.lastSuccessTs;
@@ -4403,11 +4477,13 @@ function updateRefreshStatus() {
     refreshStatus.textContent = `Updated ${formatElapsedLabel(elapsed)} ago`;
     refreshPill?.classList?.remove("loading", "error");
     refreshPill?.classList?.add("ok");
+    updateRefreshMeta();
     return;
   }
   refreshStatus.textContent = "Idle";
   refreshPill?.classList?.remove("loading", "error");
   refreshPill?.classList?.add("ok");
+  updateRefreshMeta();
 }
 
 function groupErrorTypes(errorTypes = []) {
@@ -4423,6 +4499,11 @@ function groupErrorTypes(errorTypes = []) {
 async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = refreshVisibleQuotes } = {}) {
   const startedAt = Date.now();
   const cycleId = createRequestId();
+  if (refreshAbortController) {
+    refreshAbortController.abort();
+  }
+  const controller = new AbortController();
+  refreshAbortController = controller;
   setRefreshState({ status: "loading", lastAttemptTs: startedAt, lastError: null });
   setQuoteStatusBanner(null);
   console.info("[Market Refresh]", {
@@ -4433,7 +4514,6 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
   });
   let summary = null;
   let error = null;
-  const controller = new AbortController();
   let timeoutId = null;
   try {
     const timeoutPromise = new Promise((_, reject) => {
@@ -4449,6 +4529,9 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
+    if (refreshAbortController === controller) {
+      refreshAbortController = null;
+    }
   }
 
   if (summary) {
@@ -4456,6 +4539,7 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
       okCount: summary.okCount,
       errorCount: summary.errorCount,
       lastError: summary.error ?? null,
+      totalCount: summary.symbolsCount ?? summary.okCount + summary.errorCount,
     };
   }
 
@@ -4468,10 +4552,16 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
       status: finalStatus,
       lastError: error ?? summary?.error ?? null,
       lastSuccessTs: summary?.okCount ? Date.now() : refreshState.lastSuccessTs,
+      lastCompletedTs: Date.now(),
     });
     setQuoteStatusBanner(message, { reason: errorType });
   } else {
-    setRefreshState({ status: finalStatus, lastSuccessTs: Date.now(), lastError: null });
+    setRefreshState({
+      status: finalStatus,
+      lastSuccessTs: Date.now(),
+      lastError: null,
+      lastCompletedTs: Date.now(),
+    });
     setQuoteStatusBanner(null);
   }
   const durationMs = Date.now() - startedAt;
@@ -4513,7 +4603,8 @@ function resetRefreshState() {
   refreshState.lastAttemptTs = null;
   refreshState.lastSuccessTs = null;
   refreshState.lastError = null;
-  lastRefreshSummary = { okCount: 0, errorCount: 0, lastError: null };
+  refreshState.lastCompletedTs = null;
+  lastRefreshSummary = { okCount: 0, errorCount: 0, lastError: null, totalCount: 0 };
   updateRefreshStatus();
 }
 
@@ -5236,14 +5327,20 @@ async function refreshMarketBoard() {
       message: error.message,
     });
   }
-  const quoteMap = new Map(quoteResults.map((quote) => [quote.symbol, quote]));
+  const { quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbols, quoteResults, {
+    forceUnavailable,
+  });
+  if (missingSymbols.length) {
+    hadQuoteFailure = true;
+  }
   const results = await refreshSymbolsWithLimiter(symbols, (symbol) => {
-    const prefetchedQuote = quoteMap.get(symbol) ?? null;
+    const prefetchedQuote = quoteMap.get(symbol) ?? unavailableMap.get(symbol) ?? null;
     return {
       prefetchedQuote,
-      allowFetch: !prefetchedQuote,
+      allowFetch: false,
       forceUnavailable,
       includeHistorical: false,
+      useCache: false,
     };
   });
   results.forEach((result) => {
