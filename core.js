@@ -114,10 +114,7 @@ const MARKET_TABLE_COLUMNS = [
   { key: "signal" },
   { key: "horizon" },
   { key: "price", className: "num-cell" },
-  { key: "change", className: "price-change change-cell num-cell" },
-  { key: "change1d", className: "price-change change1d-cell num-cell" },
-  { key: "change1m", className: "price-change change1m-cell num-cell" },
-  { key: "change1y", className: "price-change change1y-cell num-cell" },
+  { key: "perf", className: "performance-cell" },
   { key: "actions", className: "actions-cell" },
 ];
 
@@ -4027,36 +4024,10 @@ function validateMarketTableStructure(table) {
   return { headerCount, expectedCount };
 }
 
-function formatChangeCellContent(cell, value, className) {
-  if (!cell) {
-    return;
-  }
-  const baseClass =
-    cell.dataset.col === "change"
-      ? "change-cell"
-      : cell.dataset.col === "change1d"
-        ? "change1d-cell"
-        : cell.dataset.col === "change1m"
-          ? "change1m-cell"
-          : cell.dataset.col === "change1y"
-            ? "change1y-cell"
-            : "";
-  cell.className = `price-change ${baseClass} num-cell ${className}`.trim();
-  if (value === "n/a") {
-    cell.innerHTML = '<span class="muted">n/a</span>';
-  } else {
-    cell.textContent = value;
-  }
-}
-
 const HEATMAP_CLASSNAMES = [
   "price-change",
   "positive",
   "negative",
-  "change-cell",
-  "change1d-cell",
-  "change1m-cell",
-  "change1y-cell",
   "num-cell",
 ];
 
@@ -4113,10 +4084,7 @@ function updateMarketRowCells(row, stock) {
   const signalCell = row.querySelector('[data-col="signal"]');
   const horizonCell = row.querySelector('[data-col="horizon"]');
   const priceCell = row.querySelector('[data-col="price"]');
-  const changeCell = row.querySelector('[data-col="change"]');
-  const dayCell = row.querySelector('[data-col="change1d"]');
-  const monthCell = row.querySelector('[data-col="change1m"]');
-  const yearCell = row.querySelector('[data-col="change1y"]');
+  const perfCell = row.querySelector('[data-col="perf"]');
   const actionsCell = row.querySelector('[data-col="actions"]');
   const favoriteCell = row.querySelector('[data-col="favorite"]');
 
@@ -4145,6 +4113,7 @@ function updateMarketRowCells(row, stock) {
   }
   if (sectorCell) {
     sectorCell.textContent = stock.sector;
+    sectorCell.title = stock.sector;
   }
   if (capCell) {
     capCell.textContent = stock.cap;
@@ -4158,24 +4127,6 @@ function updateMarketRowCells(row, stock) {
     `;
   }
   if (priceCell) {
-    const performanceMarkup = `
-      <div class="price-performance" aria-label="Performance">
-        <span class="performance-item">
-          <span class="performance-label">1D</span>
-          <span class="performance-value ${dayDisplay === "n/a" ? "muted" : dayClass}">${dayDisplay}</span>
-        </span>
-        <span class="performance-separator">|</span>
-        <span class="performance-item">
-          <span class="performance-label">1M</span>
-          <span class="performance-value ${monthDisplay === "n/a" ? "muted" : monthClass}">${monthDisplay}</span>
-        </span>
-        <span class="performance-separator">|</span>
-        <span class="performance-item">
-          <span class="performance-label">1Y</span>
-          <span class="performance-value ${yearDisplay === "n/a" ? "muted" : yearClass}">${yearDisplay}</span>
-        </span>
-      </div>
-    `;
     priceCell.innerHTML = `
       <div class="price-cell">
         <div class="price-main">
@@ -4187,14 +4138,42 @@ function updateMarketRowCells(row, stock) {
           }
         </div>
         <div class="price-meta">${meta}</div>
-        ${performanceMarkup}
       </div>
     `;
   }
-  formatChangeCellContent(changeCell, changeDisplay, changeClass);
-  formatChangeCellContent(dayCell, dayDisplay, dayClass);
-  formatChangeCellContent(monthCell, monthDisplay, monthClass);
-  formatChangeCellContent(yearCell, yearDisplay, yearClass);
+  if (perfCell) {
+    const formatPerfValue = (value) => (value === "n/a" ? "—" : value);
+    const perfChangeValue = formatPerfValue(changeDisplay);
+    const perfDayValue = formatPerfValue(dayDisplay);
+    const perfMonthValue = formatPerfValue(monthDisplay);
+    const perfYearValue = formatPerfValue(yearDisplay);
+    const perfChangeClass = changeDisplay === "n/a" ? "muted" : changeClass;
+    const perfDayClass = dayDisplay === "n/a" ? "muted" : dayClass;
+    const perfMonthClass = monthDisplay === "n/a" ? "muted" : monthClass;
+    const perfYearClass = yearDisplay === "n/a" ? "muted" : yearClass;
+    perfCell.innerHTML = `
+      <div class="performance-stack" aria-label="Performance">
+        <div class="performance-top">
+          <span class="performance-label">Change</span>
+          <span class="performance-value ${perfChangeClass}">${perfChangeValue}</span>
+        </div>
+        <div class="performance-row">
+          <span class="performance-item">
+            <span class="performance-label">1D</span>
+            <span class="performance-value ${perfDayClass}">${perfDayValue}</span>
+          </span>
+          <span class="performance-item">
+            <span class="performance-label">1M</span>
+            <span class="performance-value ${perfMonthClass}">${perfMonthValue}</span>
+          </span>
+          <span class="performance-item">
+            <span class="performance-label">1Y</span>
+            <span class="performance-value ${perfYearClass}">${perfYearValue}</span>
+          </span>
+        </div>
+      </div>
+    `;
+  }
   if (actionsCell) {
     ensureActionsCellClean(actionsCell);
     actionsCell.innerHTML = `

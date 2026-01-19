@@ -530,7 +530,6 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  min-width: 1250px;
   table-layout: fixed;
 }
 
@@ -592,7 +591,7 @@ tbody tr:hover td[data-col="actions"] {
 }
 
 .company-cell {
-  max-width: 220px;
+  max-width: 170px;
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
@@ -783,27 +782,31 @@ th.num-cell {
 
 th[data-col="symbol"],
 td[data-col="symbol"] {
-  width: 70px;
-  min-width: 70px;
+  width: 80px;
+  min-width: 80px;
 }
 
 th[data-col="company"],
 td[data-col="company"] {
-  width: 180px;
-  min-width: 180px;
-  max-width: 200px;
+  width: 160px;
+  min-width: 160px;
+  max-width: 170px;
 }
 
 th[data-col="sector"],
 td[data-col="sector"] {
   width: 110px;
   min-width: 110px;
+  max-width: 120px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 
 th[data-col="cap"],
 td[data-col="cap"] {
-  width: 90px;
-  min-width: 90px;
+  width: 85px;
+  min-width: 85px;
 }
 
 th[data-col="signal"],
@@ -820,41 +823,26 @@ td[data-col="horizon"] {
 
 th[data-col="price"],
 td[data-col="price"] {
-  width: 160px;
-  min-width: 160px;
+  width: 150px;
+  min-width: 150px;
 }
 
-th[data-col="change"],
-td[data-col="change"] {
-  width: 130px;
-  min-width: 130px;
-}
-
-th[data-col="change1d"],
-td[data-col="change1d"] {
-  width: 80px;
-  min-width: 80px;
-}
-
-th[data-col="change1m"],
-td[data-col="change1m"],
-th[data-col="change1y"],
-td[data-col="change1y"] {
-  width: 80px;
-  min-width: 80px;
+th[data-col="perf"],
+td[data-col="perf"] {
+  width: 260px;
+  min-width: 260px;
+  text-align: left;
 }
 
 th[data-col="actions"],
 td[data-col="actions"] {
-  width: 190px;
-  min-width: 190px;
+  width: 160px;
+  min-width: 160px;
   text-align: right;
 }
 
 th[data-col="symbol"],
 td[data-col="symbol"],
-th[data-col="sector"],
-td[data-col="sector"],
 th[data-col="cap"],
 td[data-col="cap"],
 th[data-col="signal"],
@@ -866,48 +854,52 @@ td[data-col="actions"] {
   white-space: nowrap;
 }
 
-.change-cell,
-.change1d-cell,
-.change1m-cell,
-.change1y-cell {
-  text-overflow: clip;
+.performance-cell {
+  text-align: left;
 }
 
-.price-performance {
-  display: none;
+.performance-stack {
+  display: flex;
+  flex-direction: column;
   gap: 6px;
-  align-items: center;
-  font-size: 0.78rem;
-  color: #5d627c;
-  margin-top: 6px;
-  flex-wrap: wrap;
 }
 
-.price-performance .performance-item {
+.performance-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.performance-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.78rem;
+}
+
+.performance-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.price-performance .performance-label {
+.performance-label {
   font-weight: 600;
   color: #6c728d;
 }
 
-.price-performance .performance-value {
+.performance-value {
   font-weight: 600;
 }
 
-.price-performance .performance-value.positive {
+.performance-value.positive {
   color: #1d7a4a;
 }
 
-.price-performance .performance-value.negative {
+.performance-value.negative {
   color: #b54141;
-}
-
-.price-performance .performance-separator {
-  color: #9aa1c4;
 }
 
 .price-change.positive {
@@ -1229,25 +1221,15 @@ td[data-col="actions"] {
   }
 }
 
-@media (max-width: 1100px) {
+@media (min-width: 1280px) {
+  .market-table {
+    overflow-x: hidden;
+  }
+}
+
+@media (max-width: 1279px) {
   table {
     min-width: 980px;
-  }
-
-  th[data-col="change1m"],
-  td[data-col="change1m"],
-  th[data-col="change1y"],
-  td[data-col="change1y"] {
-    display: none;
-  }
-
-  col[data-col="change1m"],
-  col[data-col="change1y"] {
-    display: none;
-  }
-
-  .price-performance {
-    display: inline-flex;
   }
 }
 

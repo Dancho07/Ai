@@ -1047,8 +1047,7 @@ const tests = [
   {
     name: "keeps actions cells free of heatmap classes and inline background styles",
     fn: async () => {
-      const changeCell = createMockCell("change");
-      const dayCell = createMockCell("change1d");
+      const perfCell = createMockCell("perf");
       const analyzeCell = createMockCell("actions");
       analyzeCell.className = "actions-cell price-change positive num-cell";
       analyzeCell.style.background = "rgba(29, 122, 74, 0.2)";
@@ -1061,8 +1060,7 @@ const tests = [
         ["signal", createMockCell("signal")],
         ["horizon", createMockCell("horizon")],
         ["price", createMockCell("price")],
-        ["change", changeCell],
-        ["change1d", dayCell],
+        ["perf", perfCell],
         ["actions", analyzeCell],
       ]);
       const row = createMockRow(cells);
@@ -1082,10 +1080,10 @@ const tests = [
 
       updateMarketRowCells(row, stock);
 
-      assert.strictEqual(changeCell.className.includes("price-change"), true);
-      assert.strictEqual(changeCell.className.includes("positive"), true);
-      assert.strictEqual(dayCell.className.includes("price-change"), true);
-      assert.strictEqual(dayCell.className.includes("positive"), true);
+      assert.ok(perfCell.innerHTML.includes("Change"));
+      assert.ok(perfCell.innerHTML.includes("1D"));
+      assert.ok(perfCell.innerHTML.includes("1M"));
+      assert.ok(perfCell.innerHTML.includes("1Y"));
       assert.strictEqual(analyzeCell.className.includes("price-change"), false);
       assert.strictEqual(analyzeCell.className.includes("positive"), false);
       assert.strictEqual(analyzeCell.className.includes("actions-cell"), true);
@@ -1465,12 +1463,11 @@ const tests = [
     },
   },
   {
-    name: "renders change and 1D change into separate cells",
+    name: "renders change summary and sub-metrics inside the performance cell",
     fn: async () => {
       const cells = new Map([
         ["symbol", createMockCell("symbol")],
-        ["change", createMockCell("change")],
-        ["change1d", createMockCell("change1d")],
+        ["perf", createMockCell("perf")],
       ]);
       const row = createMockRow(cells);
       updateMarketRowCells(row, {
@@ -1493,20 +1490,19 @@ const tests = [
         exchangeTimezoneName: null,
       });
 
-      const changeCell = cells.get("change");
-      const change1dCell = cells.get("change1d");
-      assert.ok(changeCell.textContent.includes("-2.68"));
-      assert.ok(!changeCell.textContent.includes("n/a"));
-      assert.strictEqual(change1dCell.textContent.trim(), "-1.04%");
+      const perfCell = cells.get("perf");
+      assert.ok(perfCell.textContent.includes("-2.68"));
+      assert.ok(perfCell.textContent.includes("-1.04%"));
+      assert.ok(perfCell.textContent.includes("1Y"));
     },
   },
   {
-    name: "keeps long change values isolated to their column",
+    name: "keeps performance content isolated from actions",
     fn: async () => {
       const cells = new Map([
         ["symbol", createMockCell("symbol")],
-        ["change", createMockCell("change")],
-        ["change1d", createMockCell("change1d")],
+        ["perf", createMockCell("perf")],
+        ["actions", createMockCell("actions")],
       ]);
       const row = createMockRow(cells);
       updateMarketRowCells(row, {
@@ -1529,10 +1525,11 @@ const tests = [
         exchangeTimezoneName: null,
       });
 
-      const changeCell = cells.get("change");
-      const change1dCell = cells.get("change1d");
-      assert.ok(changeCell.textContent.includes("+100.12"));
-      assert.ok(!changeCell.textContent.includes(change1dCell.textContent));
+      const perfCell = cells.get("perf");
+      const actionsCell = cells.get("actions");
+      assert.ok(perfCell.textContent.includes("+100.12"));
+      assert.ok(perfCell.textContent.includes("-0.5%"));
+      assert.strictEqual(actionsCell.textContent.includes("+100.12"), false);
     },
   },
   {
@@ -1542,19 +1539,63 @@ const tests = [
       const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
-      const headerTextIncludes1d = html.includes(">1D change<");
-      const headerTextIncludes1m = html.includes(">1M change<");
-      const headerTextIncludes1y = html.includes(">1Y change<");
+      const headerTextIncludesPerformance = html.includes(">Performance<");
       const columnKeys = getMarketTableColumnKeys();
       const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
-      assert.strictEqual(headerTextIncludes1d, true);
-      assert.strictEqual(headerTextIncludes1m, true);
-      assert.strictEqual(headerTextIncludes1y, true);
+      assert.strictEqual(headerTextIncludesPerformance, true);
       assert.deepStrictEqual(columnKeys, headerCols);
       assert.deepStrictEqual(rowCols, columnKeys);
       assert.strictEqual(rowCols.length, headerCols.length);
+    },
+  },
+  {
+    name: "renders performance cell with 1Y label and prevents desktop overflow",
+    fn: async () => {
+      const html = fs.readFileSync(path.join(__dirname, "..", "live.html"), "utf8");
+      const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      assert.strictEqual(headerCols.length, rowCols.length);
+
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "AAPL",
+        name: "Apple",
+        sector: "Technology",
+        cap: "Large",
+        history: [100, 101, 102],
+        lastPrice: 102,
+        previousClose: 101,
+        lastChange: 1,
+        lastChangePct: 0.99,
+        dailyChange: 1.25,
+        monthlyChange: 2.5,
+        yearlyChange: 12.4,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const perfCell = cells.get("perf");
+      assert.ok(perfCell.innerHTML.includes("1Y"));
+
+      const css = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+      assert.ok(
+        /@media \(min-width: 1280px\)[\s\S]*?\.market-table[\s\S]*?overflow-x:\s*hidden/.test(
+          css,
+        ),
+      );
     },
   },
   {
@@ -1567,9 +1608,7 @@ const tests = [
       const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
-      assert.strictEqual(html.includes(">1D change<"), true);
-      assert.strictEqual(html.includes(">1M change<"), true);
-      assert.strictEqual(html.includes(">1Y change<"), true);
+      assert.strictEqual(html.includes(">Performance<"), true);
       assert.strictEqual(rowCols.length, headerCols.length);
 
       const cells = new Map(
@@ -1610,7 +1649,7 @@ const tests = [
     },
   },
   {
-    name: "writes 1D change into its own cell and keeps actions clean",
+    name: "writes 1D change into the performance cell and keeps actions clean",
     fn: async () => {
       const cells = new Map(
         getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
@@ -1636,14 +1675,15 @@ const tests = [
         exchangeTimezoneName: "America/New_York",
       });
 
-      const change1dCell = cells.get("change1d");
+      const perfCell = cells.get("perf");
       const actionsCell = cells.get("actions");
-      assert.ok(change1dCell.textContent.includes("%"));
+      assert.ok(perfCell.textContent.includes("1D"));
+      assert.ok(perfCell.textContent.includes("%"));
       assert.ok(actionsCell.textContent.includes("Analyze"));
     },
   },
   {
-    name: "writes 1M and 1Y change values into their own cells",
+    name: "writes 1M and 1Y change values into the performance cell",
     fn: async () => {
       const cells = new Map(
         getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
@@ -1670,16 +1710,15 @@ const tests = [
         exchangeTimezoneName: "America/New_York",
       });
 
-      const change1mCell = cells.get("change1m");
-      const change1yCell = cells.get("change1y");
-      assert.ok(change1mCell.textContent.includes("%"));
-      assert.ok(change1yCell.textContent.includes("%"));
-      assert.ok(change1mCell.textContent.includes("5.5"));
-      assert.ok(change1yCell.textContent.includes("-12.4"));
+      const perfCell = cells.get("perf");
+      assert.ok(perfCell.textContent.includes("1M"));
+      assert.ok(perfCell.textContent.includes("1Y"));
+      assert.ok(perfCell.textContent.includes("5.5"));
+      assert.ok(perfCell.textContent.includes("-12.4"));
     },
   },
   {
-    name: "renders n/a for 1M and 1Y when history is missing",
+    name: "renders muted placeholders for 1M and 1Y when history is missing",
     fn: async () => {
       const cells = new Map(
         getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
@@ -1706,10 +1745,10 @@ const tests = [
         exchangeTimezoneName: "America/New_York",
       });
 
-      const change1mCell = cells.get("change1m");
-      const change1yCell = cells.get("change1y");
-      assert.strictEqual(change1mCell.textContent.trim(), "n/a");
-      assert.strictEqual(change1yCell.textContent.trim(), "n/a");
+      const perfCell = cells.get("perf");
+      assert.ok(perfCell.textContent.includes("1M"));
+      assert.ok(perfCell.textContent.includes("1Y"));
+      assert.ok(perfCell.textContent.includes("—"));
     },
   },
   {
