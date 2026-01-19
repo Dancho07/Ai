@@ -64,6 +64,21 @@
           <span id="market-cache-note" class="market-indicator-note hidden">Using cached data</span>
         </div>
 
+        <div class="watchlist-controls">
+          <label class="watchlist-input">
+            Add symbol
+            <div class="watchlist-input-row">
+              <input type="text" id="watchlist-input" placeholder="e.g. TSLA" />
+              <button type="button" id="watchlist-add-button" class="primary-button">Add</button>
+            </div>
+            <p class="field-error hidden" id="watchlist-error" role="status" aria-live="polite"></p>
+          </label>
+          <label class="favorites-toggle">
+            <input type="checkbox" id="filter-favorites" />
+            Show favorites only
+          </label>
+        </div>
+
         <div class="filters">
           <label>
             Search symbol
@@ -162,35 +177,39 @@
         <div class="market-table">
           <table>
             <colgroup>
-              <col data-col="symbol" style="width: 70px" />
-              <col data-col="company" style="width: 180px" />
-              <col data-col="sector" style="width: 110px" />
-              <col data-col="cap" style="width: 90px" />
-              <col data-col="signal" style="width: 80px" />
-              <col data-col="horizon" style="width: 100px" />
-              <col data-col="price" style="width: 160px" />
-              <col data-col="change" style="width: 130px" />
-              <col data-col="change1d" style="width: 80px" />
-              <col data-col="change1m" style="width: 80px" />
-              <col data-col="change1y" style="width: 80px" />
-              <col data-col="analyze" style="width: 90px" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th data-col="symbol">Symbol</th>
-                <th data-col="company">Company</th>
-                <th data-col="sector">Sector</th>
-                <th data-col="cap">Market cap</th>
-                <th data-col="signal">Signal</th>
-                <th data-col="horizon">Time horizon</th>
-                <th data-col="price" class="num-cell">Live price</th>
-                <th data-col="change" class="num-cell">Change</th>
-                <th data-col="change1d" class="num-cell">1D change</th>
-                <th data-col="change1m" class="num-cell">1M change</th>
-                <th data-col="change1y" class="num-cell">1Y change</th>
-                <th data-col="analyze">Analyze</th>
-              </tr>
-            </thead>
+            <col data-col="favorite" style="width: 60px" />
+            <col data-col="symbol" style="width: 70px" />
+            <col data-col="company" style="width: 180px" />
+            <col data-col="sector" style="width: 110px" />
+            <col data-col="cap" style="width: 90px" />
+            <col data-col="signal" style="width: 80px" />
+            <col data-col="horizon" style="width: 100px" />
+            <col data-col="price" style="width: 160px" />
+            <col data-col="change" style="width: 130px" />
+            <col data-col="change1d" style="width: 80px" />
+            <col data-col="change1m" style="width: 80px" />
+            <col data-col="change1y" style="width: 80px" />
+            <col data-col="remove" style="width: 60px" />
+            <col data-col="analyze" style="width: 90px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th data-col="favorite">Fav</th>
+              <th data-col="symbol">Symbol</th>
+              <th data-col="company">Company</th>
+              <th data-col="sector">Sector</th>
+              <th data-col="cap">Market cap</th>
+              <th data-col="signal">Signal</th>
+              <th data-col="horizon">Time horizon</th>
+              <th data-col="price" class="num-cell">Live price</th>
+              <th data-col="change" class="num-cell">Change</th>
+              <th data-col="change1d" class="num-cell">1D change</th>
+              <th data-col="change1m" class="num-cell">1M change</th>
+              <th data-col="change1y" class="num-cell">1Y change</th>
+              <th data-col="remove"></th>
+              <th data-col="analyze">Analyze</th>
+            </tr>
+          </thead>
             <tbody id="market-body"></tbody>
           </table>
         </div>

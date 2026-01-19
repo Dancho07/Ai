@@ -6,7 +6,7 @@ if (typeof document !== "undefined") {
         onAnalyze: (symbol) => {
           const autoRun = autoRunToggle?.checked ?? true;
           const url = window.AppCore.buildAnalyzeUrl(symbol, { autoRun });
-          window.location.assign(url);
+          window.location.href = url;
         },
       });
     }

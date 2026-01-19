@@ -7,6 +7,9 @@ const {
   isValidSymbol,
   normalizeSymbolInput,
   getSymbolValidationMessage,
+  createStorageAdapter,
+  createWatchlistStore,
+  createFavoritesStore,
   deriveMarketSession,
   persistFormState,
   loadPersistedFormState,
@@ -42,6 +45,8 @@ const {
   scheduleResultScroll,
   sortMarketEntries,
   buildTopOpportunitiesGroups,
+  applyMarketFilters,
+  removeSymbolFromWatchlist,
   initTradePage,
   initLivePage,
 } = require("../core");
@@ -191,12 +196,14 @@ function createStockEntry({
   previousClose = null,
   dataSource = "live",
   quoteSession = "REGULAR",
+  sector = "Technology",
+  cap = "Large",
 }) {
   return {
     symbol,
     name: symbol,
-    sector: "Technology",
-    cap: "Large",
+    sector,
+    cap,
     history,
     lastPrice,
     dailyChange,
@@ -1690,6 +1697,91 @@ const tests = [
       let scrollCalls = 0;
       scheduleResultScroll(null);
       assert.strictEqual(scrollCalls, 0);
+    },
+  },
+  {
+    name: "watchlist store loads defaults when storage is empty",
+    fn: async () => {
+      const storage = createStorageAdapter(createStorage());
+      const store = createWatchlistStore({ storage, defaultSymbols: ["AAPL", "MSFT"] });
+      assert.deepStrictEqual(store.getWatchlist(), ["AAPL", "MSFT"]);
+    },
+  },
+  {
+    name: "watchlist addSymbol normalizes and rejects invalid symbols",
+    fn: async () => {
+      const storage = createStorageAdapter(createStorage());
+      const store = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      const added = store.addSymbol(" tsla ");
+      assert.strictEqual(added.added, true);
+      assert.ok(store.getWatchlist().includes("TSLA"));
+      const invalid = store.addSymbol("NVDA!");
+      assert.strictEqual(invalid.added, false);
+      assert.ok(!store.getWatchlist().includes("NVDA!"));
+    },
+  },
+  {
+    name: "removeSymbol updates watchlist and favorites together",
+    fn: async () => {
+      const storage = createStorageAdapter(createStorage());
+      const watchlist = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      const favorites = createFavoritesStore({ storage });
+      watchlist.addSymbol("TSLA");
+      favorites.toggleFavorite("TSLA");
+      const removed = removeSymbolFromWatchlist("TSLA", { watchlist, favorites });
+      assert.strictEqual(removed, true);
+      assert.ok(!watchlist.getWatchlist().includes("TSLA"));
+      assert.ok(!favorites.getFavorites().includes("TSLA"));
+    },
+  },
+  {
+    name: "favorites-only filter still respects sector/cap/signal filters",
+    fn: async () => {
+      const favorites = new Set(["AAPL", "JPM"]);
+      const entries = [
+        createStockEntry({
+          symbol: "AAPL",
+          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
+          lastPrice: 90,
+          sector: "Technology",
+          cap: "Large",
+        }),
+        createStockEntry({
+          symbol: "JPM",
+          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
+          lastPrice: 90,
+          sector: "Finance",
+          cap: "Large",
+        }),
+      ];
+      const filtered = applyMarketFilters(entries, {
+        favoritesOnly: true,
+        favorites,
+        filters: {
+          search: "",
+          sector: "Technology",
+          cap: "Large",
+          signal: "buy",
+          min: 0,
+          max: 0,
+          minMonth: 0,
+        },
+      });
+      assert.deepStrictEqual(
+        filtered.map((entry) => entry.symbol),
+        ["AAPL"],
+      );
+    },
+  },
+  {
+    name: "watchlist persistence survives reloads",
+    fn: async () => {
+      const backing = createStorage();
+      const storage = createStorageAdapter(backing);
+      const first = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      first.addSymbol("TSLA");
+      const second = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      assert.ok(second.getWatchlist().includes("TSLA"));
     },
   },
   {
