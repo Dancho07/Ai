@@ -2289,6 +2289,44 @@ const tests = [
     },
   },
   {
+    name: "refresh cycle aborts in-flight refresh when a new cycle starts",
+    fn: async () => {
+      resetRefreshState();
+      let firstSignal = null;
+      let firstAborted = false;
+      const firstRefreshFn = ({ signal }) =>
+        new Promise((resolve) => {
+          firstSignal = signal;
+          signal.addEventListener("abort", () => {
+            firstAborted = true;
+            resolve({
+              symbolsCount: 1,
+              okCount: 0,
+              errorCount: 1,
+              hadQuoteFailure: true,
+              errorTypes: ["timeout"],
+            });
+          });
+        });
+      const secondRefreshFn = () =>
+        Promise.resolve({
+          symbolsCount: 1,
+          okCount: 1,
+          errorCount: 0,
+          hadQuoteFailure: false,
+          errorTypes: [],
+        });
+
+      const firstPromise = runRefreshCycle({ timeoutMs: 1000, refreshFn: firstRefreshFn });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await runRefreshCycle({ timeoutMs: 1000, refreshFn: secondRefreshFn });
+      await firstPromise;
+
+      assert.strictEqual(firstSignal.aborted, true);
+      assert.strictEqual(firstAborted, true);
+    },
+  },
+  {
     name: "quote batch uses allSettled and keeps successful results",
     fn: async () => {
       const responses = [
@@ -2306,6 +2344,65 @@ const tests = [
       assert.strictEqual(result.quotes.length, 1);
       assert.strictEqual(result.quotes[0].symbol, "AAPL");
       assert.strictEqual(result.hadFailure, true);
+    },
+  },
+  {
+    name: "quote batch uses a single request when symbols fit in one batch",
+    fn: async () => {
+      const fetchFn = createFetchSequence([
+        createResponse({
+          ok: true,
+          status: 200,
+          json: { quoteResponse: { result: [{ symbol: "AAPL", regularMarketPrice: 100 }] } },
+        }),
+      ]);
+      await fetchYahooQuotes(["AAPL", "MSFT"], { fetchFn, batchSize: 8, maxAttempts: 1 });
+      assert.strictEqual(fetchFn.getCallCount(), 1);
+    },
+  },
+  {
+    name: "refresh marks missing symbols as unavailable while keeping cached price",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL", "MSFT"]));
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async () =>
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: {
+              result: [
+                {
+                  symbol: "AAPL",
+                  regularMarketPrice: 100,
+                  regularMarketChange: 1,
+                  regularMarketChangePercent: 1,
+                  regularMarketTime: Math.floor(Date.now() / 1000),
+                  regularMarketPreviousClose: 99,
+                },
+              ],
+            },
+          },
+        });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        const msftEntry = core.getStockEntry("MSFT");
+        msftEntry.lastPrice = 250;
+        msftEntry.previousClose = 250;
+        await core.refreshVisibleQuotes();
+        const msft = core.getStockEntry("MSFT");
+        assert.strictEqual(msft.lastPrice, 250);
+        assert.strictEqual(msft.quoteUnavailable, true);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
     },
   },
   {
