@@ -37,6 +37,7 @@ const {
   buildSignalReasons,
   buildInvalidationRules,
   formatTimestamp,
+  runBacktest30d,
   getMarketIndicatorData,
   handleMarketRowAction,
   updateMarketRowCells,
@@ -1862,6 +1863,69 @@ const tests = [
       first.addSymbol("TSLA");
       const second = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
       assert.ok(second.getWatchlist().includes("TSLA"));
+    },
+  },
+  {
+    name: "backtest returns deterministic trade counts",
+    fn: async () => {
+      const prices = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 90, 95, 105, 100, 110, 100];
+      const signalFn = (slice) => {
+        const length = slice.length;
+        if (length === 3) {
+          return "buy";
+        }
+        if (length === 6) {
+          return "sell";
+        }
+        if (length === 10) {
+          return "buy";
+        }
+        if (length === 13) {
+          return "sell";
+        }
+        return "hold";
+      };
+      const summary = runBacktest30d(prices, { signalFn, minCandles: 5 });
+      assert.strictEqual(summary.trades, 2);
+      assert.strictEqual(summary.winRate, 50);
+    },
+  },
+  {
+    name: "backtest computes buy & hold return correctly",
+    fn: async () => {
+      const prices = [100, 110, 120, 130, 140, 150];
+      const summary = runBacktest30d(prices, {
+        signalFn: () => "hold",
+        minCandles: 2,
+      });
+      assert.ok(Math.abs(summary.buyHoldReturn - 50) < 0.01);
+    },
+  },
+  {
+    name: "backtest computes max drawdown correctly",
+    fn: async () => {
+      const prices = [100, 120, 80, 140];
+      const summary = runBacktest30d(prices, {
+        signalFn: (slice) => (slice.length === 1 ? "buy" : "hold"),
+        minCandles: 2,
+      });
+      assert.ok(Math.abs(summary.maxDrawdown - 33.3333) < 0.05);
+    },
+  },
+  {
+    name: "backtest signals only use past data",
+    fn: async () => {
+      const prices = [10, 12, 11, 13, 12, 14];
+      const lengths = [];
+      const summary = runBacktest30d(prices, {
+        signalFn: (slice) => {
+          lengths.push(slice.length);
+          return "hold";
+        },
+        minCandles: 2,
+      });
+      assert.strictEqual(summary.hasEnoughData, true);
+      assert.deepStrictEqual(lengths, [1, 2, 3, 4, 5]);
     },
   },
   {

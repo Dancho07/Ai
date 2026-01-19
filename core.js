@@ -33,6 +33,14 @@ const resultGenerated = isBrowser ? document.getElementById("result-generated") 
 const resultDisclaimer = isBrowser ? document.getElementById("result-disclaimer") : null;
 const resultReasoning = isBrowser ? document.getElementById("result-reasoning") : null;
 const resultInvalidation = isBrowser ? document.getElementById("result-invalidation") : null;
+const resultBacktestStatus = isBrowser ? document.getElementById("result-backtest-status") : null;
+const resultBacktestList = isBrowser ? document.getElementById("result-backtest-list") : null;
+const resultBacktestTrades = isBrowser ? document.getElementById("result-backtest-trades") : null;
+const resultBacktestWinRate = isBrowser ? document.getElementById("result-backtest-win-rate") : null;
+const resultBacktestAvgReturn = isBrowser ? document.getElementById("result-backtest-avg-return") : null;
+const resultBacktestDrawdown = isBrowser ? document.getElementById("result-backtest-drawdown") : null;
+const resultBacktestBuyHold = isBrowser ? document.getElementById("result-backtest-buy-hold") : null;
+const resultBacktestDisclaimer = isBrowser ? document.getElementById("result-backtest-disclaimer") : null;
 const planEntry = isBrowser ? document.getElementById("plan-entry") : null;
 const planEntryMeta = isBrowser ? document.getElementById("plan-entry-meta") : null;
 const planStopLossRow = isBrowser ? document.getElementById("plan-stop-loss-row") : null;
@@ -121,6 +129,7 @@ const MARKET_TABLE_COLUMNS = [
 const FORM_STATE_KEY = "trade_form_state_v1";
 const WATCHLIST_STORAGE_KEY = "watchlist_v1";
 const FAVORITES_STORAGE_KEY = "favorites_v1";
+const BACKTEST_CACHE_PREFIX = "backtest30d_v1";
 const POSITION_SIZING_MODES = {
   CASH: "cash",
   RISK_PERCENT: "risk_percent",
@@ -136,6 +145,7 @@ const ATR_LOOKBACK = 30;
 const SWING_LOOKBACK = 10;
 const HOLD_LOOKBACK_MIN = 10;
 const HOLD_LOOKBACK_MAX = 20;
+const BACKTEST_MIN_CANDLES = 15;
 
 const DEFAULT_WATCHLIST = [
   { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
@@ -1483,6 +1493,154 @@ function calculateSignal(prices) {
   return "hold";
 }
 
+function getBacktestDateStamp(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getBacktestCacheKey(symbol, dateStamp) {
+  return `${BACKTEST_CACHE_PREFIX}_${symbol}_${dateStamp}`;
+}
+
+function formatPercentNoSign(value) {
+  if (value == null || Number.isNaN(value)) {
+    return "n/a";
+  }
+  return `${percentFormatter.format(value)}%`;
+}
+
+function calculateMaxDrawdown(equityCurve) {
+  if (!Array.isArray(equityCurve) || equityCurve.length === 0) {
+    return 0;
+  }
+  let peak = equityCurve[0];
+  let maxDrawdown = 0;
+  equityCurve.forEach((value) => {
+    if (value > peak) {
+      peak = value;
+    }
+    if (peak > 0) {
+      const drawdown = (value - peak) / peak;
+      if (drawdown < maxDrawdown) {
+        maxDrawdown = drawdown;
+      }
+    }
+  });
+  return Math.abs(maxDrawdown) * 100;
+}
+
+function runBacktest30d(prices, options = {}) {
+  const minCandles = options.minCandles ?? BACKTEST_MIN_CANDLES;
+  if (!Array.isArray(prices) || prices.length < minCandles) {
+    return {
+      hasEnoughData: false,
+      trades: 0,
+      winRate: 0,
+      avgReturn: 0,
+      maxDrawdown: 0,
+      buyHoldReturn: 0,
+      tradeReturns: [],
+      equityCurve: [],
+    };
+  }
+
+  const signalFn = options.signalFn ?? calculateSignal;
+  let equity = 1;
+  const equityCurve = [equity];
+  let positionActive = false;
+  let entryPrice = null;
+  let entryIndex = null;
+  let pendingEntry = false;
+  let pendingExit = false;
+  const tradeReturns = [];
+
+  for (let index = 0; index < prices.length - 1; index += 1) {
+    const slice = prices.slice(0, index + 1);
+    const signal = signalFn(slice);
+
+    if (!positionActive && signal === "buy") {
+      pendingEntry = true;
+    } else if (positionActive && signal === "sell") {
+      pendingExit = true;
+    }
+
+    const nextIndex = index + 1;
+    const hasPositionForInterval = positionActive && entryIndex != null && entryIndex <= index;
+    if (hasPositionForInterval) {
+      const currentPrice = prices[index];
+      const nextPrice = prices[nextIndex];
+      if (Number.isFinite(currentPrice) && Number.isFinite(nextPrice) && currentPrice > 0) {
+        equity *= nextPrice / currentPrice;
+      }
+    }
+
+    if (pendingEntry && !positionActive) {
+      const entry = prices[nextIndex];
+      if (Number.isFinite(entry) && entry > 0) {
+        positionActive = true;
+        entryPrice = entry;
+        entryIndex = nextIndex;
+      }
+      pendingEntry = false;
+    }
+
+    if (pendingExit && positionActive && entryPrice != null && entryIndex != null && nextIndex >= entryIndex) {
+      const exitPrice = prices[nextIndex];
+      if (Number.isFinite(exitPrice) && entryPrice > 0) {
+        tradeReturns.push(((exitPrice - entryPrice) / entryPrice) * 100);
+      }
+      positionActive = false;
+      entryPrice = null;
+      entryIndex = null;
+      pendingExit = false;
+    }
+
+    equityCurve.push(equity);
+  }
+
+  const finalPrice = prices[prices.length - 1];
+  if (positionActive && entryPrice != null && Number.isFinite(finalPrice) && entryPrice > 0) {
+    tradeReturns.push(((finalPrice - entryPrice) / entryPrice) * 100);
+  }
+
+  const trades = tradeReturns.length;
+  const wins = tradeReturns.filter((value) => value > 0).length;
+  const winRate = trades ? (wins / trades) * 100 : 0;
+  const avgReturn = trades ? tradeReturns.reduce((sum, value) => sum + value, 0) / trades : 0;
+  const buyHoldReturn =
+    prices.length >= 2 && Number.isFinite(prices[0]) && prices[0] > 0
+      ? ((finalPrice - prices[0]) / prices[0]) * 100
+      : 0;
+
+  return {
+    hasEnoughData: true,
+    trades,
+    winRate,
+    avgReturn,
+    maxDrawdown: calculateMaxDrawdown(equityCurve),
+    buyHoldReturn,
+    tradeReturns,
+    equityCurve,
+  };
+}
+
+function getBacktestSummary(symbol, prices) {
+  const normalizedSymbol = normalizeSymbolInput(symbol ?? "");
+  if (!normalizedSymbol) {
+    return runBacktest30d(prices ?? []);
+  }
+  const dateStamp = getBacktestDateStamp();
+  const cacheKey = getBacktestCacheKey(normalizedSymbol, dateStamp);
+  const cached = storageAdapter.get(cacheKey);
+  if (cached?.summary) {
+    return cached.summary;
+  }
+  const summary = runBacktest30d(prices ?? []);
+  if (summary.hasEnoughData) {
+    storageAdapter.set(cacheKey, { summary, storedAt: Date.now() });
+  }
+  return summary;
+}
+
 function classifyTimeHorizon({ volatilityLevel, trendStrength }) {
   if (volatilityLevel === "high" && trendStrength === "weak") {
     return { label: "Scalp (minutes–hours)", shortLabel: "Scalp" };
@@ -2225,6 +2383,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const lastCandleTimestamp =
     marketEntry?.lastHistoricalTimestamp ?? marketEntry?.quoteAsOf ?? marketEntry?.lastUpdatedAt ?? null;
   const indicatorSnapshot = getCachedIndicatorSnapshot(symbol, prices, lastCandleTimestamp);
+  const backtestSummary = getBacktestSummary(symbol, prices);
   const priceContext = resolvePriceContext(marketEntry);
   const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
   const hasHistory = prices.length >= 10;
@@ -2301,6 +2460,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
         atrPercent: null,
       }),
       timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
+      backtest: backtestSummary,
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
     };
@@ -2390,6 +2550,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       atrPercent,
     }),
     timeHorizon: calculateTimeHorizon(prices, atrLike),
+    backtest: backtestSummary,
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
     generatedAt: new Date().toLocaleString(),
   };
@@ -2554,6 +2715,32 @@ function renderLoadingState(symbol) {
   if (resultDisclaimer) {
     resultDisclaimer.textContent = "Educational demo only — not financial advice.";
   }
+  if (resultBacktestStatus) {
+    resultBacktestStatus.textContent = "Loading...";
+    resultBacktestStatus.classList.remove("hidden");
+  }
+  if (resultBacktestList) {
+    resultBacktestList.classList.add("hidden");
+  }
+  if (resultBacktestTrades) {
+    resultBacktestTrades.textContent = "—";
+  }
+  if (resultBacktestWinRate) {
+    resultBacktestWinRate.textContent = "—";
+  }
+  if (resultBacktestAvgReturn) {
+    resultBacktestAvgReturn.textContent = "—";
+  }
+  if (resultBacktestDrawdown) {
+    resultBacktestDrawdown.textContent = "—";
+  }
+  if (resultBacktestBuyHold) {
+    resultBacktestBuyHold.textContent = "—";
+  }
+  if (resultBacktestDisclaimer) {
+    resultBacktestDisclaimer.textContent =
+      "Educational demo. Based on last 30 trading days. Assumes next-day fills. Not financial advice.";
+  }
 }
 
 function renderResult(result) {
@@ -2690,6 +2877,58 @@ function renderResult(result) {
     if (planHoldBreakdownTrigger) {
       planHoldBreakdownTrigger.textContent = "";
     }
+  }
+  const backtest = result.backtest ?? null;
+  if (backtest?.hasEnoughData) {
+    if (resultBacktestStatus) {
+      resultBacktestStatus.textContent = "";
+      resultBacktestStatus.classList.add("hidden");
+    }
+    if (resultBacktestList) {
+      resultBacktestList.classList.remove("hidden");
+    }
+    if (resultBacktestTrades) {
+      resultBacktestTrades.textContent = `${backtest.trades}`;
+    }
+    if (resultBacktestWinRate) {
+      resultBacktestWinRate.textContent = formatPercentNoSign(backtest.winRate);
+    }
+    if (resultBacktestAvgReturn) {
+      resultBacktestAvgReturn.textContent = formatPercent(backtest.avgReturn);
+    }
+    if (resultBacktestDrawdown) {
+      resultBacktestDrawdown.textContent = formatPercentNoSign(backtest.maxDrawdown);
+    }
+    if (resultBacktestBuyHold) {
+      resultBacktestBuyHold.textContent = formatPercent(backtest.buyHoldReturn);
+    }
+  } else {
+    if (resultBacktestStatus) {
+      resultBacktestStatus.textContent = "Not enough data";
+      resultBacktestStatus.classList.remove("hidden");
+    }
+    if (resultBacktestList) {
+      resultBacktestList.classList.add("hidden");
+    }
+    if (resultBacktestTrades) {
+      resultBacktestTrades.textContent = "—";
+    }
+    if (resultBacktestWinRate) {
+      resultBacktestWinRate.textContent = "—";
+    }
+    if (resultBacktestAvgReturn) {
+      resultBacktestAvgReturn.textContent = "—";
+    }
+    if (resultBacktestDrawdown) {
+      resultBacktestDrawdown.textContent = "—";
+    }
+    if (resultBacktestBuyHold) {
+      resultBacktestBuyHold.textContent = "—";
+    }
+  }
+  if (resultBacktestDisclaimer) {
+    resultBacktestDisclaimer.textContent =
+      "Educational demo. Based on last 30 trading days. Assumes next-day fills. Not financial advice.";
   }
   resultGenerated.textContent = `Generated ${result.generatedAt}`;
   resultDisclaimer.textContent = result.disclaimer;
@@ -4830,6 +5069,7 @@ const appCore = {
   buildSignalReasons,
   buildInvalidationRules,
   formatTimestamp,
+  runBacktest30d,
   getMarketIndicatorData,
   handleMarketRowAction,
   updateMarketRowCells,
