@@ -63,6 +63,36 @@ const planHoldBreakdownTrigger = isBrowser
   ? document.getElementById("plan-hold-breakdown-trigger")
   : null;
 
+const signalDrawer = isBrowser ? document.getElementById("signal-drawer") : null;
+const signalDrawerOverlay = isBrowser ? document.getElementById("signal-drawer-overlay") : null;
+const signalDrawerClose = isBrowser ? document.getElementById("signal-drawer-close") : null;
+const signalDrawerBody = isBrowser ? document.getElementById("signal-drawer-body") : null;
+const signalDrawerSkeleton = isBrowser ? document.getElementById("signal-drawer-skeleton") : null;
+const signalDrawerAction = isBrowser ? document.getElementById("drawer-action") : null;
+const signalDrawerSymbol = isBrowser ? document.getElementById("drawer-symbol") : null;
+const signalDrawerSessionBadge = isBrowser ? document.getElementById("drawer-session-badge") : null;
+const signalDrawerSourceBadge = isBrowser ? document.getElementById("drawer-source-badge") : null;
+const signalDrawerAsOf = isBrowser ? document.getElementById("drawer-as-of") : null;
+const signalDrawerScore = isBrowser ? document.getElementById("drawer-score") : null;
+const signalDrawerConfidence = isBrowser ? document.getElementById("drawer-confidence") : null;
+const signalDrawerEntry = isBrowser ? document.getElementById("drawer-entry") : null;
+const signalDrawerStopRow = isBrowser ? document.getElementById("drawer-stop-row") : null;
+const signalDrawerStop = isBrowser ? document.getElementById("drawer-stop") : null;
+const signalDrawerTakeProfitRow = isBrowser ? document.getElementById("drawer-take-profit-row") : null;
+const signalDrawerTakeProfit = isBrowser ? document.getElementById("drawer-take-profit") : null;
+const signalDrawerPosition = isBrowser ? document.getElementById("drawer-position") : null;
+const signalDrawerReasoning = isBrowser ? document.getElementById("drawer-reasoning") : null;
+const signalDrawerInvalidation = isBrowser ? document.getElementById("drawer-invalidation") : null;
+const signalDrawerBacktest = isBrowser ? document.getElementById("drawer-backtest") : null;
+const signalDrawerBacktestStatus = isBrowser ? document.getElementById("drawer-backtest-status") : null;
+const signalDrawerBacktestList = isBrowser ? document.getElementById("drawer-backtest-list") : null;
+const signalDrawerBacktestTrades = isBrowser ? document.getElementById("drawer-backtest-trades") : null;
+const signalDrawerBacktestWinRate = isBrowser ? document.getElementById("drawer-backtest-win-rate") : null;
+const signalDrawerBacktestAvgReturn = isBrowser ? document.getElementById("drawer-backtest-avg-return") : null;
+const signalDrawerBacktestDrawdown = isBrowser ? document.getElementById("drawer-backtest-drawdown") : null;
+const signalDrawerBacktestBuyHold = isBrowser ? document.getElementById("drawer-backtest-buy-hold") : null;
+const signalDrawerOpenFull = isBrowser ? document.getElementById("drawer-open-full") : null;
+
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
 const marketOpenText = isBrowser ? document.getElementById("market-open-text") : null;
@@ -185,6 +215,7 @@ let marketState = [];
 let marketStateIndex = new Map();
 let activeWatchlistSymbols = new Set();
 const extraSymbolData = new Map();
+let signalDrawerController = null;
 
 const quoteFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -238,6 +269,10 @@ const lastKnownQuotes = new Map();
 const historicalCache = new Map();
 const inflightHistoricalRequests = new Map();
 const inflightQuoteRequests = new Map();
+const analysisCache = new Map();
+
+const ANALYSIS_CACHE_PREFIX = "analysis_cache_v1_";
+const ANALYSIS_CACHE_TTL_MS = 3 * 60 * 1000;
 const marketIndicatorState = { usingCached: false };
 const lastQuoteRequestStatus = new Map();
 const indicatorCache = new Map();
@@ -427,6 +462,51 @@ function createStorageAdapter(storage) {
   };
 }
 
+function getAnalysisCacheKey(symbol) {
+  return `${ANALYSIS_CACHE_PREFIX}${symbol}`;
+}
+
+function getCachedAnalysis(symbol, { now = Date.now(), storage = storageAdapter } = {}) {
+  const normalized = normalizeSymbolInput(symbol ?? "");
+  if (!normalized) {
+    return null;
+  }
+  const cached = analysisCache.get(normalized);
+  if (cached && now - cached.ts < ANALYSIS_CACHE_TTL_MS) {
+    return cached.payload;
+  }
+  if (cached) {
+    analysisCache.delete(normalized);
+  }
+  const stored = storage?.get?.(getAnalysisCacheKey(normalized));
+  if (!stored || typeof stored !== "object") {
+    return null;
+  }
+  if (now - stored.ts >= ANALYSIS_CACHE_TTL_MS) {
+    return null;
+  }
+  analysisCache.set(normalized, stored);
+  return stored.payload ?? null;
+}
+
+function setCachedAnalysis(symbol, payload, { now = Date.now(), storage = storageAdapter } = {}) {
+  const normalized = normalizeSymbolInput(symbol ?? "");
+  if (!normalized) {
+    return null;
+  }
+  const entry = { ts: now, payload };
+  analysisCache.set(normalized, entry);
+  storage?.set?.(getAnalysisCacheKey(normalized), entry);
+  return entry;
+}
+
+function resetAnalysisCache({ storage = storageAdapter } = {}) {
+  analysisCache.clear();
+  if (!storage?.get) {
+    return;
+  }
+}
+
 function isValidWatchlistSymbol(symbol) {
   const symbolPattern = /^[A-Z0-9.-]{1,10}$/;
   return symbolPattern.test(symbol);
@@ -593,6 +673,18 @@ function loadPersistedFormState(storage) {
   } catch (error) {
     return null;
   }
+}
+
+function getAnalysisInputDefaults(storage = localStorage) {
+  const persisted = loadPersistedFormState(storage);
+  const cashValue = persisted?.cash ? Number.parseFloat(persisted.cash) : 10000;
+  const riskPercentValue = persisted?.riskPercent ? Number.parseFloat(persisted.riskPercent) : null;
+  return {
+    cash: Number.isFinite(cashValue) && cashValue > 0 ? cashValue : 10000,
+    risk: persisted?.risk ?? "moderate",
+    positionSizingMode: persisted?.positionSizing ?? POSITION_SIZING_MODES.CASH,
+    riskPercent: Number.isFinite(riskPercentValue) ? riskPercentValue : null,
+  };
 }
 
 function setRiskPercentError(message, { errorElement = riskPercentError } = {}) {
@@ -2490,6 +2582,23 @@ function calculateTradePlan({
   };
 }
 
+function analyzeSymbol({ symbol, cash, riskTolerance, sizingMode, riskPercent, mode } = {}) {
+  const normalized = normalizeSymbolInput(symbol ?? "");
+  const resolvedCash = Number.isFinite(cash) && cash > 0 ? cash : 10000;
+  const resolvedRisk = Object.keys(riskLimits).includes(riskTolerance) ? riskTolerance : "moderate";
+  const resolvedSizingMode =
+    sizingMode === POSITION_SIZING_MODES.RISK_PERCENT ? POSITION_SIZING_MODES.RISK_PERCENT : POSITION_SIZING_MODES.CASH;
+  const resolvedRiskPercent = Number.isFinite(riskPercent) ? riskPercent : null;
+  return analyzeTrade({
+    symbol: normalized,
+    cash: resolvedCash,
+    risk: resolvedRisk,
+    positionSizingMode: resolvedSizingMode,
+    riskPercent: resolvedRiskPercent,
+    mode,
+  });
+}
+
 function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const marketEntry = getStockEntry(symbol);
   const prices = marketEntry?.history ?? [];
@@ -3047,6 +3156,349 @@ function renderResult(result) {
   resultDisclaimer.textContent = result.disclaimer;
   resultCard.classList.remove("hidden");
   scheduleResultScroll(resultCard);
+}
+
+function renderSignalDrawerLoading(symbol) {
+  if (!signalDrawer) {
+    return;
+  }
+  if (signalDrawerSymbol) {
+    signalDrawerSymbol.textContent = symbol ?? "";
+  }
+  if (signalDrawerAction) {
+    signalDrawerAction.textContent = "LOADING";
+    signalDrawerAction.className = "signal-pill hold";
+  }
+  if (signalDrawerScore) {
+    signalDrawerScore.textContent = "—";
+  }
+  if (signalDrawerConfidence) {
+    signalDrawerConfidence.textContent = "—";
+  }
+  if (signalDrawerEntry) {
+    signalDrawerEntry.textContent = "—";
+  }
+  if (signalDrawerStop) {
+    signalDrawerStop.textContent = "—";
+  }
+  if (signalDrawerTakeProfit) {
+    signalDrawerTakeProfit.textContent = "—";
+  }
+  if (signalDrawerPosition) {
+    signalDrawerPosition.textContent = "—";
+  }
+  if (signalDrawerReasoning) {
+    signalDrawerReasoning.innerHTML = "<li>Gathering signal context...</li>";
+  }
+  if (signalDrawerInvalidation) {
+    signalDrawerInvalidation.innerHTML = "<li>Preparing invalidation rules...</li>";
+  }
+  if (signalDrawerSkeleton) {
+    signalDrawerSkeleton.classList.remove("hidden");
+  }
+  if (signalDrawerBody) {
+    signalDrawerBody.classList.add("hidden");
+  }
+}
+
+function renderSignalDrawerResult(result) {
+  if (!signalDrawer) {
+    return;
+  }
+  const action = result.action ?? "hold";
+  if (signalDrawerAction) {
+    signalDrawerAction.textContent = action.toUpperCase();
+    signalDrawerAction.className = `signal-pill ${action}`;
+  }
+  if (signalDrawerSymbol) {
+    signalDrawerSymbol.textContent = result.symbol;
+  }
+  const entry = getStockEntry(result.symbol);
+  if (signalDrawerSessionBadge) {
+    const sessionBadge = getSessionBadgeForSession(entry?.quoteSession ?? QUOTE_SESSIONS.CLOSED);
+    signalDrawerSessionBadge.textContent = sessionBadge.label;
+    signalDrawerSessionBadge.className = `session-badge ${sessionBadge.className}`;
+    signalDrawerSessionBadge.title = sessionBadge.tooltip;
+  }
+  if (signalDrawerSourceBadge) {
+    const sourceBadge = getSourceBadge(entry?.dataSource ?? QUOTE_SOURCES.CACHED);
+    signalDrawerSourceBadge.textContent = sourceBadge.label;
+    signalDrawerSourceBadge.className = `session-badge ${sourceBadge.className}`;
+    signalDrawerSourceBadge.title = sourceBadge.tooltip;
+  }
+  if (signalDrawerAsOf) {
+    const asOf = entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? null;
+    signalDrawerAsOf.textContent = asOf ? `As of ${formatAsOf(asOf, { tz: "UTC" })}` : "As of unknown UTC";
+  }
+  if (signalDrawerScore) {
+    signalDrawerScore.textContent = result.signalScore?.total != null ? `${result.signalScore.total}` : "—";
+  }
+  if (signalDrawerConfidence) {
+    if (result.confidenceLabel && result.confidenceScore != null) {
+      signalDrawerConfidence.textContent = `${result.confidenceLabel} (${result.confidenceScore}%)`;
+    } else {
+      signalDrawerConfidence.textContent = "—";
+    }
+  }
+  if (signalDrawerEntry) {
+    signalDrawerEntry.textContent = result.tradePlan.entryDisplay;
+  }
+  if (signalDrawerStop) {
+    signalDrawerStop.textContent = result.tradePlan.stopLossDisplay;
+  }
+  if (signalDrawerTakeProfit) {
+    signalDrawerTakeProfit.textContent = result.tradePlan.takeProfitDisplay;
+  }
+  if (signalDrawerPosition) {
+    signalDrawerPosition.textContent = result.tradePlan.positionSizeDisplay;
+  }
+  if (signalDrawerStopRow) {
+    signalDrawerStopRow.classList.toggle("hidden", result.tradePlan.isHold);
+  }
+  if (signalDrawerTakeProfitRow) {
+    signalDrawerTakeProfitRow.classList.toggle("hidden", result.tradePlan.isHold);
+  }
+  if (signalDrawerReasoning) {
+    signalDrawerReasoning.innerHTML = result.confidenceReasons.map((line) => `<li>${line}</li>`).join("");
+  }
+  if (signalDrawerInvalidation) {
+    const rules = Array.isArray(result.invalidationRules) ? result.invalidationRules : [];
+    signalDrawerInvalidation.innerHTML = rules.map((rule) => `<li>${rule}</li>`).join("");
+  }
+  if (signalDrawerBacktest) {
+    const backtest = result.backtest ?? null;
+    if (backtest?.hasEnoughData) {
+      if (signalDrawerBacktestStatus) {
+        signalDrawerBacktestStatus.textContent = "";
+        signalDrawerBacktestStatus.classList.add("hidden");
+      }
+      if (signalDrawerBacktestList) {
+        signalDrawerBacktestList.classList.remove("hidden");
+      }
+      if (signalDrawerBacktestTrades) {
+        signalDrawerBacktestTrades.textContent = `${backtest.trades}`;
+      }
+      if (signalDrawerBacktestWinRate) {
+        signalDrawerBacktestWinRate.textContent = formatPercentNoSign(backtest.winRate);
+      }
+      if (signalDrawerBacktestAvgReturn) {
+        signalDrawerBacktestAvgReturn.textContent = formatPercent(backtest.avgReturn);
+      }
+      if (signalDrawerBacktestDrawdown) {
+        signalDrawerBacktestDrawdown.textContent = formatPercentNoSign(backtest.maxDrawdown);
+      }
+      if (signalDrawerBacktestBuyHold) {
+        signalDrawerBacktestBuyHold.textContent = formatPercent(backtest.buyHoldReturn);
+      }
+    } else {
+      if (signalDrawerBacktestStatus) {
+        signalDrawerBacktestStatus.textContent = "Not enough data";
+        signalDrawerBacktestStatus.classList.remove("hidden");
+      }
+      if (signalDrawerBacktestList) {
+        signalDrawerBacktestList.classList.add("hidden");
+      }
+      if (signalDrawerBacktestTrades) {
+        signalDrawerBacktestTrades.textContent = "—";
+      }
+      if (signalDrawerBacktestWinRate) {
+        signalDrawerBacktestWinRate.textContent = "—";
+      }
+      if (signalDrawerBacktestAvgReturn) {
+        signalDrawerBacktestAvgReturn.textContent = "—";
+      }
+      if (signalDrawerBacktestDrawdown) {
+        signalDrawerBacktestDrawdown.textContent = "—";
+      }
+      if (signalDrawerBacktestBuyHold) {
+        signalDrawerBacktestBuyHold.textContent = "—";
+      }
+    }
+  }
+  if (signalDrawerSkeleton) {
+    signalDrawerSkeleton.classList.add("hidden");
+  }
+  if (signalDrawerBody) {
+    signalDrawerBody.classList.remove("hidden");
+  }
+}
+
+function createSignalDrawerController({
+  drawer = signalDrawer,
+  overlay = signalDrawerOverlay,
+  closeButton = signalDrawerClose,
+  openFullButton = signalDrawerOpenFull,
+  documentRef = typeof document !== "undefined" ? document : null,
+  body = typeof document !== "undefined" ? document.body : null,
+  loadSnapshot = loadSymbolSnapshot,
+  analyze = analyzeSymbol,
+  getCached = getCachedAnalysis,
+  setCached = setCachedAnalysis,
+  getInputs = () => getAnalysisInputDefaults(localStorage),
+  buildUrl = buildAnalyzeUrl,
+} = {}) {
+  if (!drawer || !overlay || !documentRef) {
+    return null;
+  }
+  let isOpen = false;
+  let lastFocused = null;
+  let bodyOverflow = "";
+  let activeRequestId = 0;
+
+  const focusableSelector =
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+  const getFocusables = () =>
+    typeof drawer.querySelectorAll === "function" ? Array.from(drawer.querySelectorAll(focusableSelector)) : [];
+
+  const setOpenState = (open) => {
+    isOpen = open;
+    drawer.classList.toggle("hidden", !open);
+    overlay.classList.toggle("hidden", !open);
+    if (body) {
+      body.classList.toggle("drawer-open", open);
+      if (open) {
+        bodyOverflow = body.style.overflow;
+        body.style.overflow = "hidden";
+      } else {
+        body.style.overflow = bodyOverflow;
+      }
+    }
+    if (open) {
+      drawer.setAttribute("aria-hidden", "false");
+    } else {
+      drawer.setAttribute("aria-hidden", "true");
+    }
+  };
+
+  const close = () => {
+    if (!isOpen) {
+      return;
+    }
+    setOpenState(false);
+    if (lastFocused?.focus) {
+      lastFocused.focus();
+    }
+  };
+
+  const trapFocus = (event) => {
+    if (event.key !== "Tab" || !isOpen) {
+      return;
+    }
+    const focusables = getFocusables();
+    if (!focusables.length) {
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && documentRef.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && documentRef.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const handleKeydown = (event) => {
+    if (!isOpen) {
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    trapFocus(event);
+  };
+
+  overlay.addEventListener("click", () => close());
+  closeButton?.addEventListener("click", () => close());
+  documentRef.addEventListener("keydown", handleKeydown);
+
+  const open = async (symbol) => {
+    const normalized = normalizeSymbolInput(symbol ?? "");
+    if (!normalized) {
+      return false;
+    }
+    lastFocused = documentRef.activeElement;
+    setOpenState(true);
+    if (openFullButton && buildUrl) {
+      openFullButton.href = buildUrl(normalized, { autoRun: true });
+    }
+    const focusables = getFocusables();
+    if (focusables[0]?.focus) {
+      focusables[0].focus();
+    } else if (drawer.focus) {
+      drawer.focus();
+    }
+    const cached = getCached(normalized);
+    if (cached) {
+      renderSignalDrawerResult(cached);
+      return true;
+    }
+    renderSignalDrawerLoading(normalized);
+    const requestId = (activeRequestId += 1);
+    let usedFallback = false;
+    try {
+      await loadSnapshot(normalized, {
+        onIntermediateSnapshot: (intermediate) => {
+          if (usedFallback) {
+            return;
+          }
+          if (!intermediate?.entry || !hasAnyMarketData(intermediate.entry)) {
+            return;
+          }
+          usedFallback = true;
+          extraSymbolData.set(normalized, intermediate.entry);
+        },
+      });
+    } catch (error) {
+      const fallbackEntry = applyCachedMarketData(normalized, getStockEntry(normalized));
+      extraSymbolData.set(normalized, fallbackEntry);
+    }
+    const inputs = getInputs();
+    const result = await Promise.resolve(
+      analyze({
+        symbol: normalized,
+        cash: inputs.cash,
+        riskTolerance: inputs.risk,
+        sizingMode: inputs.positionSizingMode,
+        riskPercent: inputs.riskPercent,
+        mode: "drawer",
+      }),
+    );
+    if (requestId !== activeRequestId) {
+      return false;
+    }
+    setCached(normalized, result);
+    renderSignalDrawerResult(result);
+    return true;
+  };
+
+  return {
+    open,
+    close,
+    get isOpen() {
+      return isOpen;
+    },
+  };
+}
+
+function initSignalDrawer() {
+  if (signalDrawerController) {
+    return signalDrawerController;
+  }
+  signalDrawerController = createSignalDrawerController();
+  return signalDrawerController;
+}
+
+function openSignalDrawer(symbol) {
+  const controller = initSignalDrawer();
+  if (!controller) {
+    return false;
+  }
+  return controller.open(symbol);
 }
 
 function handleMarketRowAction({ symbol, autoRun, onFillSymbol, onScrollToForm, onSubmit }) {
@@ -4883,12 +5335,13 @@ function initTradePage() {
             marketIndicatorState.usingCached = true;
             updateMarketIndicator();
             perf.start("compute");
-            const interimResult = analyzeTrade({
+            const interimResult = analyzeSymbol({
               symbol,
               cash: cashValue,
-              risk,
-              positionSizingMode: safePositionSizing,
+              riskTolerance: risk,
+              sizingMode: safePositionSizing,
               riskPercent: riskPercentValue,
+              mode: "trade",
             });
             perf.end("compute");
             perf.start("render");
@@ -4951,12 +5404,13 @@ function initTradePage() {
         setFormLoadingState(false);
       }
       perf.start("compute");
-      const result = analyzeTrade({
+      const result = analyzeSymbol({
         symbol,
         cash: cashValue,
-        risk,
-        positionSizingMode: safePositionSizing,
+        riskTolerance: risk,
+        sizingMode: safePositionSizing,
         riskPercent: riskPercentValue,
+        mode: "trade",
       });
       perf.end("compute");
       perf.start("render");
@@ -5017,11 +5471,14 @@ function initTradePage() {
   return didInit;
 }
 
-function initLivePage({ onAnalyze } = {}) {
+function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false } = {}) {
   if (!isBrowser) {
     return false;
   }
   let didInit = false;
+  initSignalDrawer();
+  const handleAnalyze = onAnalyze ?? openSignalDrawer;
+  const shouldRender = !skipRender;
   syncMarketStateWithWatchlist();
   sortBySelect = ensureSortControl() ?? sortBySelect;
   [
@@ -5038,9 +5495,11 @@ function initLivePage({ onAnalyze } = {}) {
     if (input) {
       didInit = true;
       input.addEventListener("input", () => {
-        renderMarketTable();
-        updateRefreshStatus();
-        scheduleNextMarketRefresh();
+        if (shouldRender) {
+          renderMarketTable();
+          updateRefreshStatus();
+          scheduleNextMarketRefresh();
+        }
       });
     }
   });
@@ -5090,10 +5549,14 @@ function initLivePage({ onAnalyze } = {}) {
       watchlistInput.value = "";
       setWatchlistError("");
       syncMarketStateWithWatchlist();
-      renderMarketTable();
-      updateRefreshStatus();
-      scheduleNextMarketRefresh(0);
-      refreshVisibleQuotes();
+      if (shouldRender) {
+        renderMarketTable();
+      }
+      if (shouldRender) {
+        updateRefreshStatus();
+        scheduleNextMarketRefresh(0);
+        refreshVisibleQuotes();
+      }
     });
   }
 
@@ -5114,8 +5577,8 @@ function initLivePage({ onAnalyze } = {}) {
         return;
       }
       event.preventDefault();
-      if (onAnalyze) {
-        onAnalyze(analyzeButton.dataset.symbol);
+      if (handleAnalyze) {
+        handleAnalyze(analyzeButton.dataset.symbol);
       }
     });
   }
@@ -5130,9 +5593,11 @@ function initLivePage({ onAnalyze } = {}) {
         if (action === "favorite") {
           event.preventDefault();
           favoritesStore.toggleFavorite(symbol);
-          renderMarketTable();
-          updateRefreshStatus();
-          scheduleNextMarketRefresh();
+          if (shouldRender) {
+            renderMarketTable();
+            updateRefreshStatus();
+            scheduleNextMarketRefresh();
+          }
           return;
         }
         if (action === "remove") {
@@ -5140,16 +5605,18 @@ function initLivePage({ onAnalyze } = {}) {
           const removed = removeSymbolFromWatchlist(symbol);
           if (removed) {
             syncMarketStateWithWatchlist();
-            renderMarketTable();
-            updateRefreshStatus();
-            scheduleNextMarketRefresh(0);
+            if (shouldRender) {
+              renderMarketTable();
+              updateRefreshStatus();
+              scheduleNextMarketRefresh(0);
+            }
           }
           return;
         }
         if (action === "analyze") {
           event.preventDefault();
-          if (onAnalyze) {
-            onAnalyze(symbol);
+          if (handleAnalyze) {
+            handleAnalyze(symbol);
           }
           return;
         }
@@ -5158,8 +5625,8 @@ function initLivePage({ onAnalyze } = {}) {
       if (!row) {
         return;
       }
-      if (onAnalyze) {
-        onAnalyze(row.dataset.symbol);
+      if (handleAnalyze) {
+        handleAnalyze(row.dataset.symbol);
       }
     });
 
@@ -5176,30 +5643,32 @@ function initLivePage({ onAnalyze } = {}) {
         return;
       }
       event.preventDefault();
-      if (onAnalyze) {
-        onAnalyze(row.dataset.symbol);
+      if (handleAnalyze) {
+        handleAnalyze(row.dataset.symbol);
       }
     });
   }
 
-  loadPersistentQuoteCache();
-  loadPersistentHistoricalCache();
-  hydrateMarketStateFromCache();
-  renderMarketTable();
-  loadInitialMarketData()
-    .then(renderMarketTable)
-    .catch((error) => {
-      logMarketDataEvent("error", {
-        event: "market_data_initial_failure",
-        provider: PROVIDER,
-        errorType: error.type ?? "unknown",
-        message: error.message,
+  if (!skipInitialLoad) {
+    loadPersistentQuoteCache();
+    loadPersistentHistoricalCache();
+    hydrateMarketStateFromCache();
+    renderMarketTable();
+    loadInitialMarketData()
+      .then(renderMarketTable)
+      .catch((error) => {
+        logMarketDataEvent("error", {
+          event: "market_data_initial_failure",
+          provider: PROVIDER,
+          errorType: error.type ?? "unknown",
+          message: error.message,
+        });
       });
-    });
-  if (document?.addEventListener) {
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    if (document?.addEventListener) {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+    scheduleNextMarketRefresh(0);
   }
-  scheduleNextMarketRefresh(0);
 
   return didInit;
 }
@@ -5242,6 +5711,7 @@ const appCore = {
   calculateAtrLike,
   classifyTimeHorizon,
   calculateTimeHorizon,
+  analyzeSymbol,
   calculateSignalConfidence,
   calculateSignalScore,
   getConfidenceLabel,
@@ -5262,6 +5732,12 @@ const appCore = {
   buildTopOpportunitiesGroups,
   applyMarketFilters,
   removeSymbolFromWatchlist,
+  getCachedAnalysis,
+  setCachedAnalysis,
+  resetAnalysisCache,
+  createSignalDrawerController,
+  initSignalDrawer,
+  openSignalDrawer,
   buildAnalyzeUrl,
   initTradePage,
   initLivePage,
