@@ -3860,262 +3860,234 @@ async function refreshMarketBoard() {
   }
 }
 
-if (symbolInput) {
-  symbolInput.addEventListener("input", () => {
-    const normalized = normalizeSymbolInput(symbolInput.value);
-    if (symbolInput.value !== normalized) {
-      symbolInput.value = normalized;
-    }
-    const message = normalized ? getSymbolValidationMessage(normalized) : "";
-    if (message && normalized) {
-      setSymbolError(message);
-    } else if (!normalized) {
-      setSymbolError("");
-    }
-  });
-  symbolInput.addEventListener("blur", () => {
-    const normalized = normalizeSymbolInput(symbolInput.value);
-    symbolInput.value = normalized;
-    setSymbolError(getSymbolValidationMessage(normalized));
-  });
+function buildAnalyzeUrl(symbol, { autoRun = true } = {}) {
+  const normalized = normalizeSymbolInput(symbol ?? "");
+  if (!normalized) {
+    return "./";
+  }
+  const params = new URLSearchParams();
+  params.set("symbol", normalized);
+  if (autoRun) {
+    params.set("autorun", "1");
+  }
+  return `./index.html?${params.toString()}`;
 }
 
-if (symbolChips) {
-  symbolChips.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-symbol]");
-    if (!button) {
-      return;
-    }
-    const symbol = button.dataset.symbol ?? "";
-    if (symbolInput) {
-      symbolInput.value = symbol;
-      symbolInput.focus();
-    }
-    setSymbolError("");
-  });
-}
-
-if (marketBody) {
-  marketBody.addEventListener("click", (event) => {
-    const analyzeButton = event.target.closest("button[data-action='analyze']");
-    const row = event.target.closest("tr[data-symbol]");
-    if (!row) {
-      return;
-    }
-    if (analyzeButton) {
-      event.preventDefault();
-    }
-    handleMarketRowInteraction(row.dataset.symbol);
-  });
-
-  marketBody.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") {
-      return;
-    }
-    const analyzeButton = event.target.closest("button[data-action='analyze']");
-    if (analyzeButton) {
-      return;
-    }
-    const row = event.target.closest("tr[data-symbol]");
-    if (!row) {
-      return;
-    }
-    event.preventDefault();
-    handleMarketRowInteraction(row.dataset.symbol);
-  });
-}
-
-if (form) {
-  bindRiskPercentField({
-    positionSizingInput,
-    riskPercentField,
-    riskPercentInput,
-    riskPercentError,
-    storage: localStorage,
-    getFormState: getFormStateFromInputs,
-  });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (isSubmitting) {
-      return;
-    }
-    const formData = new FormData(form);
-    const symbol = normalizeSymbolInput(formData.get("symbol").toString());
-    if (symbolInput) {
-      symbolInput.value = symbol;
-    }
-    const cashValue = Number(formData.get("cash"));
-    const risk = formData.get("risk").toString();
-    const positionSizingMode = formData.get("positionSizing")?.toString() ?? POSITION_SIZING_MODES.CASH;
-    const riskPercentRaw = formData.get("riskPercent")?.toString() ?? "";
-    const riskPercentValue = Number.parseFloat(riskPercentRaw);
-
-    const validationErrors = [];
-    const symbolMessage = getSymbolValidationMessage(symbol);
-    setSymbolError(symbolMessage);
-    if (!Number.isFinite(cashValue) || cashValue <= 0) {
-      validationErrors.push("Cash balance must be greater than zero.");
-    }
-    if (!Object.keys(riskLimits).includes(risk)) {
-      validationErrors.push("Risk tolerance must be low, moderate, or high.");
-    }
-    const safePositionSizing =
-      positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
-        ? POSITION_SIZING_MODES.RISK_PERCENT
-        : POSITION_SIZING_MODES.CASH;
-    const riskPercentMessage = getRiskPercentValidationMessage(safePositionSizing, riskPercentRaw);
-    setRiskPercentError(riskPercentMessage);
-    if (riskPercentMessage) {
-      validationErrors.push(riskPercentMessage);
-    }
-
-    if (symbolMessage || validationErrors.length > 0) {
-      showErrors(validationErrors);
-      showStatus("");
-      resultCard.classList.add("hidden");
-      return;
-    }
-
-    persistFormState(localStorage, {
-      symbol,
-      cash: formData.get("cash").toString(),
-      risk,
-      positionSizing: safePositionSizing,
-      riskPercent: formData.get("riskPercent")?.toString?.() ?? "",
-    });
-
-    isSubmitting = true;
-    setFormLoadingState(true);
-    renderLoadingState(symbol);
-    showStatus("Generating AI Signal...");
-    const perf = createPerfTracker(PERF_DEBUG_ENABLED);
-    perf.start("total");
-    let usedCachedFallback = false;
-    try {
-      const snapshot = await loadSymbolSnapshot(symbol, {
-        perf,
-        onIntermediateSnapshot: (intermediate) => {
-          if (usedCachedFallback) {
-            return;
-          }
-          if (!intermediate?.entry || !hasAnyMarketData(intermediate.entry)) {
-            return;
-          }
-          usedCachedFallback = true;
-          extraSymbolData.set(symbol, intermediate.entry);
-          showStatus("Using cached data — refreshing with live quote...");
-          marketIndicatorState.usingCached = true;
-          updateMarketIndicator();
-          perf.start("compute");
-          const interimResult = analyzeTrade({
-            symbol,
-            cash: cashValue,
-            risk,
-            positionSizingMode: safePositionSizing,
-            riskPercent: riskPercentValue,
-          });
-          perf.end("compute");
-          perf.start("render");
-          renderResult(interimResult);
-          perf.end("render");
-        },
-      });
-      showErrors([]);
-      setSymbolError("");
-      let statusMessage = "";
-      if (snapshot?.status === "cache") {
-        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
-        marketIndicatorState.usingCached = true;
-        updateMarketIndicator();
-      } else if (snapshot?.status === "unavailable") {
-        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        statusMessage = snapshot.entry?.lastUpdatedAt
-          ? `Data unavailable — showing cached price from ${lastUpdated}.`
-          : "Data unavailable — please try again shortly.";
-        marketIndicatorState.usingCached = true;
-        updateMarketIndicator();
-      } else if (snapshot?.dataSource === "historical") {
-        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        statusMessage = `Live data unavailable — showing last close from ${lastUpdated}.`;
-      } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
-        const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-        statusMessage = `Market closed — showing last close from ${lastUpdated}.`;
-      } else {
-        statusMessage = usedCachedFallback ? "Updated with live data." : "";
+function initTradePage() {
+  if (!isBrowser) {
+    return false;
+  }
+  let didInit = false;
+  if (symbolInput) {
+    didInit = true;
+    symbolInput.addEventListener("input", () => {
+      const normalized = normalizeSymbolInput(symbolInput.value);
+      if (symbolInput.value !== normalized) {
+        symbolInput.value = normalized;
       }
-      showStatus(statusMessage);
-    } catch (error) {
-      if (error.type === "invalid_symbol") {
-        setSymbolError(`We couldn't find data for ${symbol}. Double-check the symbol and try again.`);
-        showErrors([]);
+      const message = normalized ? getSymbolValidationMessage(normalized) : "";
+      if (message && normalized) {
+        setSymbolError(message);
+      } else if (!normalized) {
+        setSymbolError("");
+      }
+    });
+    symbolInput.addEventListener("blur", () => {
+      const normalized = normalizeSymbolInput(symbolInput.value);
+      symbolInput.value = normalized;
+      setSymbolError(getSymbolValidationMessage(normalized));
+    });
+  }
+
+  if (symbolChips) {
+    didInit = true;
+    symbolChips.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-symbol]");
+      if (!button) {
+        return;
+      }
+      const symbol = button.dataset.symbol ?? "";
+      if (symbolInput) {
+        symbolInput.value = symbol;
+        symbolInput.focus();
+      }
+      setSymbolError("");
+    });
+  }
+
+  if (form) {
+    didInit = true;
+    bindRiskPercentField({
+      positionSizingInput,
+      riskPercentField,
+      riskPercentInput,
+      riskPercentError,
+      storage: localStorage,
+      getFormState: getFormStateFromInputs,
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (isSubmitting) {
+        return;
+      }
+      const formData = new FormData(form);
+      const symbol = normalizeSymbolInput(formData.get("symbol").toString());
+      if (symbolInput) {
+        symbolInput.value = symbol;
+      }
+      const cashValue = Number(formData.get("cash"));
+      const risk = formData.get("risk").toString();
+      const positionSizingMode = formData.get("positionSizing")?.toString() ?? POSITION_SIZING_MODES.CASH;
+      const riskPercentRaw = formData.get("riskPercent")?.toString() ?? "";
+      const riskPercentValue = Number.parseFloat(riskPercentRaw);
+
+      const validationErrors = [];
+      const symbolMessage = getSymbolValidationMessage(symbol);
+      setSymbolError(symbolMessage);
+      if (!Number.isFinite(cashValue) || cashValue <= 0) {
+        validationErrors.push("Cash balance must be greater than zero.");
+      }
+      if (!Object.keys(riskLimits).includes(risk)) {
+        validationErrors.push("Risk tolerance must be low, moderate, or high.");
+      }
+      const safePositionSizing =
+        positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
+          ? POSITION_SIZING_MODES.RISK_PERCENT
+          : POSITION_SIZING_MODES.CASH;
+      const riskPercentMessage = getRiskPercentValidationMessage(safePositionSizing, riskPercentRaw);
+      setRiskPercentError(riskPercentMessage);
+      if (riskPercentMessage) {
+        validationErrors.push(riskPercentMessage);
+      }
+
+      if (symbolMessage || validationErrors.length > 0) {
+        showErrors(validationErrors);
         showStatus("");
         resultCard.classList.add("hidden");
         return;
       }
-      logMarketDataEvent("error", {
-        event: "market_data_snapshot_failure",
-        provider: PROVIDER,
-        symbol,
-        errorType: error.type ?? "unknown",
-        message: error.message,
-      });
-      showErrors([]);
-      showStatus("Live data unavailable — please try again shortly.");
-      resultCard.classList.add("hidden");
-      return;
-    } finally {
-      isSubmitting = false;
-      setFormLoadingState(false);
-    }
-    perf.start("compute");
-    const result = analyzeTrade({
-      symbol,
-      cash: cashValue,
-      risk,
-      positionSizingMode: safePositionSizing,
-      riskPercent: riskPercentValue,
-    });
-    perf.end("compute");
-    perf.start("render");
-    renderResult(result);
-    perf.end("render");
-    perf.end("total");
-    const summary = perf.summary("total");
-    if (summary) {
-      const breakdown = summary.breakdown;
-      console.info(
-        `Generate AI Signal: total=${summary.total.toFixed(1)}ms | quote=${(
-          breakdown.fetchQuote ?? 0
-        ).toFixed(1)}ms | history=${(breakdown.fetchHistory ?? 0).toFixed(1)}ms | compute=${(
-          breakdown.compute ?? 0
-        ).toFixed(1)}ms | render=${(breakdown.render ?? 0).toFixed(1)}ms`,
-      );
-    }
-  });
-}
 
-sortBySelect = ensureSortControl() ?? sortBySelect;
-[
-  filterSearch,
-  filterSector,
-  filterCap,
-  filterSignal,
-  filterMin,
-  filterMax,
-  filterMonth,
-  sortBySelect,
-].forEach((input) => {
-  if (input) {
-    input.addEventListener("input", () => {
-      renderMarketTable();
-      updateRefreshStatus();
-      scheduleNextMarketRefresh();
+      persistFormState(localStorage, {
+        symbol,
+        cash: formData.get("cash").toString(),
+        risk,
+        positionSizing: safePositionSizing,
+        riskPercent: formData.get("riskPercent")?.toString?.() ?? "",
+      });
+
+      isSubmitting = true;
+      setFormLoadingState(true);
+      renderLoadingState(symbol);
+      showStatus("Generating AI Signal...");
+      const perf = createPerfTracker(PERF_DEBUG_ENABLED);
+      perf.start("total");
+      let usedCachedFallback = false;
+      try {
+        const snapshot = await loadSymbolSnapshot(symbol, {
+          perf,
+          onIntermediateSnapshot: (intermediate) => {
+            if (usedCachedFallback) {
+              return;
+            }
+            if (!intermediate?.entry || !hasAnyMarketData(intermediate.entry)) {
+              return;
+            }
+            usedCachedFallback = true;
+            extraSymbolData.set(symbol, intermediate.entry);
+            showStatus("Using cached data — refreshing with live quote...");
+            marketIndicatorState.usingCached = true;
+            updateMarketIndicator();
+            perf.start("compute");
+            const interimResult = analyzeTrade({
+              symbol,
+              cash: cashValue,
+              risk,
+              positionSizingMode: safePositionSizing,
+              riskPercent: riskPercentValue,
+            });
+            perf.end("compute");
+            perf.start("render");
+            renderResult(interimResult);
+            perf.end("render");
+          },
+        });
+        showErrors([]);
+        setSymbolError("");
+        let statusMessage = "";
+        if (snapshot?.status === "cache") {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
+          marketIndicatorState.usingCached = true;
+          updateMarketIndicator();
+        } else if (snapshot?.status === "unavailable") {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = snapshot.entry?.lastUpdatedAt
+            ? `Data unavailable — showing cached price from ${lastUpdated}.`
+            : "Data unavailable — please try again shortly.";
+          marketIndicatorState.usingCached = true;
+          updateMarketIndicator();
+        } else if (snapshot?.dataSource === "historical") {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = `Live data unavailable — showing last close from ${lastUpdated}.`;
+        } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = `Market closed — showing last close from ${lastUpdated}.`;
+        } else {
+          statusMessage = usedCachedFallback ? "Updated with live data." : "";
+        }
+        showStatus(statusMessage);
+      } catch (error) {
+        if (error.type === "invalid_symbol") {
+          setSymbolError(`We couldn't find data for ${symbol}. Double-check the symbol and try again.`);
+          showErrors([]);
+          showStatus("");
+          resultCard.classList.add("hidden");
+          return;
+        }
+        logMarketDataEvent("error", {
+          event: "market_data_snapshot_failure",
+          provider: PROVIDER,
+          symbol,
+          errorType: error.type ?? "unknown",
+          message: error.message,
+        });
+        showErrors([]);
+        showStatus("Live data unavailable — please try again shortly.");
+        resultCard.classList.add("hidden");
+        return;
+      } finally {
+        isSubmitting = false;
+        setFormLoadingState(false);
+      }
+      perf.start("compute");
+      const result = analyzeTrade({
+        symbol,
+        cash: cashValue,
+        risk,
+        positionSizingMode: safePositionSizing,
+        riskPercent: riskPercentValue,
+      });
+      perf.end("compute");
+      perf.start("render");
+      renderResult(result);
+      perf.end("render");
+      perf.end("total");
+      const summary = perf.summary("total");
+      if (summary) {
+        const breakdown = summary.breakdown;
+        console.info(
+          `Generate AI Signal: total=${summary.total.toFixed(1)}ms | quote=${(
+            breakdown.fetchQuote ?? 0
+          ).toFixed(1)}ms | history=${(breakdown.fetchHistory ?? 0
+          ).toFixed(1)}ms | compute=${(
+            breakdown.compute ?? 0
+          ).toFixed(1)}ms | render=${(breakdown.render ?? 0
+          ).toFixed(1)}ms`,
+        );
+      }
     });
   }
-});
 
-if (isBrowser) {
   const restoredState = loadPersistedFormState(localStorage);
   if (restoredState) {
     if (symbolInput) {
@@ -4137,6 +4109,86 @@ if (isBrowser) {
   updateRiskPercentVisibility(positionSizingInput?.value ?? POSITION_SIZING_MODES.CASH);
   loadPersistentQuoteCache();
   loadPersistentHistoricalCache();
+
+  const params = new URLSearchParams(window.location.search);
+  const symbolParam = normalizeSymbolInput(params.get("symbol") ?? "");
+  const autoRunParam = params.get("autorun") === "1";
+  if (symbolInput && symbolParam) {
+    symbolInput.value = symbolParam;
+    setSymbolError("");
+    if (autoRunParam && form?.requestSubmit) {
+      setTimeout(() => {
+        form.requestSubmit();
+      }, 0);
+    }
+  }
+
+  return didInit;
+}
+
+function initLivePage({ onAnalyze } = {}) {
+  if (!isBrowser) {
+    return false;
+  }
+  let didInit = false;
+  sortBySelect = ensureSortControl() ?? sortBySelect;
+  [
+    filterSearch,
+    filterSector,
+    filterCap,
+    filterSignal,
+    filterMin,
+    filterMax,
+    filterMonth,
+    sortBySelect,
+  ].forEach((input) => {
+    if (input) {
+      didInit = true;
+      input.addEventListener("input", () => {
+        renderMarketTable();
+        updateRefreshStatus();
+        scheduleNextMarketRefresh();
+      });
+    }
+  });
+
+  if (marketBody) {
+    didInit = true;
+    marketBody.addEventListener("click", (event) => {
+      const analyzeButton = event.target.closest("button[data-action='analyze']");
+      const row = event.target.closest("tr[data-symbol]");
+      if (!row) {
+        return;
+      }
+      if (analyzeButton) {
+        event.preventDefault();
+      }
+      if (onAnalyze) {
+        onAnalyze(row.dataset.symbol);
+      }
+    });
+
+    marketBody.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      const analyzeButton = event.target.closest("button[data-action='analyze']");
+      if (analyzeButton) {
+        return;
+      }
+      const row = event.target.closest("tr[data-symbol]");
+      if (!row) {
+        return;
+      }
+      event.preventDefault();
+      if (onAnalyze) {
+        onAnalyze(row.dataset.symbol);
+      }
+    });
+  }
+
+  loadPersistentQuoteCache();
+  loadPersistentHistoricalCache();
   hydrateMarketStateFromCache();
   renderMarketTable();
   loadInitialMarketData()
@@ -4153,56 +4205,67 @@ if (isBrowser) {
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
   scheduleNextMarketRefresh(0);
+
+  return didInit;
+}
+
+const appCore = {
+  MarketDataError,
+  fetchJsonWithRetry,
+  fetchWithTimeout,
+  isValidSymbol,
+  normalizeSymbolInput,
+  getSymbolValidationMessage,
+  persistFormState,
+  loadPersistedFormState,
+  getRiskPercentValidationMessage,
+  applyRiskPercentVisibility,
+  bindRiskPercentField,
+  getQuote,
+  fetchHistoricalSeries,
+  deriveMarketSession,
+  loadSymbolSnapshot,
+  resetSymbolCache,
+  extraSymbolData,
+  resetQuoteCache,
+  setLastKnownQuote,
+  hydrateMarketStateFromCache,
+  getMarketRowDisplay,
+  getRefreshIntervalForSession,
+  getNextRefreshDelay,
+  applyRateLimitBackoff,
+  isRateLimitBackoffActive,
+  updateStockWithQuote,
+  updateStockWithHistorical,
+  getStockEntry,
+  calculateAtrLike,
+  classifyTimeHorizon,
+  calculateTimeHorizon,
+  calculateSignalConfidence,
+  calculateSignalScore,
+  getConfidenceLabel,
+  calculateTradePlan,
+  buildSignalReasons,
+  buildInvalidationRules,
+  formatTimestamp,
+  getMarketIndicatorData,
+  handleMarketRowAction,
+  updateMarketRowCells,
+  getMarketTableColumnKeys,
+  buildMarketRowMarkup,
+  getScrollBehavior,
+  scheduleResultScroll,
+  sortMarketEntries,
+  getSortValue,
+  buildAnalyzeUrl,
+  initTradePage,
+  initLivePage,
+};
+
+if (typeof window !== "undefined") {
+  window.AppCore = appCore;
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {
-    MarketDataError,
-    fetchJsonWithRetry,
-    fetchWithTimeout,
-    isValidSymbol,
-    normalizeSymbolInput,
-    getSymbolValidationMessage,
-    persistFormState,
-    loadPersistedFormState,
-    getRiskPercentValidationMessage,
-    applyRiskPercentVisibility,
-    bindRiskPercentField,
-    getQuote,
-    fetchHistoricalSeries,
-    deriveMarketSession,
-    loadSymbolSnapshot,
-    resetSymbolCache,
-    extraSymbolData,
-    resetQuoteCache,
-    setLastKnownQuote,
-    hydrateMarketStateFromCache,
-    getMarketRowDisplay,
-    getRefreshIntervalForSession,
-    getNextRefreshDelay,
-    applyRateLimitBackoff,
-    isRateLimitBackoffActive,
-    updateStockWithQuote,
-    updateStockWithHistorical,
-    getStockEntry,
-    calculateAtrLike,
-    classifyTimeHorizon,
-    calculateTimeHorizon,
-    calculateSignalConfidence,
-    calculateSignalScore,
-    getConfidenceLabel,
-    calculateTradePlan,
-    buildSignalReasons,
-    buildInvalidationRules,
-    formatTimestamp,
-    getMarketIndicatorData,
-    handleMarketRowAction,
-    updateMarketRowCells,
-    getMarketTableColumnKeys,
-    buildMarketRowMarkup,
-    getScrollBehavior,
-    scheduleResultScroll,
-    sortMarketEntries,
-    getSortValue,
-  };
+  module.exports = appCore;
 }

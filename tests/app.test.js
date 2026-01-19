@@ -41,7 +41,9 @@ const {
   buildMarketRowMarkup,
   scheduleResultScroll,
   sortMarketEntries,
-} = require("../app");
+  initTradePage,
+  initLivePage,
+} = require("../core");
 
 function createResponse({ ok, status, json }) {
   return {
@@ -1386,7 +1388,7 @@ const tests = [
   {
     name: "keeps market table columns aligned with header order",
     fn: async () => {
-      const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+      const html = fs.readFileSync(path.join(__dirname, "..", "live.html"), "utf8");
       const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
@@ -1459,6 +1461,18 @@ const tests = [
       let scrollCalls = 0;
       scheduleResultScroll(null);
       assert.strictEqual(scrollCalls, 0);
+    },
+  },
+  {
+    name: "trade page init is a no-op without a browser DOM",
+    fn: async () => {
+      assert.strictEqual(initTradePage(), false);
+    },
+  },
+  {
+    name: "live page init is a no-op without a browser DOM",
+    fn: async () => {
+      assert.strictEqual(initLivePage(), false);
     },
   },
 ];
