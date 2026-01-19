@@ -91,6 +91,19 @@ const MARKET_SORT_OPTIONS = [
   { value: "liveChange", label: "Live change (%)" },
 ];
 const DEFAULT_SORT_KEY = "signal";
+const MARKET_TABLE_COLUMNS = [
+  { key: "symbol" },
+  { key: "company", className: "company-cell" },
+  { key: "sector" },
+  { key: "cap" },
+  { key: "signal" },
+  { key: "horizon" },
+  { key: "price", className: "num-cell" },
+  { key: "change", className: "price-change change-cell num-cell" },
+  { key: "change1d", className: "price-change change1d-cell num-cell" },
+  { key: "change1m", className: "price-change num-cell" },
+  { key: "analyze", className: "analyze-cell" },
+];
 
 const FORM_STATE_KEY = "trade_form_state_v1";
 const POSITION_SIZING_MODES = {
@@ -3608,20 +3621,19 @@ function createMarketRowSkeleton(stock) {
   row.tabIndex = 0;
   row.setAttribute("role", "button");
   row.setAttribute("aria-label", `Analyze ${stock.symbol}`);
-  row.innerHTML = `
-    <td data-col="symbol"></td>
-    <td data-col="company" class="company-cell"></td>
-    <td data-col="sector"></td>
-    <td data-col="cap"></td>
-    <td data-col="signal"></td>
-    <td data-col="horizon"></td>
-    <td data-col="price"></td>
-    <td data-col="change" class="price-change change-cell"></td>
-    <td data-col="change1d" class="price-change change1d-cell"></td>
-    <td data-col="change1m" class="price-change"></td>
-    <td data-col="analyze" class="analyze-cell"></td>
-  `;
+  row.innerHTML = buildMarketRowMarkup();
   return row;
+}
+
+function getMarketTableColumnKeys() {
+  return MARKET_TABLE_COLUMNS.map((column) => column.key);
+}
+
+function buildMarketRowMarkup() {
+  return MARKET_TABLE_COLUMNS.map((column) => {
+    const className = column.className ? ` class="${column.className}"` : "";
+    return `<td data-col="${column.key}"${className}></td>`;
+  }).join("");
 }
 
 function formatChangeCellContent(cell, value, className) {
@@ -3634,7 +3646,7 @@ function formatChangeCellContent(cell, value, className) {
       : cell.dataset.col === "change1d"
         ? "change1d-cell"
         : "";
-  cell.className = `price-change ${baseClass} ${className}`.trim();
+  cell.className = `price-change ${baseClass} num-cell ${className}`.trim();
   if (value === "n/a") {
     cell.innerHTML = '<span class="muted">n/a</span>';
   } else {
@@ -4136,6 +4148,8 @@ if (typeof module !== "undefined" && module.exports) {
     getMarketIndicatorData,
     handleMarketRowAction,
     updateMarketRowCells,
+    getMarketTableColumnKeys,
+    buildMarketRowMarkup,
     getScrollBehavior,
     scheduleResultScroll,
     sortMarketEntries,
