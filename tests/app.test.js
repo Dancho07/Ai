@@ -227,11 +227,13 @@ function createMockDocument(elements = {}) {
   return doc;
 }
 
-function loadCoreWithDocument(mockDocument) {
+function loadCoreWithDocument(mockDocument, windowOverrides = {}) {
   const originalDocument = global.document;
   const originalWindow = global.window;
   global.document = mockDocument;
-  global.window = { location: { search: "" } };
+  const baseLocation = { search: "" };
+  const nextLocation = { ...baseLocation, ...(windowOverrides.location ?? {}) };
+  global.window = { location: nextLocation, ...windowOverrides, location: nextLocation };
   delete require.cache[require.resolve("../core")];
   const core = require("../core");
   const restore = () => {
@@ -2219,6 +2221,87 @@ const tests = [
         });
         marketBody.dispatchEvent({ type: "click", target: removeButton, preventDefault: () => {} });
         assert.strictEqual(calledCount, 0);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "live page analyze navigates to trade analysis with autorun",
+    fn: async () => {
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const assignCalls = [];
+      const { core, restore } = loadCoreWithDocument(mockDocument, {
+        location: {
+          search: "",
+          assign: (url) => assignCalls.push(url),
+        },
+      });
+      try {
+        core.initLivePage({
+          onAnalyze: (symbol) => {
+            const url = core.buildAnalyzeUrl(symbol, { autoRun: true });
+            global.window.location.assign(url);
+          },
+          skipInitialLoad: true,
+          skipRender: true,
+        });
+        const analyzeButton = createMockDomElement({
+          tagName: "BUTTON",
+          dataset: { action: "analyze", symbol: "AAPL" },
+        });
+        marketBody.dispatchEvent({
+          type: "click",
+          target: analyzeButton,
+          preventDefault: () => {},
+        });
+        assert.deepStrictEqual(assignCalls, ["index.html?symbol=AAPL&autorun=1"]);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "live page favorite/remove clicks do not navigate",
+    fn: async () => {
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const assignCalls = [];
+      const { core, restore } = loadCoreWithDocument(mockDocument, {
+        location: {
+          search: "",
+          assign: (url) => assignCalls.push(url),
+        },
+      });
+      try {
+        core.initLivePage({
+          onAnalyze: (symbol) => {
+            const url = core.buildAnalyzeUrl(symbol, { autoRun: true });
+            global.window.location.assign(url);
+          },
+          skipInitialLoad: true,
+          skipRender: true,
+        });
+        const favoriteButton = createMockDomElement({
+          tagName: "BUTTON",
+          dataset: { action: "favorite", symbol: "AAPL" },
+        });
+        marketBody.dispatchEvent({
+          type: "click",
+          target: favoriteButton,
+          preventDefault: () => {},
+        });
+        const removeButton = createMockDomElement({
+          tagName: "BUTTON",
+          dataset: { action: "remove", symbol: "AAPL" },
+        });
+        marketBody.dispatchEvent({
+          type: "click",
+          target: removeButton,
+          preventDefault: () => {},
+        });
+        assert.deepStrictEqual(assignCalls, []);
       } finally {
         restore();
       }

@@ -4863,14 +4863,14 @@ async function refreshMarketBoard() {
 function buildAnalyzeUrl(symbol, { autoRun = true } = {}) {
   const normalized = normalizeSymbolInput(symbol ?? "");
   if (!normalized) {
-    return "./";
+    return "";
   }
   const params = new URLSearchParams();
   params.set("symbol", normalized);
   if (autoRun) {
     params.set("autorun", "1");
   }
-  return `./index.html?${params.toString()}`;
+  return `index.html?${params.toString()}`;
 }
 
 function initTradePage() {
@@ -5124,9 +5124,13 @@ function initTradePage() {
   if (symbolInput && symbolParam) {
     symbolInput.value = symbolParam;
     setSymbolError("");
-    if (autoRunParam && form?.requestSubmit) {
+    if (autoRunParam) {
       setTimeout(() => {
-        form.requestSubmit();
+        if (form?.requestSubmit) {
+          form.requestSubmit();
+        } else if (submitButton) {
+          submitButton.click();
+        }
       }, 0);
     }
   }
@@ -5140,6 +5144,18 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
   }
   let didInit = false;
   const handleAnalyze = onAnalyze ?? null;
+  const resolveAnalyzeSymbol = (event) => {
+    const analyzeButton = event.target.closest("button[data-action='analyze']");
+    if (!analyzeButton) {
+      return { button: null, symbol: "" };
+    }
+    const rowSymbol = analyzeButton.closest("tr[data-symbol]")?.dataset.symbol ?? "";
+    const symbol = analyzeButton.dataset.symbol ?? rowSymbol;
+    return { button: analyzeButton, symbol };
+  };
+  const handleMissingSymbol = () => {
+    setWatchlistError("Missing symbol.");
+  };
   const shouldRender = !skipRender;
   syncMarketStateWithWatchlist();
   sortBySelect = ensureSortControl() ?? sortBySelect;
@@ -5234,14 +5250,18 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
   if (opportunitiesContent) {
     didInit = true;
     opportunitiesContent.addEventListener("click", (event) => {
-      const analyzeButton = event.target.closest("button[data-action='analyze']");
+      const { button: analyzeButton, symbol } = resolveAnalyzeSymbol(event);
       if (!analyzeButton) {
         return;
       }
       event.preventDefault();
-      if (handleAnalyze) {
-        handleAnalyze(analyzeButton.dataset.symbol);
+      event.stopPropagation?.();
+      event.stopImmediatePropagation?.();
+      if (!symbol) {
+        handleMissingSymbol();
+        return;
       }
+      handleAnalyze?.(symbol);
     });
   }
 
@@ -5250,10 +5270,12 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     marketBody.addEventListener("click", (event) => {
       const actionButton = event.target.closest("button[data-action]");
       if (actionButton) {
+        event.preventDefault();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
         const action = actionButton.dataset.action;
-        const symbol = actionButton.dataset.symbol;
+        const symbol = actionButton.dataset.symbol ?? actionButton.closest("tr[data-symbol]")?.dataset.symbol ?? "";
         if (action === "favorite") {
-          event.preventDefault();
           favoritesStore.toggleFavorite(symbol);
           if (shouldRender) {
             renderMarketTable();
@@ -5263,7 +5285,6 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
           return;
         }
         if (action === "remove") {
-          event.preventDefault();
           const removed = removeSymbolFromWatchlist(symbol);
           if (removed) {
             syncMarketStateWithWatchlist();
@@ -5276,10 +5297,11 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
           return;
         }
         if (action === "analyze") {
-          event.preventDefault();
-          if (handleAnalyze) {
-            handleAnalyze(symbol);
+          if (!symbol) {
+            handleMissingSymbol();
+            return;
           }
+          handleAnalyze?.(symbol);
           return;
         }
       }
