@@ -2227,6 +2227,95 @@ const tests = [
     },
   },
   {
+    name: "live page renders stored watchlist rows even when quotes fail",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL", "MSFT", "NVDA"]));
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async () => {
+        throw new Error("network down");
+      };
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        core.initLivePage();
+        assert.strictEqual(marketBody.children.length, 3);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "live page uses default watchlist when storage is invalid",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", "not-json");
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async () => {
+        throw new Error("network down");
+      };
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        core.initLivePage();
+        assert.strictEqual(marketBody.children.length, 10);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "default market filters do not exclude rows",
+    fn: async () => {
+      const entries = [
+        {
+          symbol: "AAPL",
+          sector: "Technology",
+          cap: "Large",
+          history: [],
+          lastPrice: null,
+          monthlyChange: null,
+        },
+      ];
+      const filtered = applyMarketFilters(entries, {
+        favoritesOnly: false,
+        favorites: [],
+        filters: {
+          search: "",
+          sector: "all",
+          cap: "all",
+          signal: "all",
+          min: 0,
+          max: 0,
+          minMonth: 0,
+        },
+      });
+      assert.strictEqual(filtered.length, 1);
+    },
+  },
+  {
+    name: "top opportunities does not mutate the source array",
+    fn: async () => {
+      const entries = [
+        { symbol: "AAA", sector: "Tech", cap: "Large", history: [], lastPrice: null, monthlyChange: null },
+        { symbol: "BBB", sector: "Tech", cap: "Large", history: [], lastPrice: null, monthlyChange: null },
+      ];
+      const snapshot = [...entries];
+      buildTopOpportunitiesGroups(entries);
+      assert.deepStrictEqual(entries, snapshot);
+    },
+  },
+  {
     name: "live page analyze only triggers from analyze button",
     fn: async () => {
       const marketBody = createMockDomElement({ tagName: "TBODY" });

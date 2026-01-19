@@ -350,6 +350,21 @@ button.is-loading .button-progress {
   background: #e0e5ff;
 }
 
+.secondary-button {
+  border: 1px solid #d7dbef;
+  background: #ffffff;
+  color: #2f365e;
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.secondary-button:hover {
+  background: #f3f5ff;
+}
+
 .favorites-toggle {
   display: inline-flex;
   align-items: center;
@@ -382,6 +397,24 @@ button.is-loading .button-progress {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.market-empty-state {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px dashed #d9def5;
+  background: #f9faff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #2f365e;
+  font-weight: 600;
+}
+
+.market-empty-state p {
+  margin: 0;
 }
 
 .opportunities-header {
