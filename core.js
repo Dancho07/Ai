@@ -948,7 +948,7 @@ function normalizeSource(source) {
 function shouldShowCacheWarning(session, source) {
   return (
     session === QUOTE_SESSIONS.REGULAR &&
-    [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE].includes(source)
+    [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE, QUOTE_SOURCES.UNAVAILABLE].includes(source)
   );
 }
 
@@ -1720,28 +1720,27 @@ function hasMarketIndicatorData(entry) {
 
 function getMarketIndicatorData(entry, options = {}) {
   const hasData = hasMarketIndicatorData(entry);
-  const session = entry?.quoteSession ?? QUOTE_SESSIONS.CLOSED;
-  const asOfTimestamp = entry?.quoteAsOf ?? null;
-  const sessionBadge = getMarketSessionBadge(session, hasData);
-  const sourceBadge = getMarketSourceBadge(entry, hasData);
+  const badges = getQuoteBadges(entry, {
+    hasData,
+    showBadges: true,
+    allowUnknown: !hasData,
+    emptyAsOfLabel: "No data",
+  });
   let marketStatus = "Unavailable";
   if (hasData) {
-    if (session === "PRE" || session === "POST") {
+    if (badges.session === "PRE" || badges.session === "POST") {
       marketStatus = "After hours";
-    } else if (session === "CLOSED") {
+    } else if (badges.session === "CLOSED") {
       marketStatus = "Closed";
     } else {
       marketStatus = "Open";
     }
   }
-  const asOfLabel = asOfTimestamp
-    ? `As of ${formatAsOf(asOfTimestamp, { tz: "UTC" })}`
-    : "No data";
   return {
     marketStatus,
-    sessionBadge,
-    sourceBadge,
-    asOfLabel,
+    sessionBadge: badges.sessionBadge ?? { label: "UNKNOWN", className: "delayed" },
+    sourceBadge: badges.sourceBadge ?? { label: "UNAVAILABLE", className: "delayed" },
+    asOfLabel: badges.asOfLabel,
     usingCached: options.usingCached === true,
   };
 }
@@ -1825,6 +1824,64 @@ function getSessionBadgeForSession(session) {
     return { label: session, className: "afterhours", tooltip: "Extended-hours session." };
   }
   return { label: "CLOSED", className: "closed", tooltip: "Market closed." };
+}
+
+function getQuoteBadges(quote, options = {}) {
+  const hasPrice = quote?.price != null || quote?.lastPrice != null;
+  const hasTimestamp =
+    quote?.asOfTimestamp != null ||
+    quote?.quoteAsOf != null ||
+    quote?.lastUpdatedAt != null ||
+    quote?.lastHistoricalTimestamp != null;
+  const hasData = options.hasData ?? Boolean(hasPrice || hasTimestamp);
+  const isUnavailable =
+    options.isUnavailable != null
+      ? options.isUnavailable
+      : quote?.unavailable === true ||
+        quote?.quoteUnavailable === true ||
+        normalizeSource(quote?.source ?? quote?.dataSource) === QUOTE_SOURCES.UNAVAILABLE;
+  const normalizedSession =
+    normalizeSession(quote?.session ?? quote?.quoteSession ?? options.session) ??
+    normalizeSession(options.fallbackSession);
+  const normalizedSource =
+    normalizeSource(quote?.source ?? quote?.dataSource ?? options.source) ??
+    normalizeSource(options.fallbackSource);
+  const session = normalizedSession ?? (hasData || isUnavailable ? QUOTE_SESSIONS.CLOSED : null);
+  const source =
+    normalizedSource ??
+    (hasData || isUnavailable ? QUOTE_SOURCES.CACHED : QUOTE_SOURCES.UNAVAILABLE);
+  const showBadges = options.showBadges ?? (hasData || isUnavailable);
+  const allowUnknown = options.allowUnknown === true;
+  let sessionBadge = null;
+  if (showBadges) {
+    if (session) {
+      sessionBadge = getSessionBadgeForSession(session);
+    } else if (allowUnknown) {
+      sessionBadge = { label: "UNKNOWN", className: "delayed", tooltip: "Market session unknown." };
+    }
+  }
+  let sourceBadge = null;
+  if (showBadges) {
+    if (source) {
+      sourceBadge = getSourceBadge(source);
+    } else if (allowUnknown) {
+      sourceBadge = { label: "UNAVAILABLE", className: "delayed", tooltip: "Live quote unavailable." };
+    }
+  }
+  const asOfTimestamp =
+    options.asOfTimestamp ??
+    quote?.asOfTimestamp ??
+    quote?.quoteAsOf ??
+    quote?.lastUpdatedAt ??
+    quote?.lastHistoricalTimestamp ??
+    null;
+  const emptyAsOfLabel =
+    options.emptyAsOfLabel ?? (isUnavailable ? "Quote unavailable" : "Loading…");
+  const asOfLabel = asOfTimestamp ? `As of ${formatAsOf(asOfTimestamp, { tz: "UTC" })}` : emptyAsOfLabel;
+  const showWarning = Boolean(
+    (options.showWarning ?? hasPrice) && session && source && shouldShowCacheWarning(session, source),
+  );
+  return { sourceBadge, sessionBadge, asOfLabel, showWarning, session, source, asOfTimestamp };
 }
 
 function calculateSignal(prices) {
@@ -3166,26 +3223,25 @@ function updateResultLivePriceDisplay(symbol) {
   }
   const marketEntry = getStockEntry(symbol);
   const livePrice = marketEntry?.lastPrice ?? null;
-  const source = marketEntry?.dataSource ?? QUOTE_SOURCES.CACHED;
-  const session = marketEntry?.quoteSession ?? QUOTE_SESSIONS.CLOSED;
-  const sourceBadge = livePrice !== null ? getSourceBadge(source) : null;
-  const sessionBadge = livePrice !== null ? getSessionBadgeForSession(session) : null;
+  const badges = getQuoteBadges(marketEntry, {
+    hasData: livePrice !== null,
+    isUnavailable: marketEntry?.quoteUnavailable === true,
+    showBadges: livePrice !== null,
+    emptyAsOfLabel: "Awaiting quote",
+  });
   const warningIcon =
-    livePrice !== null &&
-    (marketEntry?.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source))
+    livePrice !== null && badges.showWarning
       ? `<span class="warning-icon" title="${CACHE_WARNING_MESSAGE}" aria-label="${CACHE_WARNING_MESSAGE}">⚠</span>`
       : "";
-  const asOf = livePrice !== null
-    ? `as of ${formatAsOf(marketEntry?.quoteAsOf || marketEntry?.lastUpdatedAt, { tz: "UTC" })}`
-    : "awaiting quote";
+  const asOf = livePrice !== null ? badges.asOfLabel : "Awaiting quote";
   resultLivePrice.innerHTML = livePrice
     ? `Live price: ${quoteFormatter.format(livePrice)} ${
-        sourceBadge
-          ? `<span class="session-badge ${sourceBadge.className}" title="${sourceBadge.tooltip}">${sourceBadge.label}</span>`
+        badges.sourceBadge
+          ? `<span class="session-badge ${badges.sourceBadge.className}" title="${badges.sourceBadge.tooltip}">${badges.sourceBadge.label}</span>`
           : ""
       } ${
-        sessionBadge
-          ? `<span class="session-badge ${sessionBadge.className}" title="${sessionBadge.tooltip}">${sessionBadge.label}</span>`
+        badges.sessionBadge
+          ? `<span class="session-badge ${badges.sessionBadge.className}" title="${badges.sessionBadge.tooltip}">${badges.sessionBadge.label}</span>`
           : ""
       } ${warningIcon} <span class="price-meta">${asOf}</span>`
     : "Live price: Not available";
@@ -4543,21 +4599,16 @@ function getMarketRowDisplay(stock) {
       : hasAnyData || isUnavailable
         ? "Price unavailable"
         : "—";
-  const source = stock.dataSource ?? QUOTE_SOURCES.CACHED;
-  const session = stock.quoteSession ?? QUOTE_SESSIONS.CLOSED;
-  const sourceBadge = hasAnyData || isUnavailable ? getSourceBadge(source) : null;
-  const sessionBadge = hasAnyData ? getSessionBadgeForSession(session) : null;
-  const showWarning =
-    stock.lastPrice !== null &&
-    (stock.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source));
-  const meta = hasAnyData
-    ? `As of ${formatAsOf(
-        stock.quoteAsOf || stock.lastUpdatedAt || stock.lastHistoricalTimestamp,
-        { tz: "UTC" },
-      )}`
-    : isUnavailable
-      ? "Quote unavailable"
-      : "Loading…";
+  const badges = getQuoteBadges(stock, {
+    hasData: hasAnyData,
+    isUnavailable,
+    showBadges: hasAnyData || isUnavailable,
+    emptyAsOfLabel: isUnavailable ? "Quote unavailable" : "Loading…",
+  });
+  const sourceBadge = badges.sourceBadge;
+  const sessionBadge = badges.sessionBadge;
+  const showWarning = badges.showWarning;
+  const meta = badges.asOfLabel;
   const changeDisplay =
     change !== null && changePercent !== null
       ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
@@ -5793,6 +5844,7 @@ const appCore = {
   formatTimestamp,
   runBacktest30d,
   getMarketIndicatorData,
+  getQuoteBadges,
   handleMarketRowAction,
   updateMarketRowCells,
   getMarketTableColumnKeys,
