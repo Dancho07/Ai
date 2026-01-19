@@ -55,6 +55,7 @@ const {
   initTradePage,
   initLivePage,
 } = require("../core");
+const { computeIndicators, scoreSignal } = require("../strategy");
 
 function createResponse({ ok, status, json }) {
   return {
@@ -337,6 +338,21 @@ function createStockEntry({
   };
 }
 
+function buildTrendCandles({ start, step, count }) {
+  return Array.from({ length: count }, (_, index) => {
+    const close = start + step * index;
+    return { close, high: close * 1.002, low: close * 0.998 };
+  });
+}
+
+function buildChoppyCandles({ start, amplitude, count }) {
+  return Array.from({ length: count }, (_, index) => {
+    const offset = index % 2 === 0 ? amplitude : -amplitude;
+    const close = start + offset;
+    return { close, high: close * 1.003, low: close * 0.997 };
+  });
+}
+
 async function runTest(name, testFn) {
   try {
     await testFn();
@@ -544,16 +560,22 @@ const tests = [
   {
     name: "top opportunities buy/sell groups respect filtered entries",
     fn: async () => {
+      const buyHistory = buildTrendCandles({ start: 100, step: 1.2, count: 40 }).map(
+        (candle) => candle.close,
+      );
+      const sellHistory = buildTrendCandles({ start: 160, step: -1.2, count: 40 }).map(
+        (candle) => candle.close,
+      );
       const buyEntry = createStockEntry({
         symbol: "BUY1",
-        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
-        lastPrice: 90,
+        history: buyHistory,
+        lastPrice: buyHistory[buyHistory.length - 1],
         dailyChange: 1.2,
       });
       const sellEntry = createStockEntry({
         symbol: "SELL1",
-        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 110],
-        lastPrice: 110,
+        history: sellHistory,
+        lastPrice: sellHistory[sellHistory.length - 1],
       });
       const filtered = [buyEntry];
       const groups = buildTopOpportunitiesGroups(filtered);
@@ -568,15 +590,21 @@ const tests = [
   {
     name: "top opportunities update when filtered list changes",
     fn: async () => {
+      const buyHistory = buildTrendCandles({ start: 120, step: 1.1, count: 40 }).map(
+        (candle) => candle.close,
+      );
+      const sellHistory = buildTrendCandles({ start: 170, step: -1.1, count: 40 }).map(
+        (candle) => candle.close,
+      );
       const buyEntry = createStockEntry({
         symbol: "BUY2",
-        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
-        lastPrice: 90,
+        history: buyHistory,
+        lastPrice: buyHistory[buyHistory.length - 1],
       });
       const sellEntry = createStockEntry({
         symbol: "SELL2",
-        history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 110],
-        lastPrice: 110,
+        history: sellHistory,
+        lastPrice: sellHistory[sellHistory.length - 1],
       });
       const initialGroups = buildTopOpportunitiesGroups([buyEntry]);
       assert.strictEqual(initialGroups.buy[0].stock.symbol, "BUY2");
@@ -1640,20 +1668,49 @@ const tests = [
     name: "calculates deterministic signal scores",
     fn: async () => {
       const prices = [100, 102, 101, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115];
-      const score = calculateSignalScore({
-        recent: 115,
-        average: 110,
-        dailyChange: 1.2,
-        monthlyChange: 6.0,
-        atrPercent: 2.5,
-        prices,
-        tradePlan: { stopLoss: 110 },
-      });
-      assert.strictEqual(score.total, 50);
-      assert.deepStrictEqual(
-        score.components.map((component) => component.score),
-        [27, 7, 12, 4, 0],
-      );
+      const score = calculateSignalScore({ prices, price: 115 });
+      assert.strictEqual(score.total, 54);
+      assert.strictEqual(score.components.length, 4);
+    },
+  },
+  {
+    name: "scores a strong uptrend as BUY",
+    fn: async () => {
+      const candles = buildTrendCandles({ start: 100, step: 1.5, count: 40 });
+      const indicators = computeIndicators(candles);
+      const scored = scoreSignal(indicators, { price: candles[candles.length - 1].close });
+      assert.strictEqual(scored.signal, "buy");
+      assert.ok(scored.score >= 65);
+    },
+  },
+  {
+    name: "scores a strong downtrend as SELL",
+    fn: async () => {
+      const candles = buildTrendCandles({ start: 140, step: -1.5, count: 40 });
+      const indicators = computeIndicators(candles);
+      const scored = scoreSignal(indicators, { price: candles[candles.length - 1].close });
+      assert.strictEqual(scored.signal, "sell");
+      assert.ok(scored.score <= 35);
+    },
+  },
+  {
+    name: "scores choppy price action as HOLD",
+    fn: async () => {
+      const candles = buildChoppyCandles({ start: 100, amplitude: 1, count: 40 });
+      const indicators = computeIndicators(candles);
+      const scored = scoreSignal(indicators, { price: candles[candles.length - 1].close });
+      assert.strictEqual(scored.signal, "hold");
+      assert.ok(scored.score > 35 && scored.score < 65);
+    },
+  },
+  {
+    name: "score increases as trend strengthens",
+    fn: async () => {
+      const mild = buildTrendCandles({ start: 100, step: 0.4, count: 40 });
+      const strong = buildTrendCandles({ start: 100, step: 1.2, count: 40 });
+      const mildScore = scoreSignal(computeIndicators(mild), { price: mild[mild.length - 1].close }).score;
+      const strongScore = scoreSignal(computeIndicators(strong), { price: strong[strong.length - 1].close }).score;
+      assert.ok(strongScore > mildScore);
     },
   },
   {
@@ -2056,19 +2113,22 @@ const tests = [
   {
     name: "favorites-only filter still respects sector/cap/signal filters",
     fn: async () => {
+      const buyHistory = buildTrendCandles({ start: 90, step: 1.0, count: 40 }).map(
+        (candle) => candle.close,
+      );
       const favorites = new Set(["AAPL", "JPM"]);
       const entries = [
         createStockEntry({
           symbol: "AAPL",
-          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
-          lastPrice: 90,
+          history: buyHistory,
+          lastPrice: buyHistory[buyHistory.length - 1],
           sector: "Technology",
           cap: "Large",
         }),
         createStockEntry({
           symbol: "JPM",
-          history: [100, 100, 100, 100, 100, 100, 100, 100, 100, 90],
-          lastPrice: 90,
+          history: buyHistory,
+          lastPrice: buyHistory[buyHistory.length - 1],
           sector: "Finance",
           cap: "Large",
         }),
