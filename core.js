@@ -726,11 +726,11 @@ function formatTimestamp(timestamp) {
   }).format(new Date(timestamp));
 }
 
-function formatAsOf(timestamp, timeZoneName) {
+function formatAsOf(timestamp, options = {}) {
   if (!timestamp) {
     return "unknown time";
   }
-  const zone = timeZoneName || "UTC";
+  const zone = typeof options === "string" ? options : options?.tz ?? "UTC";
   try {
     return new Intl.DateTimeFormat("en-GB", {
       hour: "2-digit",
@@ -755,6 +755,42 @@ function normalizeEpochToMs(timestamp) {
     return null;
   }
   return timestamp > 1e12 ? timestamp : timestamp * 1000;
+}
+
+const QUOTE_SOURCES = {
+  REALTIME: "REALTIME",
+  DELAYED: "DELAYED",
+  CACHED: "CACHED",
+  LAST_CLOSE: "LAST_CLOSE",
+};
+
+const QUOTE_SESSIONS = {
+  REGULAR: "REGULAR",
+  PRE: "PRE",
+  POST: "POST",
+  CLOSED: "CLOSED",
+};
+
+const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
+const STALE_FRESHNESS_MS = 15 * 60 * 1000;
+const CACHE_WARNING_MESSAGE = "Market open but live quote unavailable — using cached data.";
+
+function normalizeSession(session) {
+  if (!session) {
+    return null;
+  }
+  const normalized = String(session).toUpperCase();
+  if (Object.values(QUOTE_SESSIONS).includes(normalized)) {
+    return normalized;
+  }
+  return null;
+}
+
+function shouldShowCacheWarning(session, source) {
+  return (
+    session === QUOTE_SESSIONS.REGULAR &&
+    [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE].includes(source)
+  );
 }
 
 function getEpochUnit(timestamp) {
@@ -782,33 +818,46 @@ function deriveMarketSession(rawQuote, nowMs = Date.now()) {
   return "UNKNOWN";
 }
 
-function getQuoteSourceForSession(session) {
-  if (session === "REGULAR") {
-    return "primary";
+function resolveQuoteSource({ sourceHint, session, asOfTimestamp, nowMs, isRealtime }) {
+  const normalizedHint = sourceHint ? String(sourceHint).toUpperCase() : null;
+  if (normalizedHint === "CACHE" || normalizedHint === "CACHED") {
+    return QUOTE_SOURCES.CACHED;
   }
-  if (session === "PRE" || session === "POST") {
-    return "extended";
+  if (normalizedHint === "HISTORICAL" || normalizedHint === "LAST_CLOSE") {
+    return QUOTE_SOURCES.LAST_CLOSE;
   }
-  if (session === "DELAYED") {
-    return "delayed";
+  if (normalizedHint === "DELAYED") {
+    return QUOTE_SOURCES.DELAYED;
   }
-  if (session === "UNKNOWN") {
-    return "unavailable";
+  if (normalizedHint === "REALTIME" || normalizedHint === "PRIMARY" || normalizedHint === "EXTENDED") {
+    return QUOTE_SOURCES.REALTIME;
   }
-  return "closed";
+  if (session === QUOTE_SESSIONS.CLOSED) {
+    return QUOTE_SOURCES.LAST_CLOSE;
+  }
+  if (asOfTimestamp != null && nowMs - asOfTimestamp > REALTIME_FRESHNESS_MS) {
+    return QUOTE_SOURCES.DELAYED;
+  }
+  if (session === QUOTE_SESSIONS.REGULAR || session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
+    return QUOTE_SOURCES.REALTIME;
+  }
+  if (isRealtime) {
+    return QUOTE_SOURCES.REALTIME;
+  }
+  return QUOTE_SOURCES.DELAYED;
 }
 
 function getDebugFreshnessLabel(source) {
-  if (source === "primary" || source === "extended") {
+  if (source === QUOTE_SOURCES.REALTIME) {
     return "REALTIME";
   }
-  if (source === "delayed") {
+  if (source === QUOTE_SOURCES.DELAYED) {
     return "DELAYED";
   }
-  if (source === "historical") {
-    return "HISTORICAL";
+  if (source === QUOTE_SOURCES.LAST_CLOSE) {
+    return "LAST_CLOSE";
   }
-  if (source === "cache") {
+  if (source === QUOTE_SOURCES.CACHED) {
     return "CACHED";
   }
   return "UNAVAILABLE";
@@ -818,16 +867,16 @@ function getQuoteFallbackLabel(quote) {
   if (!quote) {
     return "unavailable";
   }
-  if (quote.source === "cache") {
+  if (quote.source === QUOTE_SOURCES.CACHED) {
     return "cached";
   }
-  if (quote.source === "historical") {
-    return "historical";
+  if (quote.source === QUOTE_SOURCES.LAST_CLOSE) {
+    return "last_close";
   }
-  if (quote.session === "DELAYED" || quote.source === "delayed") {
+  if (quote.source === QUOTE_SOURCES.DELAYED) {
     return "delayed";
   }
-  if (quote.session === "CLOSED" || quote.source === "closed") {
+  if (quote.session === "CLOSED") {
     return "last_close";
   }
   if (quote.session === "PRE" || quote.session === "POST") {
@@ -889,10 +938,10 @@ function logYahooQuoteDebug(rawQuote, derivedSession, source) {
 }
 
 function getCacheTtl(session) {
-  if (session === "REGULAR") {
+  if (session === QUOTE_SESSIONS.REGULAR) {
     return MARKET_OPEN_TTL_MS;
   }
-  if (session === "PRE" || session === "POST" || session === "DELAYED" || session === "UNKNOWN") {
+  if (session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
     return MARKET_EXTENDED_TTL_MS;
   }
   return MARKET_CLOSED_TTL_MS;
@@ -996,8 +1045,8 @@ function normalizeQuoteForCache(quote) {
     change: quote.change ?? null,
     changePct: quote.changePct ?? null,
     asOfTimestamp: quote.asOfTimestamp ?? null,
-    session: quote.session ?? "UNKNOWN",
-    source: quote.source ?? "cache",
+    session: quote.session ?? QUOTE_SESSIONS.CLOSED,
+    source: quote.source ?? QUOTE_SOURCES.CACHED,
     currency: quote.currency ?? null,
     previousClose: quote.previousClose ?? null,
     name: quote.name ?? null,
@@ -1323,6 +1372,74 @@ function buildQuoteFromYahoo(quote) {
   };
 }
 
+function normalizeQuote(rawQuote, nowMs = Date.now()) {
+  if (!rawQuote) {
+    return null;
+  }
+  const isYahooQuote =
+    rawQuote?.regularMarketPrice != null ||
+    rawQuote?.regularMarketTime != null ||
+    rawQuote?.preMarketPrice != null ||
+    rawQuote?.postMarketPrice != null ||
+    rawQuote?.marketState != null ||
+    rawQuote?.regularMarketState != null;
+  const base = isYahooQuote ? buildQuoteFromYahoo(rawQuote) : rawQuote;
+  if (!base) {
+    return null;
+  }
+  const asOfTimestamp = normalizeEpochToMs(
+    base.asOfTimestamp ?? base.timestamp ?? rawQuote.asOfTimestamp ?? rawQuote.timestamp ?? rawQuote.asOfTs,
+  );
+  const derivedSession = normalizeSession(base.session) ?? normalizeSession(rawQuote.session);
+  const inferredSession = normalizeSession(deriveMarketSession(rawQuote, nowMs));
+  const explicitState = rawQuote?.marketState ?? rawQuote?.regularMarketState ?? null;
+  const explicitSession = normalizeSession(explicitState);
+  const lastKnownSession = normalizeSession(rawQuote.lastKnownSession);
+  let session =
+    derivedSession ?? inferredSession ?? lastKnownSession ?? (base.isRealtime ? QUOTE_SESSIONS.REGULAR : null);
+  if (
+    session === QUOTE_SESSIONS.CLOSED &&
+    explicitSession !== QUOTE_SESSIONS.CLOSED &&
+    lastKnownSession &&
+    !rawQuote?.source
+  ) {
+    session = lastKnownSession;
+  }
+  if (!session) {
+    session = QUOTE_SESSIONS.CLOSED;
+  }
+  const source = resolveQuoteSource({
+    sourceHint: rawQuote.source ?? base.source ?? rawQuote.dataSource,
+    session,
+    asOfTimestamp,
+    nowMs,
+    isRealtime: base.isRealtime,
+  });
+  if (source === QUOTE_SOURCES.LAST_CLOSE && session !== QUOTE_SESSIONS.CLOSED) {
+    session = QUOTE_SESSIONS.CLOSED;
+  }
+  const isRealtime = source === QUOTE_SOURCES.REALTIME;
+  const isStale = asOfTimestamp != null ? nowMs - asOfTimestamp > STALE_FRESHNESS_MS : true;
+  const warnings = shouldShowCacheWarning(session, source) ? [CACHE_WARNING_MESSAGE] : [];
+  return {
+    symbol: rawQuote.symbol ?? base.symbol ?? null,
+    price: base.price ?? null,
+    changeAbs: base.change ?? null,
+    changePct: base.changePct ?? null,
+    asOfTs: asOfTimestamp ?? null,
+    source,
+    session,
+    isRealtime,
+    isStale,
+    warnings,
+    previousClose: base.previousClose ?? null,
+    name: base.name ?? rawQuote.name ?? null,
+    currency: base.currency ?? rawQuote.currency ?? null,
+    exchangeTimezoneName: base.exchangeTimezoneName ?? rawQuote.exchangeTimezoneName ?? null,
+    exchangeTimezoneShortName: base.exchangeTimezoneShortName ?? rawQuote.exchangeTimezoneShortName ?? null,
+  };
+}
+
 function getMarketSessionBadge(session, hasData = true) {
   if (!hasData) {
     return { label: "UNKNOWN", className: "delayed" };
@@ -1333,12 +1450,6 @@ function getMarketSessionBadge(session, hasData = true) {
   if (session === "PRE" || session === "POST") {
     return { label: session, className: "afterhours" };
   }
-  if (session === "DELAYED") {
-    return { label: "DELAYED", className: "delayed" };
-  }
-  if (session === "UNKNOWN") {
-    return { label: "UNKNOWN", className: "delayed" };
-  }
   return { label: "CLOSED", className: "closed" };
 }
 
@@ -1346,22 +1457,18 @@ function getMarketSourceBadge(entry, hasData = true) {
   if (!hasData) {
     return { label: "UNAVAILABLE", className: "delayed" };
   }
-  const source = entry?.dataSource ?? "cache";
-  const session = entry?.quoteSession ?? "UNKNOWN";
-  if (entry?.isRealtime) {
+  const source = entry?.dataSource ?? QUOTE_SOURCES.CACHED;
+  if (source === QUOTE_SOURCES.REALTIME) {
     return { label: "REALTIME", className: "realtime" };
   }
-  if (session === "PRE" || session === "POST") {
-    return { label: "AFTER HOURS", className: "afterhours" };
+  if (source === QUOTE_SOURCES.DELAYED) {
+    return { label: "DELAYED", className: "delayed" };
   }
-  if (source === "cache") {
+  if (source === QUOTE_SOURCES.CACHED) {
     return { label: "CACHED", className: "cached" };
   }
-  if (source === "historical") {
+  if (source === QUOTE_SOURCES.LAST_CLOSE) {
     return { label: "LAST CLOSE", className: "historical" };
-  }
-  if (source === "delayed" || session === "DELAYED") {
-    return { label: "DELAYED", className: "delayed" };
   }
   return { label: "UNAVAILABLE", className: "delayed" };
 }
@@ -1378,7 +1485,7 @@ function hasMarketIndicatorData(entry) {
 
 function getMarketIndicatorData(entry, options = {}) {
   const hasData = hasMarketIndicatorData(entry);
-  const session = entry?.quoteSession ?? "UNKNOWN";
+  const session = entry?.quoteSession ?? QUOTE_SESSIONS.CLOSED;
   const asOfTimestamp = entry?.quoteAsOf ?? null;
   const sessionBadge = getMarketSessionBadge(session, hasData);
   const sourceBadge = getMarketSourceBadge(entry, hasData);
@@ -1393,7 +1500,7 @@ function getMarketIndicatorData(entry, options = {}) {
     }
   }
   const asOfLabel = asOfTimestamp
-    ? `As of ${formatAsOf(asOfTimestamp, entry?.exchangeTimezoneName)}`
+    ? `As of ${formatAsOf(asOfTimestamp, { tz: "UTC" })}`
     : "No data";
   return {
     marketStatus,
@@ -1456,26 +1563,30 @@ function updateMarketIndicator() {
   }
 }
 
-function getSessionBadge(quote, source) {
-  if (source === "cache") {
+function getSourceBadge(source) {
+  if (source === QUOTE_SOURCES.CACHED) {
     return { label: "CACHED", className: "cached", tooltip: "Cached last-known quote." };
   }
-  if (source === "historical") {
-    return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from historical data." };
+  if (source === QUOTE_SOURCES.LAST_CLOSE) {
+    return { label: "LAST CLOSE", className: "historical", tooltip: "Last close from historical data." };
   }
-  if (quote.session === "REGULAR") {
-    return { label: "REALTIME", className: "realtime", tooltip: "Regular trading session." };
-  }
-  if (quote.session === "PRE" || quote.session === "POST") {
-    return { label: "AFTER HOURS", className: "afterhours", tooltip: "Extended-hours session." };
-  }
-  if (quote.session === "DELAYED") {
+  if (source === QUOTE_SOURCES.DELAYED) {
     return { label: "DELAYED", className: "delayed", tooltip: "Delayed quote." };
   }
-  if (quote.session === "UNKNOWN") {
-    return { label: "UNKNOWN", className: "delayed", tooltip: "Live quote unavailable." };
+  if (source === QUOTE_SOURCES.REALTIME) {
+    return { label: "REALTIME", className: "realtime", tooltip: "Live quote." };
   }
-  return { label: "MARKET CLOSED", className: "closed", tooltip: "Market closed quote." };
+  return { label: "UNAVAILABLE", className: "delayed", tooltip: "Live quote unavailable." };
+}
+
+function getSessionBadgeForSession(session) {
+  if (session === QUOTE_SESSIONS.REGULAR) {
+    return { label: "REGULAR", className: "realtime", tooltip: "Regular trading session." };
+  }
+  if (session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
+    return { label: session, className: "afterhours", tooltip: "Extended-hours session." };
+  }
+  return { label: "CLOSED", className: "closed", tooltip: "Market closed." };
 }
 
 function calculateSignal(prices) {
@@ -1807,11 +1918,13 @@ function resolvePriceContext(marketEntry) {
     };
   }
   const isLive = marketEntry?.isRealtime || marketEntry?.quoteSession === "REGULAR";
-  const dataSource = marketEntry?.dataSource ?? "historical";
+  const dataSource = marketEntry?.dataSource ?? QUOTE_SOURCES.LAST_CLOSE;
   let label = "Live quote";
   if (!isLive) {
-    if (["cache", "closed", "delayed", "extended"].includes(dataSource)) {
+    if (dataSource === QUOTE_SOURCES.CACHED) {
       label = "Cached quote";
+    } else if (dataSource === QUOTE_SOURCES.DELAYED) {
+      label = "Delayed quote";
     } else {
       label = "Last close";
     }
@@ -2239,7 +2352,7 @@ function calculateTradePlan({
   atrLike,
 }) {
   const entryMeta = priceLabel
-    ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf)})` : ""}`
+    ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf, { tz: "UTC" })})` : ""}`
     : "";
   const safePrices = Array.isArray(prices) ? prices : [];
   const fallbackEntry = safePrices.length ? safePrices[safePrices.length - 1] : null;
@@ -2577,7 +2690,7 @@ function hydrateMarketStateFromCache() {
     if (!stock) {
       return;
     }
-    const cachedQuote = { ...entry.quote, source: "cache" };
+    const cachedQuote = { ...entry.quote, source: QUOTE_SOURCES.CACHED };
     updateStockWithQuote(stock, cachedQuote);
     updated += 1;
   });
@@ -2984,20 +3097,28 @@ function updateResultLivePriceDisplay(symbol) {
   }
   const marketEntry = getStockEntry(symbol);
   const livePrice = marketEntry?.lastPrice ?? null;
-  const badge = livePrice !== null
-    ? getSessionBadge(
-        { session: marketEntry?.quoteSession ?? "CLOSED" },
-        marketEntry?.dataSource ?? "cache",
-      )
-    : null;
+  const source = marketEntry?.dataSource ?? QUOTE_SOURCES.CACHED;
+  const session = marketEntry?.quoteSession ?? QUOTE_SESSIONS.CLOSED;
+  const sourceBadge = livePrice !== null ? getSourceBadge(source) : null;
+  const sessionBadge = livePrice !== null ? getSessionBadgeForSession(session) : null;
+  const warningIcon =
+    livePrice !== null &&
+    (marketEntry?.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source))
+      ? `<span class="warning-icon" title="${CACHE_WARNING_MESSAGE}" aria-label="${CACHE_WARNING_MESSAGE}">⚠</span>`
+      : "";
   const asOf = livePrice !== null
-    ? `as of ${formatAsOf(
-        marketEntry?.quoteAsOf || marketEntry?.lastUpdatedAt,
-        marketEntry?.exchangeTimezoneName,
-      )}`
+    ? `as of ${formatAsOf(marketEntry?.quoteAsOf || marketEntry?.lastUpdatedAt, { tz: "UTC" })}`
     : "awaiting quote";
   resultLivePrice.innerHTML = livePrice
-    ? `Live price: ${quoteFormatter.format(livePrice)} <span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span> <span class="price-meta">${asOf}</span>`
+    ? `Live price: ${quoteFormatter.format(livePrice)} ${
+        sourceBadge
+          ? `<span class="session-badge ${sourceBadge.className}" title="${sourceBadge.tooltip}">${sourceBadge.label}</span>`
+          : ""
+      } ${
+        sessionBadge
+          ? `<span class="session-badge ${sessionBadge.className}" title="${sessionBadge.tooltip}">${sessionBadge.label}</span>`
+          : ""
+      } ${warningIcon} <span class="price-meta">${asOf}</span>`
     : "Live price: Not available";
 }
 
@@ -3073,17 +3194,22 @@ function updateStockWithQuote(stock, quote) {
   }
   stock.quoteAsOf = quote.asOfTimestamp ?? stock.quoteAsOf;
   if (quote.session) {
-    const hasExistingSession = Boolean(stock.quoteSession);
-    const isUnavailableFallback =
-      quote.unavailable === true && ["UNKNOWN", "CLOSED"].includes(quote.session);
-    if (!isUnavailableFallback || !hasExistingSession) {
-      stock.quoteSession = quote.session;
+    const normalizedSession = normalizeSession(quote.session);
+    if (normalizedSession) {
+      stock.quoteSession = normalizedSession;
     }
   }
   stock.isRealtime = quote.isRealtime ?? stock.isRealtime;
   stock.lastUpdated = formatTime(stock.quoteAsOf);
   stock.lastUpdatedAt = quote.asOfTimestamp ?? stock.lastUpdatedAt ?? Date.now();
   stock.dataSource = quote.source ?? stock.dataSource;
+  const fallbackWarnings = shouldShowCacheWarning(
+    normalizeSession(quote.session) ?? stock.quoteSession ?? QUOTE_SESSIONS.CLOSED,
+    quote.source ?? stock.dataSource ?? QUOTE_SOURCES.CACHED,
+  )
+    ? [CACHE_WARNING_MESSAGE]
+    : [];
+  stock.quoteWarnings = Array.isArray(quote.warnings) ? quote.warnings : fallbackWarnings;
   if (quote.exchangeTimezoneName) {
     stock.exchangeTimezoneName = quote.exchangeTimezoneName;
   }
@@ -3124,10 +3250,10 @@ function updateStockWithHistorical(stock, historyPayload) {
     stock.lastUpdated = formatTime(stock.lastUpdatedAt);
   }
   if (!stock.quoteSession) {
-    stock.quoteSession = "DELAYED";
+    stock.quoteSession = QUOTE_SESSIONS.CLOSED;
   }
-  if (stock.dataSource === "live") {
-    stock.dataSource = "historical";
+  if (!stock.dataSource || stock.dataSource === QUOTE_SOURCES.REALTIME) {
+    stock.dataSource = QUOTE_SOURCES.LAST_CLOSE;
   }
 }
 
@@ -3150,7 +3276,8 @@ function createSymbolEntry(symbol, fallbackName) {
     quoteAsOf: null,
     quoteSession: null,
     isRealtime: false,
-    dataSource: "live",
+    dataSource: QUOTE_SOURCES.REALTIME,
+    quoteWarnings: [],
   };
 }
 
@@ -3202,7 +3329,7 @@ function applyCachedMarketData(symbol, entry, options = {}) {
   const resolvedEntry = entry ?? createSymbolEntry(symbol);
   const cachedQuote = getCachedQuote(symbol) ?? getLastKnownQuote(symbol);
   if (cachedQuote) {
-    updateStockWithQuote(resolvedEntry, { ...cachedQuote, source: "cache" });
+    updateStockWithQuote(resolvedEntry, { ...cachedQuote, source: QUOTE_SOURCES.CACHED });
   }
   const cachedHistory = getCachedHistorical(symbol, options);
   if (cachedHistory) {
@@ -3300,7 +3427,7 @@ async function fetchHistoricalSeries(symbol, options = {}) {
   }
 }
 
-function deriveHistoricalQuote(closes, timestamps, sessionOverride = "DELAYED") {
+function deriveHistoricalQuote(closes, timestamps, sessionOverride = QUOTE_SESSIONS.CLOSED) {
   if (!closes.length) {
     return null;
   }
@@ -3320,9 +3447,9 @@ function deriveHistoricalQuote(closes, timestamps, sessionOverride = "DELAYED") 
   };
 }
 
-function buildUnavailableQuote(lastKnown, sessionFallback = "UNKNOWN") {
+function buildUnavailableQuote(lastKnown, sessionFallback = QUOTE_SESSIONS.CLOSED) {
   if (lastKnown) {
-    return { ...lastKnown, source: "cache", unavailable: true };
+    return { ...lastKnown, source: QUOTE_SOURCES.CACHED, unavailable: true };
   }
   return {
     price: null,
@@ -3332,7 +3459,7 @@ function buildUnavailableQuote(lastKnown, sessionFallback = "UNKNOWN") {
     isRealtime: false,
     session: sessionFallback,
     previousClose: null,
-    source: "unavailable",
+    source: QUOTE_SOURCES.CACHED,
     unavailable: true,
   };
 }
@@ -3343,7 +3470,22 @@ async function getQuoteInternal(symbol, options = {}) {
   }
   const cachedQuote = getCachedQuote(symbol);
   if (cachedQuote && options.useCache !== false) {
-    return { ...cachedQuote, source: cachedQuote.source ?? "cache" };
+    const normalized = normalizeQuote(
+      {
+        ...cachedQuote,
+        source: QUOTE_SOURCES.CACHED,
+        lastKnownSession: cachedQuote.session ?? null,
+      },
+      Date.now(),
+    );
+    return normalized
+      ? {
+          ...normalized,
+          change: normalized.changeAbs,
+          changePct: normalized.changePct,
+          asOfTimestamp: normalized.asOfTs,
+        }
+      : { ...cachedQuote, source: QUOTE_SOURCES.CACHED };
   }
 
   let providerQuote = options.prefetchedQuote ?? null;
@@ -3384,21 +3526,21 @@ async function getQuoteInternal(symbol, options = {}) {
   }
 
   if (providerQuote) {
-    const builtQuote = buildQuoteFromYahoo(providerQuote);
-    if (builtQuote) {
-      const session =
-        builtQuote.session === "UNKNOWN" && lastKnown?.session ? lastKnown.session : builtQuote.session;
-      const source =
-        builtQuote.session === "UNKNOWN" && lastKnown?.session
-          ? "cache"
-          : getQuoteSourceForSession(session);
+    const normalized = normalizeQuote(
+      {
+        ...providerQuote,
+        lastKnownSession: lastKnown?.session ?? null,
+      },
+      Date.now(),
+    );
+    if (normalized) {
       const fullQuote = {
-        ...builtQuote,
-        session,
-        isRealtime: session === "REGULAR" || session === "PRE" || session === "POST",
-        source,
+        ...normalized,
+        change: normalized.changeAbs,
+        changePct: normalized.changePct,
+        asOfTimestamp: normalized.asOfTs,
       };
-      logYahooQuoteDebug(providerQuote, session, source);
+      logYahooQuoteDebug(providerQuote, fullQuote.session, fullQuote.source);
       updateQuoteCache(symbol, fullQuote);
       setLastKnownQuote(symbol, fullQuote);
       return fullQuote;
@@ -3414,18 +3556,46 @@ async function getQuoteInternal(symbol, options = {}) {
   }
 
   if (lastKnown) {
-    return { ...lastKnown, source: "cache" };
+    const normalized = normalizeQuote(
+      { ...lastKnown, source: QUOTE_SOURCES.CACHED, lastKnownSession: lastKnown.session ?? null },
+      Date.now(),
+    );
+    return normalized
+      ? {
+          ...normalized,
+          change: normalized.changeAbs,
+          changePct: normalized.changePct,
+          asOfTimestamp: normalized.asOfTs,
+        }
+      : { ...lastKnown, source: QUOTE_SOURCES.CACHED };
   }
 
   try {
     const historical = await fetchHistoricalSeries(symbol, options);
-    const derived = deriveHistoricalQuote(historical.closes, historical.timestamps, "DELAYED");
+    const derived = deriveHistoricalQuote(historical.closes, historical.timestamps, QUOTE_SESSIONS.CLOSED);
     if (derived) {
-      const fullQuote = {
-        ...derived,
-        source: "historical",
-        ...(providerError?.details?.reason === "empty_quote" ? { unavailable: true } : {}),
-      };
+      const normalized = normalizeQuote(
+        {
+          ...derived,
+          source: QUOTE_SOURCES.LAST_CLOSE,
+          lastKnownSession: lastKnown?.session ?? null,
+        },
+        Date.now(),
+      );
+      const fullQuote = normalized
+        ? {
+            ...normalized,
+            change: normalized.changeAbs,
+            changePct: normalized.changePct,
+            asOfTimestamp: normalized.asOfTs,
+          }
+        : {
+            ...derived,
+            source: QUOTE_SOURCES.LAST_CLOSE,
+          };
+      if (providerError?.details?.reason === "empty_quote") {
+        fullQuote.unavailable = true;
+      }
       setLastKnownQuote(symbol, fullQuote);
       return fullQuote;
     }
@@ -3540,9 +3710,9 @@ async function loadSymbolSnapshot(symbol, options = {}) {
       });
       if (hasAnyMarketData(fallbackEntry)) {
         options.onIntermediateSnapshot({
-          status: "cache",
+          status: QUOTE_SOURCES.CACHED,
           entry: fallbackEntry,
-          dataSource: fallbackEntry.dataSource ?? "cache",
+          dataSource: fallbackEntry.dataSource ?? QUOTE_SOURCES.CACHED,
         });
       }
     }, fallbackMs);
@@ -3591,7 +3761,7 @@ async function loadSymbolSnapshot(symbol, options = {}) {
 
   if (!quote && !historyPayload) {
     if (hasCachedData) {
-      return { status: "cache", entry: cachedEntry };
+      return { status: QUOTE_SOURCES.CACHED, entry: cachedEntry };
     }
     throw new MarketDataError("unavailable", "Quote and chart requests failed.");
   }
@@ -3606,8 +3776,8 @@ async function loadSymbolSnapshot(symbol, options = {}) {
   }
 
   extraSymbolData.set(symbol, entry);
-  const status = quote?.unavailable ? "unavailable" : quote?.source ?? entry.dataSource ?? "cache";
-  return { status, entry, dataSource: status };
+  const status = quote?.unavailable ? "unavailable" : quote?.source ?? entry.dataSource ?? QUOTE_SOURCES.CACHED;
+  return { status, entry, dataSource: entry.dataSource ?? status };
 }
 
 function getMarketFilterValues() {
@@ -3972,20 +4142,18 @@ function getMarketRowDisplay(stock) {
       : null);
   const priceDisplay =
     stock.lastPrice !== null ? quoteFormatter.format(stock.lastPrice) : "Price unavailable";
-  const badge =
-    stock.lastPrice !== null
-      ? getSessionBadge(
-          {
-            session: stock.quoteSession ?? "CLOSED",
-          },
-          stock.dataSource,
-        )
-      : null;
+  const source = stock.dataSource ?? QUOTE_SOURCES.CACHED;
+  const session = stock.quoteSession ?? QUOTE_SESSIONS.CLOSED;
+  const sourceBadge = stock.lastPrice !== null ? getSourceBadge(source) : null;
+  const sessionBadge = stock.lastPrice !== null ? getSessionBadgeForSession(session) : null;
+  const showWarning =
+    stock.lastPrice !== null &&
+    (stock.quoteWarnings?.includes?.(CACHE_WARNING_MESSAGE) || shouldShowCacheWarning(session, source));
   const meta =
     hasAnyData
       ? `As of ${formatAsOf(
           stock.quoteAsOf || stock.lastUpdatedAt || stock.lastHistoricalTimestamp,
-          stock.exchangeTimezoneName,
+          { tz: "UTC" },
         )}`
       : "Awaiting quote";
   const changeDisplay =
@@ -4004,7 +4172,9 @@ function getMarketRowDisplay(stock) {
 
   return {
     priceDisplay,
-    badge,
+    sourceBadge,
+    sessionBadge,
+    showWarning,
     meta,
     changeDisplay,
     changeClass,
@@ -4147,26 +4317,6 @@ function sortMarketEntries(entries, sortKey = DEFAULT_SORT_KEY) {
   return keyed.map((entry) => entry.stock);
 }
 
-function getOpportunityBadge(stock) {
-  if (!stock) {
-    return null;
-  }
-  if (stock.dataSource === "cache") {
-    return { label: "CACHED", className: "cached", tooltip: "Cached last-known quote." };
-  }
-  if (stock.dataSource === "historical") {
-    return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from historical data." };
-  }
-  const session = stock.quoteSession ?? "CLOSED";
-  if (session === "DELAYED") {
-    return { label: "DELAYED", className: "delayed", tooltip: "Delayed quote." };
-  }
-  if (session === "REGULAR" || session === "PRE" || session === "POST") {
-    return { label: "REALTIME", className: "realtime", tooltip: "Live quote." };
-  }
-  return { label: "LAST CLOSE", className: "closed", tooltip: "Last close from recent data." };
-}
-
 function compareScoreConfidence(a, b) {
   const aScore = a.score ?? -Infinity;
   const bScore = b.score ?? -Infinity;
@@ -4304,7 +4454,9 @@ function updateMarketRowCells(row, stock) {
   const timeHorizon = calculateTimeHorizon(stock.history);
   const {
     priceDisplay,
-    badge,
+    sourceBadge,
+    sessionBadge,
+    showWarning,
     meta,
     changeDisplay,
     changeClass,
@@ -4371,8 +4523,18 @@ function updateMarketRowCells(row, stock) {
         <div class="price-main">
           <span>${priceDisplay}</span>
           ${
-            badge
-              ? `<span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span>`
+            sourceBadge
+              ? `<span class="session-badge ${sourceBadge.className}" title="${sourceBadge.tooltip}">${sourceBadge.label}</span>`
+              : ""
+          }
+          ${
+            sessionBadge
+              ? `<span class="session-badge ${sessionBadge.className}" title="${sessionBadge.tooltip}">${sessionBadge.label}</span>`
+              : ""
+          }
+          ${
+            showWarning
+              ? `<span class="warning-icon" title="${CACHE_WARNING_MESSAGE}" aria-label="${CACHE_WARNING_MESSAGE}">⚠</span>`
               : ""
           }
         </div>
@@ -4447,7 +4609,11 @@ function renderOpportunityGroup(listEl, noteEl, entries) {
     .map((entry) => {
       const { stock, score, confidence } = entry;
       const display = getMarketRowDisplay(stock);
-      const badge = getOpportunityBadge(stock);
+      const sourceBadge = display.sourceBadge;
+      const sessionBadge = display.sessionBadge;
+      const warningIcon = display.showWarning
+        ? `<span class="warning-icon" title="${CACHE_WARNING_MESSAGE}" aria-label="${CACHE_WARNING_MESSAGE}">⚠</span>`
+        : "";
       const changeClass = display.dayDisplay === "n/a" ? "muted" : display.dayClass;
       const changeMarkup =
         display.dayDisplay === "n/a"
@@ -4461,16 +4627,23 @@ function renderOpportunityGroup(listEl, noteEl, entries) {
             <div class="opportunity-top">
               <span>${stock.symbol}</span>
               ${
-                badge
-                  ? `<span class="session-badge ${badge.className}" title="${badge.tooltip}">${badge.label}</span>`
+                sourceBadge
+                  ? `<span class="session-badge ${sourceBadge.className}" title="${sourceBadge.tooltip}">${sourceBadge.label}</span>`
                   : ""
               }
+              ${
+                sessionBadge
+                  ? `<span class="session-badge ${sessionBadge.className}" title="${sessionBadge.tooltip}">${sessionBadge.label}</span>`
+                  : ""
+              }
+              ${warningIcon}
             </div>
             <div class="opportunity-metrics">
               <span class="opportunity-price">${display.priceDisplay}</span>
               ${changeMarkup}
               <span class="opportunity-score">${scoreValue} / ${confidenceValue}</span>
             </div>
+            <div class="price-meta">${display.meta}</div>
           </div>
           <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
             Analyze
@@ -4726,7 +4899,7 @@ function initTradePage() {
         showErrors([]);
         setSymbolError("");
         let statusMessage = "";
-        if (snapshot?.status === "cache") {
+        if (snapshot?.status === QUOTE_SOURCES.CACHED) {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
           statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
           marketIndicatorState.usingCached = true;
@@ -4738,14 +4911,20 @@ function initTradePage() {
             : "Data unavailable — please try again shortly.";
           marketIndicatorState.usingCached = true;
           updateMarketIndicator();
-        } else if (snapshot?.dataSource === "historical") {
+        } else if (snapshot?.dataSource === QUOTE_SOURCES.LAST_CLOSE) {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
           statusMessage = `Live data unavailable — showing last close from ${lastUpdated}.`;
-        } else if (snapshot?.dataSource === "delayed" || snapshot?.dataSource === "closed") {
+        } else if (snapshot?.dataSource === QUOTE_SOURCES.DELAYED) {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
-          statusMessage = `Market closed — showing last close from ${lastUpdated}.`;
-        } else {
+          statusMessage = `Delayed quote — last update at ${lastUpdated}.`;
+        } else if (snapshot?.dataSource === QUOTE_SOURCES.CACHED) {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
+        } else if (snapshot?.dataSource === QUOTE_SOURCES.REALTIME) {
           statusMessage = usedCachedFallback ? "Updated with live data." : "";
+        } else {
+          const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
+          statusMessage = lastUpdated ? `Market closed — showing last close from ${lastUpdated}.` : "";
         }
         showStatus(statusMessage);
       } catch (error) {
@@ -5045,6 +5224,7 @@ const appCore = {
   getQuote,
   fetchHistoricalSeries,
   deriveMarketSession,
+  normalizeQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
   extraSymbolData,

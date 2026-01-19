@@ -695,6 +695,19 @@ tbody tr:hover td[data-col="actions"] {
   color: #6c728d;
 }
 
+.warning-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  font-size: 0.75rem;
+  color: #b07d0c;
+  background: #fff6db;
+  border-radius: 999px;
+  line-height: 1;
+}
+
 .session-badge {
   display: inline-flex;
   align-items: center;
