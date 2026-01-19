@@ -40,6 +40,7 @@ const {
   formatTimestamp,
   runBacktest30d,
   getMarketIndicatorData,
+  getQuoteBadges,
   handleMarketRowAction,
   updateMarketRowCells,
   getMarketTableColumnKeys,
@@ -1207,6 +1208,22 @@ const tests = [
     },
   },
   {
+    name: "selects badges and warnings for unavailable regular-session quotes",
+    fn: async () => {
+      const asOf = Date.UTC(2024, 0, 2, 15, 30, 0);
+      const badges = getQuoteBadges({
+        price: 101.5,
+        session: "REGULAR",
+        source: "UNAVAILABLE",
+        asOfTimestamp: asOf,
+      });
+      assert.strictEqual(badges.sourceBadge.label, "UNAVAILABLE");
+      assert.strictEqual(badges.sessionBadge.label, "REGULAR");
+      assert.ok(badges.asOfLabel.startsWith("As of "));
+      assert.strictEqual(badges.showWarning, true);
+    },
+  },
+  {
     name: "hydrates cached quotes for immediate table display",
     fn: async () => {
       resetQuoteCache();
@@ -1267,6 +1284,22 @@ const tests = [
       const display = getMarketRowDisplay(stock);
       assert.notStrictEqual(display.meta, "Awaiting quote");
       assert.notStrictEqual(display.priceDisplay, "Price unavailable");
+    },
+  },
+  {
+    name: "does not overwrite a known session with unknown during transient failures",
+    fn: async () => {
+      const stock = { quoteSession: "REGULAR" };
+      updateStockWithQuote(stock, {
+        price: 92.1,
+        change: -0.2,
+        changePct: -0.21,
+        asOfTimestamp: Date.now(),
+        isRealtime: false,
+        session: "UNKNOWN",
+        source: "CACHED",
+      });
+      assert.strictEqual(stock.quoteSession, "REGULAR");
     },
   },
   {
