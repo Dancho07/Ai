@@ -1347,7 +1347,7 @@ const tests = [
       const change1dCell = cells.get("change1d");
       assert.ok(changeCell.textContent.includes("-2.68"));
       assert.ok(!changeCell.textContent.includes("n/a"));
-      assert.strictEqual(change1dCell.textContent.trim(), "n/a");
+      assert.strictEqual(change1dCell.textContent.trim(), "-1.04%");
     },
   },
   {
@@ -1393,13 +1393,18 @@ const tests = [
         (match) => match[1],
       );
       const headerTextIncludes1d = html.includes(">1D change<");
+      const headerTextIncludes1m = html.includes(">1M change<");
+      const headerTextIncludes1y = html.includes(">1Y change<");
       const columnKeys = getMarketTableColumnKeys();
       const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
         (match) => match[1],
       );
       assert.strictEqual(headerTextIncludes1d, true);
+      assert.strictEqual(headerTextIncludes1m, true);
+      assert.strictEqual(headerTextIncludes1y, true);
       assert.deepStrictEqual(columnKeys, headerCols);
       assert.deepStrictEqual(rowCols, columnKeys);
+      assert.strictEqual(rowCols.length, headerCols.length);
     },
   },
   {
@@ -1433,6 +1438,76 @@ const tests = [
       const analyzeCell = cells.get("analyze");
       assert.ok(change1dCell.textContent.includes("%"));
       assert.strictEqual(analyzeCell.textContent.trim(), "Analyze");
+    },
+  },
+  {
+    name: "writes 1M and 1Y change values into their own cells",
+    fn: async () => {
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "NVDA",
+        name: "NVIDIA",
+        sector: "Technology",
+        cap: "Large",
+        history: [90, 100, 110, 120],
+        lastPrice: 120,
+        previousClose: 110,
+        lastChange: 10,
+        lastChangePct: 9.1,
+        dailyChange: 2.1,
+        monthlyChange: 5.5,
+        yearlyChange: -12.4,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const change1mCell = cells.get("change1m");
+      const change1yCell = cells.get("change1y");
+      assert.ok(change1mCell.textContent.includes("%"));
+      assert.ok(change1yCell.textContent.includes("%"));
+      assert.ok(change1mCell.textContent.includes("5.5"));
+      assert.ok(change1yCell.textContent.includes("-12.4"));
+    },
+  },
+  {
+    name: "renders n/a for 1M and 1Y when history is missing",
+    fn: async () => {
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "PLTR",
+        name: "Palantir",
+        sector: "Technology",
+        cap: "Mid",
+        history: [],
+        lastPrice: 15,
+        previousClose: 14.8,
+        lastChange: 0.2,
+        lastChangePct: 1.35,
+        dailyChange: null,
+        monthlyChange: null,
+        yearlyChange: null,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const change1mCell = cells.get("change1m");
+      const change1yCell = cells.get("change1y");
+      assert.strictEqual(change1mCell.textContent.trim(), "n/a");
+      assert.strictEqual(change1yCell.textContent.trim(), "n/a");
     },
   },
   {

@@ -336,7 +336,7 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  min-width: 1450px;
+  min-width: 1420px;
   table-layout: fixed;
 }
 
@@ -533,57 +533,65 @@ td[data-col="symbol"] {
 
 th[data-col="company"],
 td[data-col="company"] {
-  width: 260px;
-  min-width: 220px;
-  max-width: 280px;
+  width: 240px;
+  min-width: 200px;
+  max-width: 260px;
 }
 
 th[data-col="sector"],
 td[data-col="sector"] {
-  width: 140px;
-  min-width: 140px;
+  width: 120px;
+  min-width: 120px;
 }
 
 th[data-col="cap"],
 td[data-col="cap"] {
-  width: 110px;
-  min-width: 110px;
+  width: 100px;
+  min-width: 100px;
 }
 
 th[data-col="signal"],
 td[data-col="signal"] {
-  width: 110px;
-  min-width: 110px;
+  width: 100px;
+  min-width: 100px;
 }
 
 th[data-col="horizon"],
 td[data-col="horizon"] {
-  width: 150px;
-  min-width: 150px;
+  width: 130px;
+  min-width: 130px;
 }
 
 th[data-col="price"],
 td[data-col="price"] {
-  width: 170px;
-  min-width: 170px;
+  width: 150px;
+  min-width: 150px;
 }
 
 th[data-col="change"],
 td[data-col="change"] {
-  width: 180px;
-  min-width: 180px;
+  width: 150px;
+  min-width: 150px;
 }
 
 th[data-col="change1d"],
 td[data-col="change1d"] {
-  width: 120px;
-  min-width: 120px;
+  width: 110px;
+  min-width: 110px;
+}
+
+th[data-col="change1m"],
+td[data-col="change1m"],
+th[data-col="change1y"],
+td[data-col="change1y"] {
+  width: 110px;
+  min-width: 110px;
 }
 
 th[data-col="analyze"],
 td[data-col="analyze"] {
-  width: 120px;
-  min-width: 120px;
+  width: 110px;
+  min-width: 110px;
   text-align: right;
 }
 
@@ -603,8 +611,47 @@ td[data-col="analyze"] {
 }
 
 .change-cell,
-.change1d-cell {
+.change1d-cell,
+.change1m-cell,
+.change1y-cell {
   text-overflow: clip;
+}
+
+.price-performance {
+  display: none;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.78rem;
+  color: #5d627c;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.price-performance .performance-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.price-performance .performance-label {
+  font-weight: 600;
+  color: #6c728d;
+}
+
+.price-performance .performance-value {
+  font-weight: 600;
+}
+
+.price-performance .performance-value.positive {
+  color: #1d7a4a;
+}
+
+.price-performance .performance-value.negative {
+  color: #b54141;
+}
+
+.price-performance .performance-separator {
+  color: #9aa1c4;
 }
 
 .price-change.positive {
@@ -927,6 +974,23 @@ td[data-col="analyze"] {
 
   .market-table {
     overflow-x: hidden;
+  }
+}
+
+@media (max-width: 1280px) {
+  table {
+    min-width: 1200px;
+  }
+
+  th[data-col="change1m"],
+  td[data-col="change1m"],
+  th[data-col="change1y"],
+  td[data-col="change1y"] {
+    display: none;
+  }
+
+  .price-performance {
+    display: inline-flex;
   }
 }
 
