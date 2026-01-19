@@ -1,4 +1,6 @@
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const {
   MarketDataError,
   fetchJsonWithRetry,
@@ -35,6 +37,8 @@ const {
   getMarketIndicatorData,
   handleMarketRowAction,
   updateMarketRowCells,
+  getMarketTableColumnKeys,
+  buildMarketRowMarkup,
   scheduleResultScroll,
   sortMarketEntries,
 } = require("../app");
@@ -1315,6 +1319,54 @@ const tests = [
       const change1dCell = cells.get("change1d");
       assert.ok(changeCell.textContent.includes("+100.12"));
       assert.ok(!changeCell.textContent.includes(change1dCell.textContent));
+    },
+  },
+  {
+    name: "keeps market table columns aligned with header order",
+    fn: async () => {
+      const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+      const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      const columnKeys = getMarketTableColumnKeys();
+      const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      assert.deepStrictEqual(columnKeys, headerCols);
+      assert.deepStrictEqual(rowCols, columnKeys);
+    },
+  },
+  {
+    name: "writes 1D change into its own cell and keeps analyze clean",
+    fn: async () => {
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "AAPL",
+        name: "Apple",
+        sector: "Technology",
+        cap: "Large",
+        history: [100, 101, 102],
+        lastPrice: 102,
+        previousClose: 101,
+        lastChange: 1,
+        lastChangePct: 0.99,
+        dailyChange: 1.25,
+        monthlyChange: 2.5,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const change1dCell = cells.get("change1d");
+      const analyzeCell = cells.get("analyze");
+      assert.ok(change1dCell.textContent.includes("%"));
+      assert.ok(!analyzeCell.textContent.includes("%"));
     },
   },
   {

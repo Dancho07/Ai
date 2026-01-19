@@ -334,9 +334,10 @@ button.is-loading .button-progress {
 
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   min-width: 1520px;
-  table-layout: auto;
+  table-layout: fixed;
 }
 
 th,
@@ -346,6 +347,7 @@ td {
   border-bottom: 1px solid #eef1ff;
   font-size: 0.98rem;
   white-space: normal;
+  overflow: hidden;
 }
 
 th {
@@ -509,6 +511,10 @@ tbody tr:hover td:last-child {
   border-radius: 8px;
 }
 
+.num-cell {
+  white-space: nowrap;
+}
+
 th[data-col="symbol"],
 td[data-col="symbol"] {
   width: 90px;
@@ -554,8 +560,8 @@ td[data-col="price"] {
 
 th[data-col="change"],
 td[data-col="change"] {
-  width: 170px;
-  min-width: 170px;
+  width: 160px;
+  min-width: 160px;
 }
 
 th[data-col="change1d"],
@@ -568,8 +574,9 @@ td[data-col="change1m"] {
 
 th[data-col="analyze"],
 td[data-col="analyze"] {
-  width: 130px;
-  min-width: 130px;
+  width: 120px;
+  min-width: 120px;
+  text-align: right;
 }
 
 th[data-col="symbol"],
@@ -582,14 +589,6 @@ th[data-col="signal"],
 td[data-col="signal"],
 th[data-col="horizon"],
 td[data-col="horizon"],
-th[data-col="price"],
-td[data-col="price"],
-th[data-col="change"],
-td[data-col="change"],
-th[data-col="change1d"],
-td[data-col="change1d"],
-th[data-col="change1m"],
-td[data-col="change1m"],
 th[data-col="analyze"],
 td[data-col="analyze"] {
   white-space: nowrap;
