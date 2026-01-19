@@ -69,6 +69,10 @@ const filterSignal = isBrowser ? document.getElementById("filter-signal") : null
 const filterMin = isBrowser ? document.getElementById("filter-min") : null;
 const filterMax = isBrowser ? document.getElementById("filter-max") : null;
 const filterMonth = isBrowser ? document.getElementById("filter-month") : null;
+const filterFavorites = isBrowser ? document.getElementById("filter-favorites") : null;
+const watchlistInput = isBrowser ? document.getElementById("watchlist-input") : null;
+const watchlistAddButton = isBrowser ? document.getElementById("watchlist-add-button") : null;
+const watchlistError = isBrowser ? document.getElementById("watchlist-error") : null;
 let sortBySelect = isBrowser ? document.getElementById("sort-by") : null;
 const opportunitiesToggle = isBrowser ? document.getElementById("opportunities-toggle") : null;
 const opportunitiesContent = isBrowser ? document.getElementById("opportunities-content") : null;
@@ -102,6 +106,7 @@ const DEFAULT_SORT_KEY = "signal";
 const MARKET_HISTORY_RANGE = "1y";
 const MARKET_HISTORY_INTERVAL = "1d";
 const MARKET_TABLE_COLUMNS = [
+  { key: "favorite", className: "favorite-cell" },
   { key: "symbol" },
   { key: "company", className: "company-cell" },
   { key: "sector" },
@@ -113,10 +118,13 @@ const MARKET_TABLE_COLUMNS = [
   { key: "change1d", className: "price-change change1d-cell num-cell" },
   { key: "change1m", className: "price-change change1m-cell num-cell" },
   { key: "change1y", className: "price-change change1y-cell num-cell" },
+  { key: "remove", className: "remove-cell" },
   { key: "analyze", className: "analyze-cell" },
 ];
 
 const FORM_STATE_KEY = "trade_form_state_v1";
+const WATCHLIST_STORAGE_KEY = "watchlist_v1";
+const FAVORITES_STORAGE_KEY = "favorites_v1";
 const POSITION_SIZING_MODES = {
   CASH: "cash",
   RISK_PERCENT: "risk_percent",
@@ -133,7 +141,7 @@ const SWING_LOOKBACK = 10;
 const HOLD_LOOKBACK_MIN = 10;
 const HOLD_LOOKBACK_MAX = 20;
 
-const marketWatchlist = [
+const DEFAULT_WATCHLIST = [
   { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
   { symbol: "MSFT", name: "Microsoft", sector: "Technology", cap: "Large" },
   { symbol: "NVDA", name: "NVIDIA", sector: "Technology", cap: "Large" },
@@ -156,25 +164,20 @@ const marketWatchlist = [
   { symbol: "UPST", name: "Upstart", sector: "Finance", cap: "Small" },
 ];
 
-const marketState = marketWatchlist.map((stock) => ({
-  ...stock,
-  history: [],
-  lastPrice: null,
-  previousClose: null,
-  lastChange: null,
-  lastChangePct: null,
-  dailyChange: null,
-  monthlyChange: null,
-  yearlyChange: null,
-  lastUpdated: null,
-  lastUpdatedAt: null,
-  quoteAsOf: null,
-  quoteSession: null,
-  isRealtime: false,
-  dataSource: "live",
-  exchangeTimezoneName: null,
-  exchangeTimezoneShortName: null,
-}));
+const DEFAULT_WATCHLIST_SYMBOLS = DEFAULT_WATCHLIST.map((stock) => stock.symbol);
+const DEFAULT_WATCHLIST_LOOKUP = new Map(DEFAULT_WATCHLIST.map((stock) => [stock.symbol, stock]));
+
+const storageAdapter =
+  isBrowser && typeof localStorage !== "undefined" ? createStorageAdapter(localStorage) : createStorageAdapter(null);
+const watchlistStore = createWatchlistStore({
+  storage: storageAdapter,
+  defaultSymbols: DEFAULT_WATCHLIST_SYMBOLS,
+});
+const favoritesStore = createFavoritesStore({ storage: storageAdapter });
+
+let marketState = [];
+let marketStateIndex = new Map();
+let activeWatchlistSymbols = new Set();
 const extraSymbolData = new Map();
 
 const quoteFormatter = new Intl.NumberFormat("en-US", {
@@ -391,6 +394,159 @@ function getSymbolValidationMessage(symbol) {
     return "Stock symbols must start with a letter and include up to 10 letters, numbers, dots, or hyphens (e.g. BRK.B).";
   }
   return "";
+}
+
+function createStorageAdapter(storage) {
+  return {
+    get: (key) => {
+      if (!storage?.getItem) {
+        return null;
+      }
+      const raw = storage.getItem(key);
+      if (!raw) {
+        return null;
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (error) {
+        return null;
+      }
+    },
+    set: (key, value) => {
+      if (!storage?.setItem) {
+        return;
+      }
+      storage.setItem(key, JSON.stringify(value));
+    },
+  };
+}
+
+function isValidWatchlistSymbol(symbol) {
+  const symbolPattern = /^[A-Z0-9.-]{1,10}$/;
+  return symbolPattern.test(symbol);
+}
+
+function normalizeWatchlistSymbol(value) {
+  return normalizeSymbolInput(value ?? "");
+}
+
+function sanitizeSymbolList(list) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const normalized = list.map((symbol) => normalizeWatchlistSymbol(symbol)).filter(Boolean);
+  const filtered = normalized.filter((symbol) => isValidWatchlistSymbol(symbol));
+  return [...new Set(filtered)];
+}
+
+function createWatchlistStore({ storage, defaultSymbols }) {
+  let cached = null;
+  const defaults = sanitizeSymbolList(defaultSymbols);
+
+  const load = () => {
+    if (cached) {
+      return cached;
+    }
+    const stored = storage?.get?.(WATCHLIST_STORAGE_KEY);
+    const normalized = sanitizeSymbolList(stored);
+    cached = normalized.length ? normalized : defaults;
+    return cached;
+  };
+
+  const persist = () => {
+    storage?.set?.(WATCHLIST_STORAGE_KEY, cached);
+  };
+
+  const store = {
+    getWatchlist: () => [...load()],
+    addSymbol: (symbol) => {
+      const normalized = normalizeWatchlistSymbol(symbol);
+      if (!normalized || !isValidWatchlistSymbol(normalized)) {
+        return { added: false, symbol: normalized, reason: "invalid" };
+      }
+      const current = load();
+      if (current.includes(normalized)) {
+        return { added: false, symbol: normalized, reason: "duplicate" };
+      }
+      cached = [...current, normalized];
+      persist();
+      return { added: true, symbol: normalized };
+    },
+    removeSymbol: (symbol) => {
+      const normalized = normalizeWatchlistSymbol(symbol);
+      const current = load();
+      const next = current.filter((entry) => entry !== normalized);
+      if (next.length === current.length) {
+        return false;
+      }
+      cached = next;
+      persist();
+      return true;
+    },
+    resetToDefault: () => {
+      cached = [...defaults];
+      persist();
+      return [...cached];
+    },
+  };
+
+  return store;
+}
+
+function createFavoritesStore({ storage }) {
+  let cached = null;
+
+  const load = () => {
+    if (cached) {
+      return cached;
+    }
+    const stored = storage?.get?.(FAVORITES_STORAGE_KEY);
+    cached = sanitizeSymbolList(stored);
+    return cached;
+  };
+
+  const persist = () => {
+    storage?.set?.(FAVORITES_STORAGE_KEY, cached);
+  };
+
+  const store = {
+    getFavorites: () => [...load()],
+    isFavorite: (symbol) => {
+      const normalized = normalizeWatchlistSymbol(symbol);
+      if (!normalized) {
+        return false;
+      }
+      return load().includes(normalized);
+    },
+    toggleFavorite: (symbol) => {
+      const normalized = normalizeWatchlistSymbol(symbol);
+      if (!normalized || !isValidWatchlistSymbol(normalized)) {
+        return { favorite: false, symbol: normalized, reason: "invalid" };
+      }
+      const set = new Set(load());
+      if (set.has(normalized)) {
+        set.delete(normalized);
+      } else {
+        set.add(normalized);
+      }
+      cached = [...set];
+      persist();
+      return { favorite: set.has(normalized), symbol: normalized };
+    },
+    removeSymbol: (symbol) => {
+      const normalized = normalizeWatchlistSymbol(symbol);
+      const current = load();
+      const next = current.filter((entry) => entry !== normalized);
+      if (next.length === current.length) {
+        return false;
+      }
+      cached = next;
+      persist();
+      return true;
+    },
+  };
+
+  return store;
 }
 
 function persistFormState(storage, { symbol, cash, risk, positionSizing, riskPercent }) {
@@ -2250,7 +2406,7 @@ function getLivePriceForSymbol(symbol) {
 
 function getStockEntry(symbol) {
   const cachedExtra = extraSymbolData.get(symbol);
-  return cachedExtra ?? marketState.find((stock) => stock.symbol === symbol);
+  return cachedExtra ?? marketStateIndex.get(symbol) ?? marketState.find((stock) => stock.symbol === symbol);
 }
 
 function resetSymbolCache() {
@@ -2298,6 +2454,19 @@ function setSymbolError(message) {
   }
   symbolError.textContent = message;
   symbolError.classList.remove("hidden");
+}
+
+function setWatchlistError(message) {
+  if (!watchlistError) {
+    return;
+  }
+  if (!message) {
+    watchlistError.textContent = "";
+    watchlistError.classList.add("hidden");
+    return;
+  }
+  watchlistError.textContent = message;
+  watchlistError.classList.remove("hidden");
 }
 
 function showStatus(message) {
@@ -2750,6 +2919,50 @@ function createSymbolEntry(symbol, fallbackName) {
   };
 }
 
+function createMarketStateEntry(base) {
+  const entry = createSymbolEntry(base.symbol, base.name);
+  entry.sector = base.sector;
+  entry.cap = base.cap;
+  entry.exchangeTimezoneName = null;
+  entry.exchangeTimezoneShortName = null;
+  return entry;
+}
+
+function syncMarketStateWithWatchlist(symbols = watchlistStore.getWatchlist()) {
+  const next = [];
+  const nextIndex = new Map();
+  symbols.forEach((symbol) => {
+    const base = DEFAULT_WATCHLIST_LOOKUP.get(symbol);
+    let entry = marketStateIndex.get(symbol) ?? extraSymbolData.get(symbol);
+    if (!entry) {
+      entry = base ? createMarketStateEntry(base) : createSymbolEntry(symbol, symbol);
+    } else if (base) {
+      entry.name = base.name;
+      entry.sector = base.sector;
+      entry.cap = base.cap;
+    }
+    next.push(entry);
+    nextIndex.set(symbol, entry);
+  });
+  marketState = next;
+  marketStateIndex = nextIndex;
+  activeWatchlistSymbols = new Set(symbols);
+}
+
+function isSymbolInWatchlist(symbol) {
+  return activeWatchlistSymbols.has(symbol);
+}
+
+syncMarketStateWithWatchlist();
+
+function removeSymbolFromWatchlist(symbol, { watchlist = watchlistStore, favorites = favoritesStore } = {}) {
+  const removed = watchlist.removeSymbol(symbol);
+  if (removed) {
+    favorites.removeSymbol(symbol);
+  }
+  return removed;
+}
+
 function applyCachedMarketData(symbol, entry, options = {}) {
   const resolvedEntry = entry ?? createSymbolEntry(symbol);
   const cachedQuote = getCachedQuote(symbol) ?? getLastKnownQuote(symbol);
@@ -3162,14 +3375,26 @@ async function loadSymbolSnapshot(symbol, options = {}) {
   return { status, entry, dataSource: status };
 }
 
-function matchesFilters(stock) {
-  const searchValue = filterSearch.value.trim().toUpperCase();
-  const sectorValue = filterSector.value;
-  const capValue = filterCap.value;
-  const signalValue = filterSignal.value;
-  const minValue = Number(filterMin.value);
-  const maxValue = Number(filterMax.value);
-  const minMonthValue = Number(filterMonth.value);
+function getMarketFilterValues() {
+  return {
+    search: filterSearch?.value ?? "",
+    sector: filterSector?.value ?? "all",
+    cap: filterCap?.value ?? "all",
+    signal: filterSignal?.value ?? "all",
+    min: Number(filterMin?.value ?? ""),
+    max: Number(filterMax?.value ?? ""),
+    minMonth: Number(filterMonth?.value ?? ""),
+  };
+}
+
+function matchesFilters(stock, filters = getMarketFilterValues()) {
+  const searchValue = (filters.search ?? "").trim().toUpperCase();
+  const sectorValue = filters.sector ?? "all";
+  const capValue = filters.cap ?? "all";
+  const signalValue = filters.signal ?? "all";
+  const minValue = Number(filters.min);
+  const maxValue = Number(filters.max);
+  const minMonthValue = Number(filters.minMonth);
   const signal = calculateSignal(stock.history);
 
   if (searchValue && !stock.symbol.includes(searchValue)) {
@@ -3200,8 +3425,26 @@ function matchesFilters(stock) {
   return true;
 }
 
+function applyMarketFilters(entries, options = {}) {
+  const favoritesOnly = options.favoritesOnly === true;
+  const favoritesRaw = options.favorites ?? [];
+  const favoritesSet = favoritesRaw instanceof Set ? favoritesRaw : new Set(favoritesRaw);
+  const filters = options.filters ?? getMarketFilterValues();
+  const favoritesFiltered = favoritesOnly
+    ? entries.filter((entry) => favoritesSet.has(entry.symbol))
+    : entries;
+  return favoritesFiltered.filter((entry) => matchesFilters(entry, filters));
+}
+
+function getFilteredMarketEntries() {
+  const favoritesOnly = filterFavorites?.checked ?? false;
+  const favorites = favoritesStore.getFavorites();
+  const filters = getMarketFilterValues();
+  return applyMarketFilters(marketState, { favoritesOnly, favorites, filters });
+}
+
 function getVisibleSymbols() {
-  const filtered = marketState.filter(matchesFilters);
+  const filtered = getFilteredMarketEntries();
   return filtered.length ? filtered.map((stock) => stock.symbol) : marketState.map((stock) => stock.symbol);
 }
 
@@ -3213,6 +3456,9 @@ function isAwaitingQuote(stock) {
 }
 
 async function refreshSymbolData(symbol, options = {}) {
+  if (!isSymbolInWatchlist(symbol)) {
+    return { symbol, status: "removed" };
+  }
   const stock = getStockEntry(symbol);
   if (!stock) {
     return { symbol, status: "missing" };
@@ -3231,7 +3477,7 @@ async function refreshSymbolData(symbol, options = {}) {
 
   try {
     quote = await getQuote(symbol, options);
-    if (quote) {
+    if (quote && isSymbolInWatchlist(symbol)) {
       updateStockWithQuote(stock, quote);
     }
   } catch (error) {
@@ -3251,7 +3497,9 @@ async function refreshSymbolData(symbol, options = {}) {
   if (options.includeHistorical) {
     try {
       historyPayload = await fetchHistoricalSeries(symbol, options);
-      updateStockWithHistorical(stock, historyPayload);
+      if (isSymbolInWatchlist(symbol)) {
+        updateStockWithHistorical(stock, historyPayload);
+      }
     } catch (error) {
       logMarketDataEvent("warn", {
         event: "market_data_chart_failure",
@@ -3296,6 +3544,9 @@ async function refreshSymbolsWithLimiter(symbols, getOptions) {
 async function refreshVisibleQuotes() {
   const symbols = getVisibleSymbols();
   const symbolsToFetch = symbols.filter((symbol) => {
+    if (!isSymbolInWatchlist(symbol)) {
+      return false;
+    }
     const stock = getStockEntry(symbol);
     if (isAwaitingQuote(stock)) {
       return true;
@@ -3358,7 +3609,11 @@ async function refreshVisibleQuotes() {
 
   await Promise.all(
     symbols
-      .filter((symbol) => isHistoricalStale(symbol, { range: MARKET_HISTORY_RANGE, interval: MARKET_HISTORY_INTERVAL }))
+      .filter(
+        (symbol) =>
+          isSymbolInWatchlist(symbol) &&
+          isHistoricalStale(symbol, { range: MARKET_HISTORY_RANGE, interval: MARKET_HISTORY_INTERVAL }),
+      )
       .map(async (symbol) => {
         try {
           const historyPayload = await fetchHistoricalSeries(symbol, {
@@ -3366,7 +3621,7 @@ async function refreshVisibleQuotes() {
             interval: MARKET_HISTORY_INTERVAL,
           });
           const stock = getStockEntry(symbol);
-          if (stock) {
+          if (stock && isSymbolInWatchlist(symbol)) {
             updateStockWithHistorical(stock, historyPayload);
           }
         } catch (error) {
@@ -3864,9 +4119,27 @@ function updateMarketRowCells(row, stock) {
   const monthCell = row.querySelector('[data-col="change1m"]');
   const yearCell = row.querySelector('[data-col="change1y"]');
   const analyzeCell = row.querySelector('[data-col="analyze"]');
+  const favoriteCell = row.querySelector('[data-col="favorite"]');
+  const removeCell = row.querySelector('[data-col="remove"]');
+
+  const isFavorite = favoritesStore.isFavorite(stock.symbol);
 
   if (symbolCell) {
     symbolCell.textContent = stock.symbol;
+  }
+  if (favoriteCell) {
+    favoriteCell.innerHTML = `
+      <button
+        type="button"
+        class="icon-button favorite-toggle ${isFavorite ? "active" : ""}"
+        data-action="favorite"
+        data-symbol="${stock.symbol}"
+        aria-label="${isFavorite ? "Remove from favorites" : "Add to favorites"}"
+        aria-pressed="${isFavorite}"
+      >
+        ${isFavorite ? "★" : "☆"}
+      </button>
+    `;
   }
   if (companyCell) {
     companyCell.textContent = stock.name;
@@ -3929,6 +4202,19 @@ function updateMarketRowCells(row, stock) {
     analyzeCell.innerHTML = `
       <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
         Analyze
+      </button>
+    `;
+  }
+  if (removeCell) {
+    removeCell.innerHTML = `
+      <button
+        type="button"
+        class="icon-button remove-button"
+        data-action="remove"
+        data-symbol="${stock.symbol}"
+        aria-label="Remove ${stock.symbol} from watchlist"
+      >
+        ✕
       </button>
     `;
   }
@@ -3997,10 +4283,10 @@ function renderMarketTable() {
     return;
   }
   ensureSortControl();
-  const filtered = marketState.filter(matchesFilters);
+  const filtered = getFilteredMarketEntries();
   renderTopOpportunities(filtered);
   if (!filtered.length) {
-    marketBody.innerHTML = `<tr><td colspan="12">No stocks match these filters.</td></tr>`;
+    marketBody.innerHTML = `<tr><td colspan="${MARKET_TABLE_COLUMNS.length}">No stocks match these filters.</td></tr>`;
     updateMarketIndicator();
     return;
   }
@@ -4343,6 +4629,7 @@ function initLivePage({ onAnalyze } = {}) {
     return false;
   }
   let didInit = false;
+  syncMarketStateWithWatchlist();
   sortBySelect = ensureSortControl() ?? sortBySelect;
   [
     filterSearch,
@@ -4352,6 +4639,7 @@ function initLivePage({ onAnalyze } = {}) {
     filterMin,
     filterMax,
     filterMonth,
+    filterFavorites,
     sortBySelect,
   ].forEach((input) => {
     if (input) {
@@ -4363,6 +4651,58 @@ function initLivePage({ onAnalyze } = {}) {
       });
     }
   });
+
+  if (watchlistInput) {
+    didInit = true;
+    watchlistInput.addEventListener("input", () => {
+      setWatchlistError("");
+    });
+    watchlistInput.addEventListener("blur", () => {
+      watchlistInput.value = normalizeWatchlistSymbol(watchlistInput.value);
+    });
+    watchlistInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      watchlistAddButton?.click();
+    });
+  }
+
+  if (watchlistAddButton) {
+    didInit = true;
+    watchlistAddButton.addEventListener("click", () => {
+      if (!watchlistInput) {
+        return;
+      }
+      const rawValue = watchlistInput.value;
+      const normalized = normalizeWatchlistSymbol(rawValue);
+      if (!normalized) {
+        setWatchlistError("Enter a symbol to add.");
+        return;
+      }
+      if (!isValidWatchlistSymbol(normalized)) {
+        setWatchlistError("Symbols must be 1-10 characters using A–Z, 0–9, dots, or hyphens only.");
+        return;
+      }
+      if (watchlistStore.getWatchlist().includes(normalized)) {
+        setWatchlistError(`${normalized} is already in your watchlist.`);
+        return;
+      }
+      const result = watchlistStore.addSymbol(normalized);
+      if (!result.added) {
+        setWatchlistError("Unable to add that symbol right now.");
+        return;
+      }
+      watchlistInput.value = "";
+      setWatchlistError("");
+      syncMarketStateWithWatchlist();
+      renderMarketTable();
+      updateRefreshStatus();
+      scheduleNextMarketRefresh(0);
+      refreshVisibleQuotes();
+    });
+  }
 
   if (opportunitiesToggle && opportunitiesContent) {
     didInit = true;
@@ -4390,13 +4730,40 @@ function initLivePage({ onAnalyze } = {}) {
   if (marketBody) {
     didInit = true;
     marketBody.addEventListener("click", (event) => {
-      const analyzeButton = event.target.closest("button[data-action='analyze']");
+      const actionButton = event.target.closest("button[data-action]");
+      if (actionButton) {
+        const action = actionButton.dataset.action;
+        const symbol = actionButton.dataset.symbol;
+        if (action === "favorite") {
+          event.preventDefault();
+          favoritesStore.toggleFavorite(symbol);
+          renderMarketTable();
+          updateRefreshStatus();
+          scheduleNextMarketRefresh();
+          return;
+        }
+        if (action === "remove") {
+          event.preventDefault();
+          const removed = removeSymbolFromWatchlist(symbol);
+          if (removed) {
+            syncMarketStateWithWatchlist();
+            renderMarketTable();
+            updateRefreshStatus();
+            scheduleNextMarketRefresh(0);
+          }
+          return;
+        }
+        if (action === "analyze") {
+          event.preventDefault();
+          if (onAnalyze) {
+            onAnalyze(symbol);
+          }
+          return;
+        }
+      }
       const row = event.target.closest("tr[data-symbol]");
       if (!row) {
         return;
-      }
-      if (analyzeButton) {
-        event.preventDefault();
       }
       if (onAnalyze) {
         onAnalyze(row.dataset.symbol);
@@ -4407,8 +4774,8 @@ function initLivePage({ onAnalyze } = {}) {
       if (event.key !== "Enter") {
         return;
       }
-      const analyzeButton = event.target.closest("button[data-action='analyze']");
-      if (analyzeButton) {
+      const actionButton = event.target.closest("button[data-action]");
+      if (actionButton && actionButton.dataset.action !== "analyze") {
         return;
       }
       const row = event.target.closest("tr[data-symbol]");
@@ -4449,8 +4816,13 @@ const appCore = {
   fetchJsonWithRetry,
   fetchWithTimeout,
   isValidSymbol,
+  isValidWatchlistSymbol,
   normalizeSymbolInput,
+  normalizeWatchlistSymbol,
   getSymbolValidationMessage,
+  createStorageAdapter,
+  createWatchlistStore,
+  createFavoritesStore,
   persistFormState,
   loadPersistedFormState,
   getRiskPercentValidationMessage,
@@ -4493,6 +4865,8 @@ const appCore = {
   sortMarketEntries,
   getSortValue,
   buildTopOpportunitiesGroups,
+  applyMarketFilters,
+  removeSymbolFromWatchlist,
   buildAnalyzeUrl,
   initTradePage,
   initLivePage,
