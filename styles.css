@@ -377,6 +377,15 @@ td:last-child {
   box-shadow: -8px 0 16px rgba(24, 27, 62, 0.04);
 }
 
+td[data-col="analyze"] {
+  background: #ffffff !important;
+  background-image: none !important;
+}
+
+td[data-col="analyze"]::before {
+  display: none !important;
+}
+
 tbody tr:hover td:last-child {
   background: #fafbff;
 }

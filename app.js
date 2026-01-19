@@ -3678,6 +3678,34 @@ function formatChangeCellContent(cell, value, className) {
   }
 }
 
+const HEATMAP_CLASSNAMES = ["price-change", "positive", "negative", "change-cell", "change1d-cell", "num-cell"];
+
+function ensureAnalyzeCellClean(cell) {
+  if (!cell) {
+    return;
+  }
+  if (cell.classList) {
+    HEATMAP_CLASSNAMES.forEach((className) => cell.classList.remove(className));
+    cell.classList.add("analyze-cell");
+  } else if (typeof cell.className === "string") {
+    const filtered = cell.className
+      .split(/\s+/)
+      .filter((className) => className && !HEATMAP_CLASSNAMES.includes(className));
+    if (!filtered.includes("analyze-cell")) {
+      filtered.push("analyze-cell");
+    }
+    cell.className = filtered.join(" ");
+  }
+  if (cell.style) {
+    cell.style.background = "";
+    cell.style.backgroundColor = "";
+    if (typeof cell.style.removeProperty === "function") {
+      cell.style.removeProperty("background");
+      cell.style.removeProperty("background-color");
+    }
+  }
+}
+
 function updateMarketRowCells(row, stock) {
   if (!row || !stock) {
     return;
@@ -3744,6 +3772,7 @@ function updateMarketRowCells(row, stock) {
   formatChangeCellContent(changeCell, changeDisplay, changeClass);
   formatChangeCellContent(dayCell, dayDisplay, dayClass);
   if (analyzeCell) {
+    ensureAnalyzeCellClean(analyzeCell);
     analyzeCell.innerHTML = `
       <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
         Analyze

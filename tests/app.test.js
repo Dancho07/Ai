@@ -136,6 +136,18 @@ function createMockCell(col) {
   const cell = {
     dataset: { col },
     className: "",
+    style: {
+      background: "",
+      backgroundColor: "",
+      removeProperty: function removeProperty(property) {
+        if (property === "background") {
+          this.background = "";
+        }
+        if (property === "background-color") {
+          this.backgroundColor = "";
+        }
+      },
+    },
     _text: "",
     _html: "",
   };
@@ -918,6 +930,56 @@ const tests = [
       assert.ok(display.changeDisplay.includes("("));
       assert.strictEqual(display.dayDisplay.endsWith("%"), true);
       assert.strictEqual(display.changeDisplay.includes(display.dayDisplay), false);
+    },
+  },
+  {
+    name: "keeps analyze cells free of heatmap classes and inline background styles",
+    fn: async () => {
+      const changeCell = createMockCell("change");
+      const dayCell = createMockCell("change1d");
+      const analyzeCell = createMockCell("analyze");
+      analyzeCell.className = "analyze-cell price-change positive num-cell";
+      analyzeCell.style.background = "rgba(29, 122, 74, 0.2)";
+      analyzeCell.style.backgroundColor = "rgba(29, 122, 74, 0.2)";
+      const cells = new Map([
+        ["symbol", createMockCell("symbol")],
+        ["company", createMockCell("company")],
+        ["sector", createMockCell("sector")],
+        ["cap", createMockCell("cap")],
+        ["signal", createMockCell("signal")],
+        ["horizon", createMockCell("horizon")],
+        ["price", createMockCell("price")],
+        ["change", changeCell],
+        ["change1d", dayCell],
+        ["analyze", analyzeCell],
+      ]);
+      const row = createMockRow(cells);
+      const stock = {
+        symbol: "AAPL",
+        name: "Apple",
+        sector: "Technology",
+        cap: "Large",
+        history: [98, 100, 101],
+        lastPrice: 101,
+        previousClose: 100,
+        lastChange: 1,
+        lastChangePct: 1,
+        dailyChange: 1.2,
+        monthlyChange: -2.4,
+      };
+
+      updateMarketRowCells(row, stock);
+
+      assert.strictEqual(changeCell.className.includes("price-change"), true);
+      assert.strictEqual(changeCell.className.includes("positive"), true);
+      assert.strictEqual(dayCell.className.includes("price-change"), true);
+      assert.strictEqual(dayCell.className.includes("positive"), true);
+      assert.strictEqual(analyzeCell.className.includes("price-change"), false);
+      assert.strictEqual(analyzeCell.className.includes("positive"), false);
+      assert.strictEqual(analyzeCell.className.includes("analyze-cell"), true);
+      assert.strictEqual(analyzeCell.style.background, "");
+      assert.strictEqual(analyzeCell.style.backgroundColor, "");
+      assert.strictEqual(analyzeCell.innerHTML.includes("Analyze"), true);
     },
   },
   {
