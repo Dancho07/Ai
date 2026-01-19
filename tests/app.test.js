@@ -1408,6 +1408,57 @@ const tests = [
     },
   },
   {
+    name: "keeps market table rows aligned and analyze cell isolated",
+    fn: async () => {
+      const html = fs.readFileSync(path.join(__dirname, "..", "live.html"), "utf8");
+      const headerCols = Array.from(html.matchAll(/<th[^>]*data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      const rowCols = Array.from(buildMarketRowMarkup().matchAll(/data-col="([^"]+)"/g)).map(
+        (match) => match[1],
+      );
+      assert.strictEqual(html.includes(">1D change<"), true);
+      assert.strictEqual(html.includes(">1M change<"), true);
+      assert.strictEqual(html.includes(">1Y change<"), true);
+      assert.strictEqual(rowCols.length, headerCols.length);
+
+      const cells = new Map(
+        getMarketTableColumnKeys().map((key) => [key, createMockCell(key)]),
+      );
+      const analyzeCell = cells.get("analyze");
+      analyzeCell.className = "analyze-cell price-change positive num-cell";
+      analyzeCell.style.background = "rgba(29, 122, 74, 0.2)";
+      analyzeCell.style.backgroundColor = "rgba(29, 122, 74, 0.2)";
+      const row = createMockRow(cells);
+      updateMarketRowCells(row, {
+        symbol: "META",
+        name: "Meta Platforms",
+        sector: "Technology",
+        cap: "Large",
+        history: [100, 102, 105, 104],
+        lastPrice: 104,
+        previousClose: 102,
+        lastChange: 2,
+        lastChangePct: 1.96,
+        dailyChange: 1.1,
+        monthlyChange: 3.2,
+        yearlyChange: 12.5,
+        quoteAsOf: Date.now(),
+        lastUpdatedAt: null,
+        lastHistoricalTimestamp: null,
+        quoteSession: "REGULAR",
+        dataSource: "live",
+        exchangeTimezoneName: "America/New_York",
+      });
+
+      const analyzeMarkup = analyzeCell.innerHTML.trim();
+      assert.ok(/^<button[^>]*>[\s\S]*Analyze[\s\S]*<\/button>$/.test(analyzeMarkup));
+      assert.strictEqual(analyzeCell.className.includes("price-change"), false);
+      assert.strictEqual(analyzeCell.style.background, "");
+      assert.strictEqual(analyzeCell.style.backgroundColor, "");
+    },
+  },
+  {
     name: "writes 1D change into its own cell and keeps analyze clean",
     fn: async () => {
       const cells = new Map(
