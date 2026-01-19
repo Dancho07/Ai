@@ -227,7 +227,7 @@
           <div class="drawer-badges">
             <span id="drawer-session-badge" class="session-badge closed">CLOSED</span>
             <span id="drawer-source-badge" class="session-badge closed">HISTORICAL</span>
-            <span id="drawer-as-of" class="drawer-as-of">As of unknown UTC</span>
+            <span id="drawer-as-of" class="drawer-as-of">As of —</span>
           </div>
         </div>
         <button type="button" id="signal-drawer-close" class="icon-button drawer-close" aria-label="Close signal drawer">
@@ -242,6 +242,10 @@
         <div class="skeleton-line skeleton-block"></div>
         <div class="skeleton-line"></div>
         <div class="skeleton-line"></div>
+      </div>
+      <div id="signal-drawer-error" class="drawer-error hidden" role="status" aria-live="polite">
+        <p>Unable to load signal details right now.</p>
+        <button type="button" id="signal-drawer-retry" class="primary-button">Retry</button>
       </div>
       <div id="signal-drawer-body" class="drawer-body hidden">
         <section class="drawer-section">

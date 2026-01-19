@@ -228,6 +228,50 @@ function createMockDocument(elements = {}) {
   return doc;
 }
 
+function createDrawerElements({ includeError = false } = {}) {
+  const drawer = createMockDomElement({ tagName: "ASIDE", classes: ["hidden"] });
+  const overlay = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+  const closeButton = createMockDomElement({ tagName: "BUTTON" });
+  const openFull = createMockDomElement({ tagName: "A" });
+  drawer.querySelectorAll = () => [closeButton, openFull];
+  const elements = {
+    "signal-drawer": drawer,
+    "signal-drawer-overlay": overlay,
+    "signal-drawer-close": closeButton,
+    "signal-drawer-body": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+    "signal-drawer-skeleton": createMockDomElement({ tagName: "DIV", classes: ["hidden"] }),
+    "drawer-action": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-symbol": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-session-badge": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-source-badge": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-as-of": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-score": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-confidence": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-entry": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-stop-row": createMockDomElement({ tagName: "DIV" }),
+    "drawer-stop": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-take-profit-row": createMockDomElement({ tagName: "DIV" }),
+    "drawer-take-profit": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-position": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-reasoning": createMockDomElement({ tagName: "UL" }),
+    "drawer-invalidation": createMockDomElement({ tagName: "UL" }),
+    "drawer-backtest": createMockDomElement({ tagName: "DIV" }),
+    "drawer-backtest-status": createMockDomElement({ tagName: "P" }),
+    "drawer-backtest-list": createMockDomElement({ tagName: "DL", classes: ["hidden"] }),
+    "drawer-backtest-trades": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-backtest-win-rate": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-backtest-avg-return": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-backtest-drawdown": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-backtest-buy-hold": createMockDomElement({ tagName: "SPAN" }),
+    "drawer-open-full": openFull,
+  };
+  if (includeError) {
+    elements["signal-drawer-error"] = createMockDomElement({ tagName: "DIV", classes: ["hidden"] });
+    elements["signal-drawer-retry"] = createMockDomElement({ tagName: "BUTTON" });
+  }
+  return { elements, drawer, overlay, closeButton, openFull };
+}
+
 function loadCoreWithDocument(mockDocument) {
   const originalDocument = global.document;
   const originalWindow = global.window;
@@ -2425,6 +2469,162 @@ const tests = [
         assert.strictEqual(skeleton.classList.contains("hidden"), false);
         resolveAnalysis(createAnalysisResult());
         await openPromise;
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer open locks body scroll without layout push",
+    fn: async () => {
+      const { elements } = createDrawerElements();
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const controller = core.createSignalDrawerController({
+        drawer: elements["signal-drawer"],
+        overlay: elements["signal-drawer-overlay"],
+        closeButton: elements["signal-drawer-close"],
+        openFullButton: elements["drawer-open-full"],
+        documentRef: mockDocument,
+        loadSnapshot: async () => {},
+        analyze: () => createAnalysisResult(),
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+        getScrollbarWidth: () => 16,
+      });
+      try {
+        await controller.open("AAPL");
+        assert.strictEqual(mockDocument.body.classList.contains("drawer-open"), true);
+        assert.strictEqual(mockDocument.body.classList.contains("drawer-push"), false);
+        assert.strictEqual(mockDocument.body.style.paddingRight, "16px");
+        controller.close();
+        assert.strictEqual(mockDocument.body.classList.contains("drawer-open"), false);
+        assert.strictEqual(mockDocument.body.style.paddingRight, "");
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer shows As of timestamp or fallback",
+    fn: async () => {
+      const { elements } = createDrawerElements();
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const drawerAsOf = elements["drawer-as-of"];
+      const timestamp = Date.UTC(2023, 0, 1, 12, 0, 0);
+      let analyzeResult = {
+        ...createAnalysisResult(),
+        quote: { asOfTs: timestamp, session: "REGULAR", source: "REALTIME" },
+      };
+      const controller = core.createSignalDrawerController({
+        drawer: elements["signal-drawer"],
+        overlay: elements["signal-drawer-overlay"],
+        closeButton: elements["signal-drawer-close"],
+        openFullButton: elements["drawer-open-full"],
+        documentRef: mockDocument,
+        loadSnapshot: async () => {},
+        analyze: () => analyzeResult,
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        await controller.open("AAPL");
+        assert.ok(drawerAsOf.textContent.startsWith("As of "));
+        assert.ok(drawerAsOf.textContent.includes("UTC"));
+        analyzeResult = { ...createAnalysisResult(), quote: null, quoteMeta: null, fallback: null };
+        await controller.open("MSFT", { forceRefresh: true });
+        assert.strictEqual(drawerAsOf.textContent, "As of —");
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer replaces skeleton with content on success",
+    fn: async () => {
+      const { elements } = createDrawerElements();
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const skeleton = elements["signal-drawer-skeleton"];
+      const body = elements["signal-drawer-body"];
+      const controller = core.createSignalDrawerController({
+        drawer: elements["signal-drawer"],
+        overlay: elements["signal-drawer-overlay"],
+        closeButton: elements["signal-drawer-close"],
+        openFullButton: elements["drawer-open-full"],
+        documentRef: mockDocument,
+        loadSnapshot: async () => {},
+        analyze: () => createAnalysisResult(),
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        await controller.open("AAPL");
+        assert.strictEqual(skeleton.classList.contains("hidden"), true);
+        assert.strictEqual(body.classList.contains("hidden"), false);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "drawer shows error state and retries",
+    fn: async () => {
+      const { elements } = createDrawerElements({ includeError: true });
+      const mockDocument = createMockDocument(elements);
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      const errorState = elements["signal-drawer-error"];
+      const retryButton = elements["signal-drawer-retry"];
+      let callCount = 0;
+      const controller = core.createSignalDrawerController({
+        drawer: elements["signal-drawer"],
+        overlay: elements["signal-drawer-overlay"],
+        closeButton: elements["signal-drawer-close"],
+        openFullButton: elements["drawer-open-full"],
+        retryButton,
+        documentRef: mockDocument,
+        loadSnapshot: async () => {},
+        analyze: () => {
+          callCount += 1;
+          if (callCount === 1) {
+            throw new Error("Network error");
+          }
+          return createAnalysisResult();
+        },
+        getCached: () => null,
+        setCached: () => null,
+        getInputs: () => ({
+          cash: 10000,
+          risk: "moderate",
+          positionSizingMode: "cash",
+          riskPercent: null,
+        }),
+      });
+      try {
+        await controller.open("AAPL");
+        assert.strictEqual(errorState.classList.contains("hidden"), false);
+        retryButton.dispatchEvent({ type: "click", preventDefault: () => {} });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.strictEqual(elements["signal-drawer-body"].classList.contains("hidden"), false);
       } finally {
         restore();
       }

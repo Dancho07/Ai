@@ -92,6 +92,8 @@ const signalDrawerBacktestAvgReturn = isBrowser ? document.getElementById("drawe
 const signalDrawerBacktestDrawdown = isBrowser ? document.getElementById("drawer-backtest-drawdown") : null;
 const signalDrawerBacktestBuyHold = isBrowser ? document.getElementById("drawer-backtest-buy-hold") : null;
 const signalDrawerOpenFull = isBrowser ? document.getElementById("drawer-open-full") : null;
+const signalDrawerError = isBrowser ? document.getElementById("signal-drawer-error") : null;
+const signalDrawerRetry = isBrowser ? document.getElementById("signal-drawer-retry") : null;
 
 const marketBody = isBrowser ? document.getElementById("market-body") : null;
 const refreshStatus = isBrowser ? document.getElementById("refresh-status") : null;
@@ -216,6 +218,7 @@ let marketStateIndex = new Map();
 let activeWatchlistSymbols = new Set();
 const extraSymbolData = new Map();
 let signalDrawerController = null;
+const drawerMetaCache = new Map();
 
 const quoteFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -873,6 +876,17 @@ function normalizeSession(session) {
   }
   const normalized = String(session).toUpperCase();
   if (Object.values(QUOTE_SESSIONS).includes(normalized)) {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeSource(source) {
+  if (!source) {
+    return null;
+  }
+  const normalized = String(source).toUpperCase();
+  if (Object.values(QUOTE_SOURCES).includes(normalized)) {
     return normalized;
   }
   return null;
@@ -2599,8 +2613,32 @@ function analyzeSymbol({ symbol, cash, riskTolerance, sizingMode, riskPercent, m
   });
 }
 
+function buildAnalysisMeta(symbol, marketEntry) {
+  const lastKnownQuote = getLastKnownQuote(symbol);
+  return {
+    quote: lastKnownQuote
+      ? {
+          asOfTs: lastKnownQuote.asOfTimestamp ?? lastKnownQuote.asOfTs ?? null,
+          session: lastKnownQuote.session ?? null,
+          source: lastKnownQuote.source ?? null,
+        }
+      : null,
+    quoteMeta: {
+      asOfTs: marketEntry?.quoteAsOf ?? marketEntry?.lastUpdatedAt ?? null,
+      session: marketEntry?.quoteSession ?? null,
+      source: marketEntry?.dataSource ?? null,
+    },
+    fallback: {
+      asOfTs: marketEntry?.lastHistoricalTimestamp ?? null,
+      session: marketEntry?.quoteSession ?? null,
+      source: marketEntry?.dataSource ?? null,
+    },
+  };
+}
+
 function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const marketEntry = getStockEntry(symbol);
+  const analysisMeta = buildAnalysisMeta(symbol, marketEntry);
   const prices = marketEntry?.history ?? [];
   const lastCandleTimestamp =
     marketEntry?.lastHistoricalTimestamp ?? marketEntry?.quoteAsOf ?? marketEntry?.lastUpdatedAt ?? null;
@@ -2652,6 +2690,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     });
     return {
       symbol,
+      ...analysisMeta,
       action: "hold",
       shares: 0,
       estimatedPrice: null,
@@ -2745,6 +2784,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
 
   return {
     symbol,
+    ...analysisMeta,
     action,
     shares,
     estimatedPrice: recent,
@@ -3158,6 +3198,57 @@ function renderResult(result) {
   scheduleResultScroll(resultCard);
 }
 
+function normalizeDrawerAnalysis(result, symbol) {
+  const entry = getStockEntry(symbol);
+  const lastKnownQuote = getLastKnownQuote(symbol);
+  const safeResult = result ?? {};
+  return {
+    ...safeResult,
+    symbol: safeResult.symbol ?? symbol,
+    quote: {
+      ...(safeResult.quote ?? {}),
+      asOfTs: safeResult?.quote?.asOfTs ?? lastKnownQuote?.asOfTimestamp ?? lastKnownQuote?.asOfTs ?? null,
+      session: safeResult?.quote?.session ?? lastKnownQuote?.session ?? null,
+      source: safeResult?.quote?.source ?? lastKnownQuote?.source ?? null,
+    },
+    quoteMeta: {
+      ...(safeResult.quoteMeta ?? {}),
+      asOfTs: safeResult?.quoteMeta?.asOfTs ?? entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? null,
+      session: safeResult?.quoteMeta?.session ?? entry?.quoteSession ?? null,
+      source: safeResult?.quoteMeta?.source ?? entry?.dataSource ?? null,
+    },
+    fallback: {
+      ...(safeResult.fallback ?? {}),
+      asOfTs:
+        safeResult?.fallback?.asOfTs ??
+        entry?.lastHistoricalTimestamp ??
+        entry?.lastUpdatedAt ??
+        entry?.quoteAsOf ??
+        null,
+      session: safeResult?.fallback?.session ?? entry?.quoteSession ?? null,
+      source: safeResult?.fallback?.source ?? entry?.dataSource ?? null,
+    },
+  };
+}
+
+function resolveDrawerMeta(result) {
+  const symbol = result?.symbol ?? "";
+  const asOf = result?.quote?.asOfTs ?? result?.quoteMeta?.asOfTs ?? result?.fallback?.asOfTs ?? null;
+  const sessionCandidate = normalizeSession(
+    result?.quote?.session ?? result?.quoteMeta?.session ?? result?.fallback?.session,
+  );
+  const sourceCandidate = normalizeSource(
+    result?.quote?.source ?? result?.quoteMeta?.source ?? result?.fallback?.source,
+  );
+  const cached = drawerMetaCache.get(symbol) ?? {};
+  const session = sessionCandidate ?? cached.session ?? QUOTE_SESSIONS.CLOSED;
+  const source = sourceCandidate ?? cached.source ?? QUOTE_SOURCES.CACHED;
+  if (symbol && (sessionCandidate || sourceCandidate)) {
+    drawerMetaCache.set(symbol, { session, source });
+  }
+  return { asOf, session, source };
+}
+
 function renderSignalDrawerLoading(symbol) {
   if (!signalDrawer) {
     return;
@@ -3193,8 +3284,37 @@ function renderSignalDrawerLoading(symbol) {
   if (signalDrawerInvalidation) {
     signalDrawerInvalidation.innerHTML = "<li>Preparing invalidation rules...</li>";
   }
+  if (signalDrawerAsOf) {
+    signalDrawerAsOf.textContent = "As of —";
+  }
+  if (signalDrawerError) {
+    signalDrawerError.classList.add("hidden");
+  }
   if (signalDrawerSkeleton) {
     signalDrawerSkeleton.classList.remove("hidden");
+  }
+  if (signalDrawerBody) {
+    signalDrawerBody.classList.add("hidden");
+  }
+}
+
+function renderSignalDrawerError(message = "Unable to load signal details right now.") {
+  if (!signalDrawer) {
+    return;
+  }
+  if (signalDrawerAction) {
+    signalDrawerAction.textContent = "ERROR";
+    signalDrawerAction.className = "signal-pill hold";
+  }
+  if (signalDrawerError) {
+    signalDrawerError.classList.remove("hidden");
+    const messageNode = signalDrawerError.querySelector("p");
+    if (messageNode) {
+      messageNode.textContent = message;
+    }
+  }
+  if (signalDrawerSkeleton) {
+    signalDrawerSkeleton.classList.add("hidden");
   }
   if (signalDrawerBody) {
     signalDrawerBody.classList.add("hidden");
@@ -3205,68 +3325,69 @@ function renderSignalDrawerResult(result) {
   if (!signalDrawer) {
     return;
   }
-  const action = result.action ?? "hold";
+  const normalized = normalizeDrawerAnalysis(result, result?.symbol);
+  const action = normalized.action ?? "hold";
   if (signalDrawerAction) {
     signalDrawerAction.textContent = action.toUpperCase();
     signalDrawerAction.className = `signal-pill ${action}`;
   }
   if (signalDrawerSymbol) {
-    signalDrawerSymbol.textContent = result.symbol;
+    signalDrawerSymbol.textContent = normalized.symbol;
   }
-  const entry = getStockEntry(result.symbol);
+  const meta = resolveDrawerMeta(normalized);
   if (signalDrawerSessionBadge) {
-    const sessionBadge = getSessionBadgeForSession(entry?.quoteSession ?? QUOTE_SESSIONS.CLOSED);
+    const sessionBadge = getSessionBadgeForSession(meta.session);
     signalDrawerSessionBadge.textContent = sessionBadge.label;
     signalDrawerSessionBadge.className = `session-badge ${sessionBadge.className}`;
     signalDrawerSessionBadge.title = sessionBadge.tooltip;
   }
   if (signalDrawerSourceBadge) {
-    const sourceBadge = getSourceBadge(entry?.dataSource ?? QUOTE_SOURCES.CACHED);
+    const sourceBadge = getSourceBadge(meta.source);
     signalDrawerSourceBadge.textContent = sourceBadge.label;
     signalDrawerSourceBadge.className = `session-badge ${sourceBadge.className}`;
     signalDrawerSourceBadge.title = sourceBadge.tooltip;
   }
   if (signalDrawerAsOf) {
-    const asOf = entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? null;
-    signalDrawerAsOf.textContent = asOf ? `As of ${formatAsOf(asOf, { tz: "UTC" })}` : "As of unknown UTC";
+    signalDrawerAsOf.textContent = meta.asOf ? `As of ${formatAsOf(meta.asOf, { tz: "UTC" })}` : "As of —";
   }
   if (signalDrawerScore) {
-    signalDrawerScore.textContent = result.signalScore?.total != null ? `${result.signalScore.total}` : "—";
+    signalDrawerScore.textContent = normalized.signalScore?.total != null ? `${normalized.signalScore.total}` : "—";
   }
   if (signalDrawerConfidence) {
-    if (result.confidenceLabel && result.confidenceScore != null) {
-      signalDrawerConfidence.textContent = `${result.confidenceLabel} (${result.confidenceScore}%)`;
+    if (normalized.confidenceLabel && normalized.confidenceScore != null) {
+      signalDrawerConfidence.textContent = `${normalized.confidenceLabel} (${normalized.confidenceScore}%)`;
     } else {
       signalDrawerConfidence.textContent = "—";
     }
   }
   if (signalDrawerEntry) {
-    signalDrawerEntry.textContent = result.tradePlan.entryDisplay;
+    signalDrawerEntry.textContent = normalized.tradePlan.entryDisplay;
   }
   if (signalDrawerStop) {
-    signalDrawerStop.textContent = result.tradePlan.stopLossDisplay;
+    signalDrawerStop.textContent = normalized.tradePlan.stopLossDisplay;
   }
   if (signalDrawerTakeProfit) {
-    signalDrawerTakeProfit.textContent = result.tradePlan.takeProfitDisplay;
+    signalDrawerTakeProfit.textContent = normalized.tradePlan.takeProfitDisplay;
   }
   if (signalDrawerPosition) {
-    signalDrawerPosition.textContent = result.tradePlan.positionSizeDisplay;
+    signalDrawerPosition.textContent = normalized.tradePlan.positionSizeDisplay;
   }
   if (signalDrawerStopRow) {
-    signalDrawerStopRow.classList.toggle("hidden", result.tradePlan.isHold);
+    signalDrawerStopRow.classList.toggle("hidden", normalized.tradePlan.isHold);
   }
   if (signalDrawerTakeProfitRow) {
-    signalDrawerTakeProfitRow.classList.toggle("hidden", result.tradePlan.isHold);
+    signalDrawerTakeProfitRow.classList.toggle("hidden", normalized.tradePlan.isHold);
   }
   if (signalDrawerReasoning) {
-    signalDrawerReasoning.innerHTML = result.confidenceReasons.map((line) => `<li>${line}</li>`).join("");
+    const reasons = Array.isArray(normalized.confidenceReasons) ? normalized.confidenceReasons : [];
+    signalDrawerReasoning.innerHTML = reasons.map((line) => `<li>${line}</li>`).join("");
   }
   if (signalDrawerInvalidation) {
-    const rules = Array.isArray(result.invalidationRules) ? result.invalidationRules : [];
+    const rules = Array.isArray(normalized.invalidationRules) ? normalized.invalidationRules : [];
     signalDrawerInvalidation.innerHTML = rules.map((rule) => `<li>${rule}</li>`).join("");
   }
   if (signalDrawerBacktest) {
-    const backtest = result.backtest ?? null;
+    const backtest = normalized.backtest ?? null;
     if (backtest?.hasEnoughData) {
       if (signalDrawerBacktestStatus) {
         signalDrawerBacktestStatus.textContent = "";
@@ -3318,6 +3439,9 @@ function renderSignalDrawerResult(result) {
   if (signalDrawerSkeleton) {
     signalDrawerSkeleton.classList.add("hidden");
   }
+  if (signalDrawerError) {
+    signalDrawerError.classList.add("hidden");
+  }
   if (signalDrawerBody) {
     signalDrawerBody.classList.remove("hidden");
   }
@@ -3328,6 +3452,7 @@ function createSignalDrawerController({
   overlay = signalDrawerOverlay,
   closeButton = signalDrawerClose,
   openFullButton = signalDrawerOpenFull,
+  retryButton = signalDrawerRetry,
   documentRef = typeof document !== "undefined" ? document : null,
   body = typeof document !== "undefined" ? document.body : null,
   loadSnapshot = loadSymbolSnapshot,
@@ -3336,14 +3461,30 @@ function createSignalDrawerController({
   setCached = setCachedAnalysis,
   getInputs = () => getAnalysisInputDefaults(localStorage),
   buildUrl = buildAnalyzeUrl,
+  getScrollbarWidth = () => {
+    if (typeof window === "undefined" || !documentRef?.documentElement) {
+      return 0;
+    }
+    return Math.max(window.innerWidth - documentRef.documentElement.clientWidth, 0);
+  },
 } = {}) {
   if (!drawer || !overlay || !documentRef) {
     return null;
   }
+  if (body) {
+    if (drawer.parentElement !== body) {
+      body.appendChild(drawer);
+    }
+    if (overlay.parentElement !== body) {
+      body.appendChild(overlay);
+    }
+  }
   let isOpen = false;
   let lastFocused = null;
   let bodyOverflow = "";
+  let bodyPaddingRight = "";
   let activeRequestId = 0;
+  let activeSymbol = null;
 
   const focusableSelector =
     'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -3359,9 +3500,15 @@ function createSignalDrawerController({
       body.classList.toggle("drawer-open", open);
       if (open) {
         bodyOverflow = body.style.overflow;
+        bodyPaddingRight = body.style.paddingRight ?? "";
         body.style.overflow = "hidden";
+        const scrollbarWidth = getScrollbarWidth();
+        if (scrollbarWidth) {
+          body.style.paddingRight = `${scrollbarWidth}px`;
+        }
       } else {
         body.style.overflow = bodyOverflow;
+        body.style.paddingRight = bodyPaddingRight;
       }
     }
     if (open) {
@@ -3375,6 +3522,8 @@ function createSignalDrawerController({
     if (!isOpen) {
       return;
     }
+    activeRequestId += 1;
+    activeSymbol = null;
     setOpenState(false);
     if (lastFocused?.focus) {
       lastFocused.focus();
@@ -3412,16 +3561,28 @@ function createSignalDrawerController({
     trapFocus(event);
   };
 
-  overlay.addEventListener("click", () => close());
+  overlay.addEventListener("click", (event) => {
+    event.stopPropagation?.();
+    close();
+  });
+  drawer.addEventListener("click", (event) => event.stopPropagation?.());
+  drawer.addEventListener("mousedown", (event) => event.stopPropagation?.());
   closeButton?.addEventListener("click", () => close());
+  retryButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (activeSymbol) {
+      open(activeSymbol, { forceRefresh: true });
+    }
+  });
   documentRef.addEventListener("keydown", handleKeydown);
 
-  const open = async (symbol) => {
+  const open = async (symbol, options = {}) => {
     const normalized = normalizeSymbolInput(symbol ?? "");
     if (!normalized) {
       return false;
     }
     lastFocused = documentRef.activeElement;
+    activeSymbol = normalized;
     setOpenState(true);
     if (openFullButton && buildUrl) {
       openFullButton.href = buildUrl(normalized, { autoRun: true });
@@ -3433,7 +3594,7 @@ function createSignalDrawerController({
       drawer.focus();
     }
     const cached = getCached(normalized);
-    if (cached) {
+    if (cached && !options.forceRefresh) {
       renderSignalDrawerResult(cached);
       return true;
     }
@@ -3455,25 +3616,36 @@ function createSignalDrawerController({
       });
     } catch (error) {
       const fallbackEntry = applyCachedMarketData(normalized, getStockEntry(normalized));
-      extraSymbolData.set(normalized, fallbackEntry);
+      if (fallbackEntry) {
+        extraSymbolData.set(normalized, fallbackEntry);
+      }
     }
-    const inputs = getInputs();
-    const result = await Promise.resolve(
-      analyze({
-        symbol: normalized,
-        cash: inputs.cash,
-        riskTolerance: inputs.risk,
-        sizingMode: inputs.positionSizingMode,
-        riskPercent: inputs.riskPercent,
-        mode: "drawer",
-      }),
-    );
-    if (requestId !== activeRequestId) {
+    try {
+      const inputs = getInputs();
+      const result = await Promise.resolve(
+        analyze({
+          symbol: normalized,
+          cash: inputs.cash,
+          riskTolerance: inputs.risk,
+          sizingMode: inputs.positionSizingMode,
+          riskPercent: inputs.riskPercent,
+          mode: "drawer",
+        }),
+      );
+      if (requestId !== activeRequestId) {
+        return false;
+      }
+      const normalizedResult = normalizeDrawerAnalysis(result, normalized);
+      setCached(normalized, normalizedResult);
+      renderSignalDrawerResult(normalizedResult);
+      return true;
+    } catch (error) {
+      if (requestId !== activeRequestId) {
+        return false;
+      }
+      renderSignalDrawerError("Unable to load signal details right now.");
       return false;
     }
-    setCached(normalized, result);
-    renderSignalDrawerResult(result);
-    return true;
   };
 
   return {
