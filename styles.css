@@ -186,6 +186,12 @@ h1 {
   color: #b54141;
 }
 
+.market-debug {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  color: #6c728d;
+}
+
 .refresh-pill {
   background: #eff7f1;
   color: #1d7a4a;
