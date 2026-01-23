@@ -42,6 +42,7 @@ const {
   formatTimestamp,
   runBacktest30d,
   getMarketIndicatorData,
+  classifyQuoteQuality,
   getQuoteBadges,
   getLatestQuoteAsOf,
   handleMarketRowAction,
@@ -1210,6 +1211,57 @@ const tests = [
     },
   },
   {
+    name: "classifies realtime freshness during regular session",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 5000 },
+        nowMs,
+        session: "REGULAR",
+      });
+      assert.strictEqual(quality.badge, "REALTIME");
+      assert.strictEqual(quality.isLive, true);
+    },
+  },
+  {
+    name: "classifies delayed freshness during regular session",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 80 * 1000 },
+        nowMs,
+        session: "REGULAR",
+      });
+      assert.strictEqual(quality.badge, "DELAYED");
+      assert.strictEqual(quality.isLive, false);
+    },
+  },
+  {
+    name: "classifies cached freshness with warning during regular session",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 600 * 1000 },
+        nowMs,
+        session: "REGULAR",
+      });
+      assert.strictEqual(quality.badge, "CACHED");
+      assert.strictEqual(quality.showWarning, true);
+    },
+  },
+  {
+    name: "classifies last close when session is closed",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 22, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 6 * 60 * 60 * 1000, dataSource: "LAST_CLOSE" },
+        nowMs,
+        session: "CLOSED",
+      });
+      assert.strictEqual(quality.badge, "LAST_CLOSE");
+    },
+  },
+  {
     name: "renders as-of label in UTC",
     fn: async () => {
       const timestamp = Date.UTC(2024, 0, 1, 12, 30, 0);
@@ -1249,18 +1301,33 @@ const tests = [
     },
   },
   {
-    name: "uses cached data for market status when provider is unavailable",
+    name: "infers realtime status when cached source is fresh during regular session",
     fn: async () => {
       const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
       const cachedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
         dataSource: "CACHED",
-        quoteAsOf: Date.now(),
+        quoteAsOf: regularSessionNow.getTime(),
         lastPrice: 150,
       }, { now: regularSessionNow });
       assert.strictEqual(cachedIndicator.marketStatus, "Open");
-      assert.strictEqual(cachedIndicator.sourceBadge.label, "CACHED");
+      assert.strictEqual(cachedIndicator.sourceBadge.label, "REALTIME");
       assert.notStrictEqual(cachedIndicator.marketStatus, "Unavailable");
+    },
+  },
+  {
+    name: "market indicator prefers realtime and clears cached note when any live quote is present",
+    fn: async () => {
+      const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
+      const indicator = getMarketIndicatorData(null, {
+        now: regularSessionNow,
+        marketEntries: [
+          { lastPrice: 100, quoteAsOf: regularSessionNow.getTime() - 5000, dataSource: "REALTIME" },
+          { lastPrice: 101, quoteAsOf: regularSessionNow.getTime() - 600 * 1000, dataSource: "CACHED" },
+        ],
+      });
+      assert.strictEqual(indicator.sourceBadge.label, "REALTIME");
+      assert.strictEqual(indicator.usingCached, false);
     },
   },
   {
@@ -1519,7 +1586,7 @@ const tests = [
     },
   },
   {
-    name: "keeps cached market status when unavailable quote is returned",
+    name: "keeps regular session open when unavailable quote is returned",
     fn: async () => {
       const stock = getStockEntry("AAPL");
       updateStockWithQuote(stock, {
@@ -1546,11 +1613,11 @@ const tests = [
       });
       assert.strictEqual(stock.quoteSession, "REGULAR");
       assert.strictEqual(indicator.marketStatus, "Open");
-      assert.strictEqual(indicator.sourceBadge.label, "CACHED");
+      assert.strictEqual(indicator.sourceBadge.label, "REALTIME");
     },
   },
   {
-    name: "keeps cached session open after live quote fetch failure",
+    name: "keeps regular session open after live quote fetch failure",
     fn: async () => {
       resetQuoteCache();
       setLastKnownQuote("AAPL", {
@@ -1571,7 +1638,7 @@ const tests = [
       });
       assert.strictEqual(stock.quoteSession, "REGULAR");
       assert.strictEqual(indicator.marketStatus, "Open");
-      assert.strictEqual(indicator.sourceBadge.label, "CACHED");
+      assert.strictEqual(indicator.sourceBadge.label, "REALTIME");
     },
   },
   {
