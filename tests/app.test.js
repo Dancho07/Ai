@@ -11,6 +11,7 @@ const {
   createWatchlistStore,
   createFavoritesStore,
   deriveMarketSession,
+  computeUsMarketSession,
   normalizeQuote,
   persistFormState,
   loadPersistedFormState,
@@ -1009,17 +1010,55 @@ const tests = [
     },
   },
   {
-    name: "derives regular session when regularMarketTime is recent",
+    name: "derives session from ET trading hours when marketState is missing",
     fn: async () => {
-      const now = 1700000000000;
+      const now = Date.UTC(2024, 0, 2, 15, 0, 0);
       assert.strictEqual(
-        deriveMarketSession({ regularMarketTime: 1700000000 }, now),
+        deriveMarketSession({ exchangeTimezoneName: "America/New_York" }, now),
         "REGULAR",
       );
-      assert.strictEqual(
-        deriveMarketSession({ regularMarketTime: 1699998500 }, now),
-        "CLOSED",
+    },
+  },
+  {
+    name: "computes US market sessions using America/New_York time",
+    fn: async () => {
+      const regular = computeUsMarketSession(new Date(Date.UTC(2024, 0, 2, 15, 0, 0)));
+      const pre = computeUsMarketSession(new Date(Date.UTC(2024, 0, 2, 12, 0, 0)));
+      const post = computeUsMarketSession(new Date(Date.UTC(2024, 0, 2, 22, 30, 0)));
+      const weekend = computeUsMarketSession(new Date(Date.UTC(2024, 0, 6, 15, 0, 0)));
+      assert.strictEqual(regular.session, "REGULAR");
+      assert.strictEqual(pre.session, "PRE");
+      assert.strictEqual(post.session, "POST");
+      assert.strictEqual(weekend.session, "CLOSED");
+    },
+  },
+  {
+    name: "handles daylight saving time when computing sessions",
+    fn: async () => {
+      const winter = computeUsMarketSession(new Date(Date.UTC(2024, 0, 2, 14, 45, 0)));
+      const summer = computeUsMarketSession(new Date(Date.UTC(2024, 6, 1, 13, 45, 0)));
+      assert.strictEqual(winter.session, "REGULAR");
+      assert.strictEqual(summer.session, "REGULAR");
+    },
+  },
+  {
+    name: "marks stale regular-session quotes as delayed based on as-of timestamp",
+    fn: async () => {
+      const now = Date.UTC(2024, 0, 2, 15, 10, 0);
+      const quote = normalizeQuote(
+        {
+          symbol: "AAPL",
+          marketState: "REGULAR",
+          regularMarketPrice: 150,
+          regularMarketPreviousClose: 148,
+          regularMarketChange: 2,
+          regularMarketChangePercent: 1.35,
+          regularMarketTime: Math.floor((now - 10 * 60 * 1000) / 1000),
+        },
+        now,
       );
+      assert.strictEqual(quote.session, "REGULAR");
+      assert.strictEqual(quote.source, "DELAYED");
     },
   },
   {
