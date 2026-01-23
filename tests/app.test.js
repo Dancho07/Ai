@@ -1004,9 +1004,11 @@ const tests = [
   {
     name: "parses epoch seconds and milliseconds",
     fn: async () => {
+      const iso = "2024-01-02T15:00:00.000Z";
       assert.strictEqual(parseEpoch("1700000000"), 1700000000000);
       assert.strictEqual(parseEpoch(1700000000), 1700000000000);
       assert.strictEqual(parseEpoch(1700000000000), 1700000000000);
+      assert.strictEqual(parseEpoch(iso), Date.parse(iso));
       assert.strictEqual(parseEpoch("not-a-time"), null);
     },
   },
@@ -1238,11 +1240,24 @@ const tests = [
     },
   },
   {
+    name: "treats missing timestamp as delayed during regular session",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100 },
+        nowMs,
+        session: "REGULAR",
+      });
+      assert.strictEqual(quality.badge, "DELAYED");
+      assert.strictEqual(quality.reason, "missing_timestamp");
+    },
+  },
+  {
     name: "classifies cached freshness with warning during regular session",
     fn: async () => {
       const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
       const quality = classifyQuoteQuality({
-        quote: { lastPrice: 100, quoteAsOf: nowMs - 600 * 1000 },
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 30 * 60 * 1000 },
         nowMs,
         session: "REGULAR",
       });
@@ -1414,7 +1429,7 @@ const tests = [
         nowMs,
       );
       const delayedQuote = normalizeHeaderQuote(
-        { symbol: "MSFT", price: 340, quoteTimeMs: nowMs - 30 * 60 * 1000, session: "REGULAR" },
+        { symbol: "MSFT", price: 340, quoteTimeMs: nowMs - 10 * 60 * 1000, session: "REGULAR" },
         nowMs,
       );
       const realtimeResult = computeHeaderQuality([realtimeQuote], nowMs, "REGULAR");
