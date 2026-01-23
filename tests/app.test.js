@@ -2668,6 +2668,52 @@ const tests = [
     },
   },
   {
+    name: "refresh summary includes provider meta for realtime quotes",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL"]));
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      const originalNow = Date.now;
+      const nowMs = Date.parse("2024-05-01T15:00:00Z");
+      Date.now = () => nowMs;
+      global.localStorage = storage;
+      global.fetch = async () =>
+        createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: {
+              result: [
+                {
+                  symbol: "AAPL",
+                  marketState: "REGULAR",
+                  regularMarketPrice: 100,
+                  regularMarketChange: 1,
+                  regularMarketChangePercent: 1,
+                  regularMarketTime: Math.floor(nowMs / 1000),
+                  regularMarketPreviousClose: 99,
+                },
+              ],
+            },
+          },
+        });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        const summary = await core.refreshVisibleQuotes();
+        assert.strictEqual(summary.meta.providerMode, "realtime");
+        assert.strictEqual(summary.meta.session, "REGULAR");
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+        Date.now = originalNow;
+      }
+    },
+  },
+  {
     name: "quote batch uses allSettled and keeps successful results",
     fn: async () => {
       const responses = [
@@ -2699,6 +2745,41 @@ const tests = [
       ]);
       await fetchYahooQuotes(["AAPL", "MSFT"], { fetchFn, batchSize: 8, maxAttempts: 1 });
       assert.strictEqual(fetchFn.getCallCount(), 1);
+    },
+  },
+  {
+    name: "quote batch reuses cached responses within the ttl",
+    fn: async () => {
+      const originalNow = Date.now;
+      let now = 1700000000000;
+      Date.now = () => now;
+      resetQuoteCache();
+      const fetchFn = createFetchSequence([
+        createResponse({
+          ok: true,
+          status: 200,
+          json: { quoteResponse: { result: [{ symbol: "AAPL", regularMarketPrice: 100 }] } },
+        }),
+        createResponse({
+          ok: true,
+          status: 200,
+          json: { quoteResponse: { result: [{ symbol: "AAPL", regularMarketPrice: 101 }] } },
+        }),
+      ]);
+      try {
+        const first = await fetchYahooQuotes(["AAPL"], { fetchFn, batchSize: 1, maxAttempts: 1 });
+        now += 1000;
+        const second = await fetchYahooQuotes(["AAPL"], { fetchFn, batchSize: 1, maxAttempts: 1 });
+        assert.strictEqual(fetchFn.getCallCount(), 1);
+        assert.strictEqual(first.quotes[0].regularMarketPrice, 100);
+        assert.strictEqual(second.quotes[0].regularMarketPrice, 100);
+        now += 8000;
+        const third = await fetchYahooQuotes(["AAPL"], { fetchFn, batchSize: 1, maxAttempts: 1 });
+        assert.strictEqual(fetchFn.getCallCount(), 2);
+        assert.strictEqual(third.quotes[0].regularMarketPrice, 101);
+      } finally {
+        Date.now = originalNow;
+      }
     },
   },
   {
