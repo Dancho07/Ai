@@ -240,6 +240,8 @@ const MARKET_DEBUG_ENABLED =
   isBrowser && typeof window !== "undefined"
     ? new URLSearchParams(window.location.search).get(MARKET_DEBUG_PARAM) === "1"
     : false;
+const DEV_QUOTE_LOG_ENABLED =
+  typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production";
 const DEBUG = MARKET_DEBUG_ENABLED;
 const PERF_DEBUG_ENABLED = MARKET_DEBUG_ENABLED;
 const QUOTE_FAST_FALLBACK_MS = 800;
@@ -934,11 +936,30 @@ function parseEpoch(value) {
   if (value == null) {
     return null;
   }
-  const numeric = typeof value === "string" ? Number.parseFloat(value) : value;
-  if (!Number.isFinite(numeric) || numeric <= 0) {
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const numericMatch = /^-?\d+(\.\d+)?$/.test(trimmed);
+    if (numericMatch) {
+      const numeric = Number.parseFloat(trimmed);
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return null;
+      }
+      return numeric > 1e12 ? numeric : numeric * 1000;
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  if (!Number.isFinite(value) || value <= 0) {
     return null;
   }
-  return numeric > 1e12 ? numeric : numeric * 1000;
+  return value > 1e12 ? value : value * 1000;
 }
 
 function normalizeEpochToMs(timestamp) {
@@ -1012,12 +1033,13 @@ function computeUsMarketSession(now = new Date(), options = {}) {
   return { session: QUOTE_SESSIONS.CLOSED, isOpen: false };
 }
 
-const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
-const STALE_FRESHNESS_MS = 15 * 60 * 1000;
+const REALTIME_FRESHNESS_MS = 30 * 1000;
+const DELAYED_FRESHNESS_MS = 20 * 60 * 1000;
+const STALE_FRESHNESS_MS = 20 * 60 * 1000;
 const MARKET_PULSE_STALE_MS = 30 * 60 * 1000;
 const MARKET_PULSE_REALTIME_SEC = 30;
-const MARKET_PULSE_DELAYED_SEC = 120;
-const MARKET_PULSE_EXTENDED_STALE_MS = 5 * 60 * 1000;
+const MARKET_PULSE_DELAYED_SEC = 20 * 60;
+const MARKET_PULSE_EXTENDED_STALE_MS = 20 * 60 * 1000;
 const CACHE_WARNING_MESSAGE = "Market open but live quote unavailable — using cached data.";
 
 function normalizeSession(session) {
@@ -1069,33 +1091,49 @@ function deriveMarketSession(rawQuote, nowMs = Date.now()) {
   return computed.session;
 }
 
-function resolveQuoteSource({ sourceHint, session, asOfTimestamp, nowMs, isRealtime }) {
+function resolveQuoteSource({ sourceHint, session, asOfTimestamp, nowMs, isRealtime, isDelayed }) {
   const normalizedHint = sourceHint ? String(sourceHint).toUpperCase() : null;
   if (normalizedHint === "CACHE" || normalizedHint === "CACHED") {
-    return QUOTE_SOURCES.CACHED;
+    return { source: QUOTE_SOURCES.CACHED, reason: "provider_cached" };
   }
   if (normalizedHint === "HISTORICAL" || normalizedHint === "LAST_CLOSE") {
-    return QUOTE_SOURCES.LAST_CLOSE;
+    return { source: QUOTE_SOURCES.LAST_CLOSE, reason: "provider_last_close" };
   }
   if (normalizedHint === "DELAYED") {
-    return QUOTE_SOURCES.DELAYED;
+    return { source: QUOTE_SOURCES.DELAYED, reason: "provider_delayed" };
   }
   if (normalizedHint === "REALTIME" || normalizedHint === "PRIMARY" || normalizedHint === "EXTENDED") {
-    return QUOTE_SOURCES.REALTIME;
+    return { source: QUOTE_SOURCES.REALTIME, reason: "provider_realtime" };
   }
   if (session === QUOTE_SESSIONS.CLOSED) {
-    return QUOTE_SOURCES.LAST_CLOSE;
+    return { source: QUOTE_SOURCES.LAST_CLOSE, reason: "session_closed" };
   }
-  if (asOfTimestamp != null && nowMs - asOfTimestamp > REALTIME_FRESHNESS_MS) {
-    return QUOTE_SOURCES.DELAYED;
+  if (asOfTimestamp == null) {
+    if (session === QUOTE_SESSIONS.REGULAR || session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
+      return { source: QUOTE_SOURCES.DELAYED, reason: "missing_timestamp" };
+    }
+    return { source: QUOTE_SOURCES.CACHED, reason: "missing_timestamp" };
   }
-  if (session === QUOTE_SESSIONS.REGULAR || session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
-    return QUOTE_SOURCES.REALTIME;
+  const ageMs = Math.max(0, nowMs - asOfTimestamp);
+  if (session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
+    if (ageMs <= REALTIME_FRESHNESS_MS && !isDelayed) {
+      return { source: QUOTE_SOURCES.REALTIME, reason: "age_realtime_extended" };
+    }
+    return { source: QUOTE_SOURCES.DELAYED, reason: isDelayed ? "provider_delayed" : "extended_hours" };
+  }
+  if (session === QUOTE_SESSIONS.REGULAR) {
+    if (ageMs <= REALTIME_FRESHNESS_MS && !isDelayed) {
+      return { source: QUOTE_SOURCES.REALTIME, reason: "age_realtime" };
+    }
+    if (ageMs <= DELAYED_FRESHNESS_MS || isDelayed) {
+      return { source: QUOTE_SOURCES.DELAYED, reason: isDelayed ? "provider_delayed" : "age_delayed" };
+    }
+    return { source: QUOTE_SOURCES.CACHED, reason: "age_cached" };
   }
   if (isRealtime) {
-    return QUOTE_SOURCES.REALTIME;
+    return { source: QUOTE_SOURCES.REALTIME, reason: "provider_realtime" };
   }
-  return QUOTE_SOURCES.DELAYED;
+  return { source: QUOTE_SOURCES.DELAYED, reason: "fallback_delayed" };
 }
 
 function getDebugFreshnessLabel(source) {
@@ -1142,6 +1180,17 @@ function logMarketDebug(symbol, stage, details = {}) {
   }
   console.info("[Market Debug]", {
     symbol,
+    stage,
+    timestamp: new Date().toISOString(),
+    ...details,
+  });
+}
+
+function logDevQuote(stage, details = {}) {
+  if (!DEV_QUOTE_LOG_ENABLED) {
+    return;
+  }
+  console.info("[Quote Debug]", {
     stage,
     timestamp: new Date().toISOString(),
     ...details,
@@ -1760,12 +1809,14 @@ function normalizeQuote(rawQuote, nowMs = Date.now()) {
   if (!session) {
     session = QUOTE_SESSIONS.CLOSED;
   }
-  const source = resolveQuoteSource({
+  const delayedFlag = rawQuote?.delay === true || rawQuote?.isDelayed === true || rawQuote?.delayed === true;
+  const { source, reason: sourceReason } = resolveQuoteSource({
     sourceHint: rawQuote.source ?? base.source ?? rawQuote.dataSource,
     session,
     asOfTimestamp,
     nowMs,
     isRealtime: base.isRealtime,
+    isDelayed: delayedFlag,
   });
   if (source === QUOTE_SOURCES.LAST_CLOSE && session !== QUOTE_SESSIONS.CLOSED) {
     session = QUOTE_SESSIONS.CLOSED;
@@ -1780,6 +1831,7 @@ function normalizeQuote(rawQuote, nowMs = Date.now()) {
     changePct: base.changePct ?? null,
     asOfTs: asOfTimestamp ?? null,
     source,
+    sourceReason,
     session,
     isRealtime,
     isStale,
@@ -1865,10 +1917,6 @@ function classifyQuoteQuality({ quote, nowMs, session }) {
     return { badge: QUOTE_SOURCES.UNAVAILABLE, reason: "missing_quote", isLive: false, showWarning: false };
   }
   const price = quote.lastPrice ?? quote.price ?? null;
-  const timestamp = getQuoteTimestamp(quote);
-  if (price == null || timestamp == null) {
-    return { badge: QUOTE_SOURCES.UNAVAILABLE, reason: "missing_timestamp", isLive: false, showWarning: false };
-  }
   const resolvedNowMs = nowMs instanceof Date ? nowMs.getTime() : nowMs ?? Date.now();
   const normalizedSession =
     normalizeSession(session) ??
@@ -1876,7 +1924,24 @@ function classifyQuoteQuality({ quote, nowMs, session }) {
   const resolvedSession = normalizedSession ?? QUOTE_SESSIONS.CLOSED;
   const normalizedSource =
     normalizeSource(quote.dataSource ?? quote.source) ??
+    (quote.isDelayed ? QUOTE_SOURCES.DELAYED : null) ??
     (quote.isRealtime ? QUOTE_SOURCES.REALTIME : null);
+  if (price == null) {
+    return { badge: QUOTE_SOURCES.UNAVAILABLE, reason: "missing_price", isLive: false, showWarning: false };
+  }
+  const timestamp = getQuoteTimestamp(quote);
+  if (timestamp == null) {
+    if (resolvedSession === QUOTE_SESSIONS.CLOSED) {
+      if (normalizedSource === QUOTE_SOURCES.LAST_CLOSE) {
+        return { badge: QUOTE_SOURCES.LAST_CLOSE, reason: "missing_timestamp_last_close", isLive: false, showWarning: false };
+      }
+      if (normalizedSource === QUOTE_SOURCES.CACHED) {
+        return { badge: QUOTE_SOURCES.CACHED, reason: "missing_timestamp_cached", isLive: false, showWarning: true };
+      }
+      return { badge: QUOTE_SOURCES.LAST_CLOSE, reason: "missing_timestamp_closed", isLive: false, showWarning: false };
+    }
+    return { badge: QUOTE_SOURCES.DELAYED, reason: "missing_timestamp", isLive: false, showWarning: false };
+  }
   const ageMs = Math.max(0, resolvedNowMs - timestamp);
   if (resolvedSession !== QUOTE_SESSIONS.REGULAR) {
     if (normalizedSource === QUOTE_SOURCES.LAST_CLOSE) {
@@ -1894,6 +1959,9 @@ function classifyQuoteQuality({ quote, nowMs, session }) {
         isLive: false,
         showWarning: false,
       };
+    }
+    if (normalizedSource === QUOTE_SOURCES.REALTIME && ageMs <= REALTIME_FRESHNESS_MS) {
+      return { badge: QUOTE_SOURCES.REALTIME, reason: "extended_realtime", isLive: true, showWarning: false };
     }
     return { badge: QUOTE_SOURCES.DELAYED, reason: "extended_hours", isLive: false, showWarning: false };
   }
@@ -3842,6 +3910,8 @@ function isHistoricalStale(symbol, { range = "1mo", interval = "1d" } = {}) {
   return !entry || Date.now() - entry.storedAt >= ttlMs;
 }
 
+// Quote pipeline: Provider (Yahoo) -> /api/quote proxy -> fetchYahooQuotes -> buildQuoteFromYahoo/normalizeQuote
+// -> marketState entries -> normalizeMarketEntryForHeader -> computeHeaderQuality -> UI badges.
 async function fetchYahooQuotes(symbols, options = {}) {
   const uniqueSymbols = [...new Set(symbols)];
   if (!uniqueSymbols.length) {
@@ -3905,6 +3975,36 @@ async function fetchYahooQuotes(symbols, options = {}) {
         throw new MarketDataError("provider_error", "Malformed quote response.", {
           hasQuoteResponse: Boolean(quoteResponse),
         });
+      }
+      if (DEV_QUOTE_LOG_ENABLED) {
+        const sampleSymbols = ["AAPL", "MSFT", "NVDA"];
+        const sampleQuotes = quoteResponse.result.filter((quote) =>
+          sampleSymbols.includes(quote?.symbol?.toUpperCase?.() ?? quote?.symbol),
+        );
+        if (sampleQuotes.length) {
+          logDevQuote("provider_response", {
+            provider: PROVIDER,
+            thresholds: {
+              realtimeFreshnessMs: REALTIME_FRESHNESS_MS,
+              delayedFreshnessMs: DELAYED_FRESHNESS_MS,
+            },
+            quotes: sampleQuotes.map((quote) => ({
+              symbol: quote?.symbol ?? null,
+              price:
+                quote?.regularMarketPrice ??
+                quote?.preMarketPrice ??
+                quote?.postMarketPrice ??
+                quote?.price ??
+                null,
+              regularMarketTime: quote?.regularMarketTime ?? null,
+              preMarketTime: quote?.preMarketTime ?? null,
+              postMarketTime: quote?.postMarketTime ?? null,
+              quoteTime: quote?.quoteTime ?? null,
+              marketState: quote?.marketState ?? quote?.regularMarketState ?? null,
+              isDelayed: quote?.delay ?? quote?.isDelayed ?? quote?.delayed ?? null,
+            })),
+          });
+        }
       }
       return quoteResponse.result;
     }),
@@ -4070,6 +4170,21 @@ async function getQuoteInternal(symbol, options = {}) {
         changePct: normalized.changePct,
         asOfTimestamp: normalized.asOfTs,
       };
+      if (DEV_QUOTE_LOG_ENABLED && ["AAPL", "MSFT", "NVDA"].includes(String(symbol).toUpperCase())) {
+        logDevQuote("normalized_quote", {
+          symbol,
+          price: fullQuote.price ?? null,
+          quoteTimeMs: fullQuote.asOfTimestamp ?? null,
+          source: fullQuote.source ?? null,
+          sourceReason: fullQuote.sourceReason ?? null,
+          isDelayed: fullQuote.source === QUOTE_SOURCES.DELAYED,
+          session: fullQuote.session ?? null,
+          thresholds: {
+            realtimeFreshnessMs: REALTIME_FRESHNESS_MS,
+            delayedFreshnessMs: DELAYED_FRESHNESS_MS,
+          },
+        });
+      }
       if (wasUnavailable) {
         fullQuote.unavailable = true;
       }
@@ -4736,6 +4851,39 @@ async function refreshVisibleQuotes(options = {}) {
     logMarketDebug("bulk", "backoff_active", { until: rateLimitBackoffUntil });
   }
   updateMarketPulseCachedState(marketState, Date.now());
+  if (DEV_QUOTE_LOG_ENABLED) {
+    const sampleEntries = marketState.slice(0, 2);
+    const nowMs = Date.now();
+    const session = computeUsMarketSession(new Date(nowMs)).session ?? QUOTE_SESSIONS.CLOSED;
+    const headerQuality = computeHeaderQuality
+      ? computeHeaderQuality(
+          sampleEntries
+            .map((entry) => normalizeMarketEntryForHeader(entry, nowMs, session))
+            .filter(Boolean),
+          marketPulseState.lastRefreshAt,
+          session,
+        )
+      : null;
+    logDevQuote("client_refresh", {
+      thresholds: {
+        realtimeFreshnessMs: REALTIME_FRESHNESS_MS,
+        delayedFreshnessMs: DELAYED_FRESHNESS_MS,
+      },
+      headerBadge: headerQuality?.headerSourceBadge ?? null,
+      sample: sampleEntries.map((entry) => {
+        const quality = classifyQuoteQuality({ quote: entry, nowMs, session });
+        return {
+          symbol: entry.symbol ?? null,
+          price: entry.lastPrice ?? null,
+          quoteTimeMs: entry.quoteAsOf ?? entry.lastUpdatedAt ?? null,
+          session: entry.quoteSession ?? null,
+          source: entry.dataSource ?? null,
+          badge: quality.badge,
+          reason: quality.reason,
+        };
+      }),
+    });
+  }
   summary.hadQuoteFailure = hadQuoteFailure;
   summary.error = bulkError ?? (hadQuoteFailure ? results.find((result) => result?.error)?.error : null);
 

@@ -21,17 +21,37 @@
     UNKNOWN: "UNKNOWN",
   };
 
-  const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
+  const REALTIME_FRESHNESS_MS = 30 * 1000;
+  const DELAYED_FRESHNESS_MS = 20 * 60 * 1000;
 
   function parseEpoch(value) {
     if (value == null) {
       return null;
     }
-    const numeric = typeof value === "string" ? Number.parseFloat(value) : value;
-    if (!Number.isFinite(numeric) || numeric <= 0) {
+    if (value instanceof Date) {
+      const timestamp = value.getTime();
+      return Number.isFinite(timestamp) ? timestamp : null;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+      const numericMatch = /^-?\d+(\.\d+)?$/.test(trimmed);
+      if (numericMatch) {
+        const numeric = Number.parseFloat(trimmed);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+          return null;
+        }
+        return numeric > 1e12 ? numeric : numeric * 1000;
+      }
+      const parsed = Date.parse(trimmed);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    if (!Number.isFinite(value) || value <= 0) {
       return null;
     }
-    return numeric > 1e12 ? numeric : numeric * 1000;
+    return value > 1e12 ? value : value * 1000;
   }
 
   function normalizeSession(session) {
@@ -82,18 +102,52 @@
         rawQuote.postMarketTime ??
         null,
     );
+    const delayedFlag = rawQuote.isDelayed === true || rawQuote.delay === true || rawQuote.delayed === true;
     let source = normalizeSource(rawQuote.source ?? rawQuote.dataSource);
-    if (!source) {
-      if (rawQuote.isRealtime === true) {
-        source = QUOTE_SOURCES.REALTIME;
-      } else if (rawQuote.isDelayed === true) {
+    let sourceReason = "unknown";
+    if (source) {
+      sourceReason = `provider_${source.toLowerCase()}`;
+    } else if (rawQuote.isRealtime === true) {
+      source = QUOTE_SOURCES.REALTIME;
+      sourceReason = "provider_realtime";
+    } else if (delayedFlag) {
+      source = QUOTE_SOURCES.DELAYED;
+      sourceReason = "provider_delayed";
+    } else if (session === QUOTE_SESSIONS.CLOSED) {
+      source = QUOTE_SOURCES.LAST_CLOSE;
+      sourceReason = "session_closed";
+    } else if (quoteTimeMs == null) {
+      if (session === QUOTE_SESSIONS.REGULAR || session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
         source = QUOTE_SOURCES.DELAYED;
-      } else if (session === QUOTE_SESSIONS.CLOSED) {
-        source = QUOTE_SOURCES.LAST_CLOSE;
-      } else if (quoteTimeMs && nowMs - quoteTimeMs > REALTIME_FRESHNESS_MS) {
-        source = QUOTE_SOURCES.DELAYED;
+        sourceReason = "missing_timestamp";
       } else {
-        source = QUOTE_SOURCES.REALTIME;
+        source = QUOTE_SOURCES.CACHED;
+        sourceReason = "missing_timestamp";
+      }
+    } else {
+      const ageMs = Math.max(0, nowMs - quoteTimeMs);
+      if (session === QUOTE_SESSIONS.PRE || session === QUOTE_SESSIONS.POST) {
+        if (ageMs <= REALTIME_FRESHNESS_MS && !delayedFlag) {
+          source = QUOTE_SOURCES.REALTIME;
+          sourceReason = "age_realtime_extended";
+        } else {
+          source = QUOTE_SOURCES.DELAYED;
+          sourceReason = "extended_hours";
+        }
+      } else if (session === QUOTE_SESSIONS.REGULAR) {
+        if (ageMs <= REALTIME_FRESHNESS_MS && !delayedFlag) {
+          source = QUOTE_SOURCES.REALTIME;
+          sourceReason = "age_realtime";
+        } else if (ageMs <= DELAYED_FRESHNESS_MS || delayedFlag) {
+          source = QUOTE_SOURCES.DELAYED;
+          sourceReason = delayedFlag ? "provider_delayed" : "age_delayed";
+        } else {
+          source = QUOTE_SOURCES.CACHED;
+          sourceReason = "age_cached";
+        }
+      } else {
+        source = QUOTE_SOURCES.DELAYED;
+        sourceReason = "fallback_delayed";
       }
     }
     return {
@@ -101,6 +155,7 @@
       price,
       quoteTimeMs,
       source,
+      sourceReason,
       session,
       isDelayed: source === QUOTE_SOURCES.DELAYED,
       isFallback: [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE, QUOTE_SOURCES.UNAVAILABLE].includes(source),
