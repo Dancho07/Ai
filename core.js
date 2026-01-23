@@ -219,14 +219,14 @@ const percentFormatter = new Intl.NumberFormat("en-US", {
 
 const PROVIDER = "Yahoo Finance";
 const MAX_RETRIES = 4;
-const REQUEST_TIMEOUT_MS = 8000;
-const REFRESH_TIMEOUT_MS = 10000;
+const REQUEST_TIMEOUT_MS = 9000;
+const REFRESH_TIMEOUT_MS = 15000;
 const BACKOFF_BASE_MS = 500;
 const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
-const MAX_PARALLEL_REQUESTS = 3;
-const QUOTE_BATCH_SIZE = 8;
-const QUOTE_BATCH_CACHE_TTL_MS = 7000;
-const RETRYABLE_STATUS = new Set([429, 503, 504]);
+const MAX_PARALLEL_REQUESTS = 4;
+const QUOTE_BATCH_SIZE = 25;
+const QUOTE_BATCH_CACHE_TTL_MS = 8000;
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
 const HISTORICAL_CACHE_KEY = "market_historical_cache_v1";
@@ -256,12 +256,12 @@ const REFRESH_INTERVALS = {
   UNKNOWN: 12 * 1000,
 };
 const REFRESH_TIMEOUTS = {
-  REGULAR: 15 * 1000,
-  PRE: 14 * 1000,
-  POST: 14 * 1000,
-  CLOSED: 18 * 1000,
-  DELAYED: 15 * 1000,
-  UNKNOWN: 15 * 1000,
+  REGULAR: 20 * 1000,
+  PRE: 18 * 1000,
+  POST: 18 * 1000,
+  CLOSED: 20 * 1000,
+  DELAYED: 18 * 1000,
+  UNKNOWN: 18 * 1000,
 };
 
 const YAHOO_QUOTE_URL = (symbols) =>
@@ -1045,7 +1045,7 @@ function computeUsMarketSession(now = new Date(), options = {}) {
   return { session: QUOTE_SESSIONS.CLOSED, isOpen: false };
 }
 
-const REALTIME_FRESHNESS_MS = 30 * 1000;
+const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
 const DELAYED_FRESHNESS_MS = 20 * 60 * 1000;
 const STALE_FRESHNESS_MS = 20 * 60 * 1000;
 const MARKET_PULSE_STALE_MS = 30 * 60 * 1000;
@@ -4019,8 +4019,12 @@ async function fetchYahooQuotes(symbols, options = {}) {
   if (!uniqueSymbols.length) {
     return { quotes: [], hadFailure: false, errors: [] };
   }
+  const requestId = createRequestId();
+  const startedAt = Date.now();
   const sessionInfo = computeUsMarketSession(new Date());
   const batchSize = options.batchSize ?? QUOTE_BATCH_SIZE;
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const maxAttempts = options.maxAttempts ?? 2;
   const debugInfo = { batches: [], requested: uniqueSymbols.slice(), provider: PROVIDER };
   const batches = [];
   for (let i = 0; i < uniqueSymbols.length; i += batchSize) {
@@ -4090,8 +4094,8 @@ async function fetchYahooQuotes(symbols, options = {}) {
             provider: PROVIDER,
             symbol: batch.join(","),
             fetchFn: options.fetchFn,
-            maxAttempts: options.maxAttempts,
-            timeoutMs: options.timeoutMs,
+            maxAttempts,
+            timeoutMs,
             signal: options.signal,
             session: sessionInfo.session ?? null,
             onStatus: recordStatus,
@@ -4177,6 +4181,25 @@ async function fetchYahooQuotes(symbols, options = {}) {
       errors.push(result.reason);
     }
   });
+  const { realtimeOk, cachedFallback } = summarizeNormalizedSources(quotes);
+  const durationMs = Date.now() - startedAt;
+  if (DEV_QUOTE_LOG_ENABLED) {
+    logMarketDataEvent("info", {
+      event: "quote_fetch_summary",
+      requestId,
+      provider: PROVIDER,
+      symbolsCount: uniqueSymbols.length,
+      startedAt,
+      finishedAt: startedAt + durationMs,
+      durationMs,
+      timeoutMs,
+      realtimeOk,
+      cachedFallback,
+      failed: errors.length,
+      errorTypes: errors.map((error) => error?.type ?? "unknown"),
+      errorStatusCodes: errors.map((error) => error?.details?.statusCode ?? null).filter((value) => value != null),
+    });
+  }
   return { quotes, hadFailure: errors.length > 0, errors, debug: debugInfo };
 }
 
@@ -4281,12 +4304,14 @@ async function getQuoteInternal(symbol, options = {}) {
   const lastKnown = getLastKnownQuote(symbol);
   if (!providerQuote && options.allowFetch !== false) {
     try {
-      const { quotes } = await fetchYahooQuotes([symbol], options);
+      const { quotes, errors } = await fetchYahooQuotes([symbol], options);
       providerQuote =
         quotes.find((entry) => entry.symbol?.toUpperCase?.() === symbol) ??
         quotes.find((entry) => entry.symbol === symbol) ??
         null;
-      if (!providerQuote && quotes.length === 0) {
+      if (!providerQuote && errors?.length) {
+        providerError = errors[0];
+      } else if (!providerQuote && quotes.length === 0) {
         providerError = new MarketDataError("unavailable", "Empty quote response.", {
           reason: "empty_quote",
         });
@@ -4730,6 +4755,20 @@ function getQuoteStatusSummary(symbols) {
   return counts;
 }
 
+function summarizeNormalizedSources(quotes = [], nowMs = Date.now()) {
+  const summary = { realtimeOk: 0, cachedFallback: 0 };
+  quotes.forEach((quote) => {
+    const normalized = normalizeQuote(quote, nowMs);
+    const source = normalizeSource(normalized?.source) ?? QUOTE_SOURCES.UNAVAILABLE;
+    if (source === QUOTE_SOURCES.REALTIME) {
+      summary.realtimeOk += 1;
+    } else {
+      summary.cachedFallback += 1;
+    }
+  });
+  return summary;
+}
+
 function logMarketSummary({ filteredCount, totalCount } = {}) {
   if (!MARKET_DEBUG_ENABLED) {
     return;
@@ -4869,6 +4908,9 @@ async function refreshVisibleQuotes(options = {}) {
     hadQuoteFailure: false,
     error: null,
     errorTypes: [],
+    realtimeOk: 0,
+    cachedCount: 0,
+    failedCount: 0,
   };
   if (!symbols.length) {
     updateMarketPulseLatestQuote();
@@ -4968,6 +5010,20 @@ async function refreshVisibleQuotes(options = {}) {
     if (result?.quote && !result?.quote?.unavailable) {
       summary.okCount += 1;
     }
+    if (result?.quote) {
+      const source =
+        normalizeSource(result.quote.source ?? result.quote.dataSource) ??
+        (result.quote.isDelayed ? QUOTE_SOURCES.DELAYED : null) ??
+        (result.quote.isRealtime ? QUOTE_SOURCES.REALTIME : null) ??
+        QUOTE_SOURCES.UNAVAILABLE;
+      if (source === QUOTE_SOURCES.REALTIME) {
+        summary.realtimeOk += 1;
+      } else {
+        summary.cachedCount += 1;
+      }
+    } else {
+      summary.failedCount += 1;
+    }
   });
   const indicatorData = getMarketIndicatorData(getMarketIndicatorEntry(), {
     marketEntries: marketState,
@@ -4978,7 +5034,12 @@ async function refreshVisibleQuotes(options = {}) {
     providerMode,
     fallbackReason: getFallbackReason({ providerMode, indicatorData, errorTypes: summary.errorTypes }),
     fetchedAtMs: Date.now(),
+    durationMs: Date.now() - fetchStartedAt,
     session: indicatorData?.sessionBadge?.label ?? null,
+    realtimeOk: summary.realtimeOk,
+    cachedCount: summary.cachedCount,
+    failedCount: summary.failedCount,
+    lastUpdated: getLatestQuoteAsOf(marketState),
   };
   if (MARKET_DEBUG_ENABLED) {
     const sampleQuotes = quoteResults.slice(0, 3);
@@ -5149,6 +5210,15 @@ function getQuoteFailureMessage(errorType) {
   return "Live quotes unavailable (network). Showing cached/last close.";
 }
 
+function getPartialFallbackMessage({ cachedCount, failedCount, totalCount }) {
+  const fallbackCount = Math.max(0, (cachedCount ?? 0) + (failedCount ?? 0));
+  const total = totalCount ?? 0;
+  if (!fallbackCount || !total) {
+    return null;
+  }
+  return `Some symbols cached (${fallbackCount}/${total}).`;
+}
+
 function setRefreshState(partial) {
   Object.assign(refreshState, partial);
   updateRefreshStatus();
@@ -5284,13 +5354,28 @@ async function runRefreshCycle(options = {}) {
     marketPulseState.lastRefreshAt = completedAt;
   }
   if (hadFailure) {
-    const errorType = error?.type ?? summary?.errorTypes?.[0] ?? summary?.error?.type ?? "network_error";
-    const message = getQuoteFailureMessage(errorType);
-    setRefreshState({
-      status: finalStatus,
-      lastError: error ?? summary?.error ?? null,
+    const totalCount = summary?.symbolsCount ?? symbols.length;
+    const partialMessage = getPartialFallbackMessage({
+      cachedCount: summary?.cachedCount,
+      failedCount: summary?.failedCount,
+      totalCount,
     });
-    setQuoteStatusBanner(message, { reason: errorType });
+    const showFailureBanner = !summary || (summary.realtimeOk ?? 0) === 0;
+    if (showFailureBanner) {
+      const errorType = error?.type ?? summary?.errorTypes?.[0] ?? summary?.error?.type ?? "network_error";
+      const message = getQuoteFailureMessage(errorType);
+      setRefreshState({
+        status: finalStatus,
+        lastError: error ?? summary?.error ?? null,
+      });
+      setQuoteStatusBanner(message, { reason: errorType });
+    } else {
+      setRefreshState({
+        status: finalStatus,
+        lastError: null,
+      });
+      setQuoteStatusBanner(partialMessage, { reason: "partial" });
+    }
   } else {
     setRefreshState({
       status: finalStatus,
