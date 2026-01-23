@@ -65,6 +65,7 @@ const {
   initTradePage,
   initLivePage,
 } = require("../core");
+const { computeHeaderQuality, normalizeQuote: normalizeHeaderQuote } = require("../quoteQuality");
 const { computeIndicators, scoreSignal } = require("../strategy");
 
 function createResponse({ ok, status, json }) {
@@ -1328,6 +1329,98 @@ const tests = [
       });
       assert.strictEqual(indicator.sourceBadge.label, "REALTIME");
       assert.strictEqual(indicator.usingCached, false);
+    },
+  },
+  {
+    name: "computeHeaderQuality prefers realtime when mixed with cached",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const realtimeQuotes = Array.from({ length: 10 }, (_, index) => ({
+        symbol: `RT${index}`,
+        price: 100 + index,
+        quoteTimeMs: nowMs - 5000,
+        source: "REALTIME",
+        session: "REGULAR",
+      }));
+      const cachedQuotes = Array.from({ length: 2 }, (_, index) => ({
+        symbol: `CC${index}`,
+        price: 90 + index,
+        quoteTimeMs: nowMs - 600 * 1000,
+        source: "CACHED",
+        session: "REGULAR",
+      }));
+      const result = computeHeaderQuality([...realtimeQuotes, ...cachedQuotes], nowMs, "REGULAR");
+      assert.strictEqual(result.headerSourceBadge, "REALTIME");
+      assert.strictEqual(result.usingCachedData, false);
+    },
+  },
+  {
+    name: "computeHeaderQuality returns delayed when all quotes are delayed",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const delayedQuotes = Array.from({ length: 3 }, (_, index) => ({
+        symbol: `DL${index}`,
+        price: 200 + index,
+        quoteTimeMs: nowMs - 5 * 60 * 1000,
+        source: "DELAYED",
+        session: "REGULAR",
+      }));
+      const result = computeHeaderQuality(delayedQuotes, nowMs, "REGULAR");
+      assert.strictEqual(result.headerSourceBadge, "DELAYED");
+      assert.strictEqual(result.usingCachedData, false);
+    },
+  },
+  {
+    name: "computeHeaderQuality returns last close when all quotes are last close",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 22, 0, 0);
+      const lastCloseQuotes = Array.from({ length: 2 }, (_, index) => ({
+        symbol: `LC${index}`,
+        price: 300 + index,
+        quoteTimeMs: nowMs - 6 * 60 * 60 * 1000,
+        source: "LAST_CLOSE",
+        session: "CLOSED",
+      }));
+      const result = computeHeaderQuality(lastCloseQuotes, nowMs, "CLOSED");
+      assert.strictEqual(result.headerSourceBadge, "LAST_CLOSE");
+      assert.strictEqual(result.usingCachedData, true);
+    },
+  },
+  {
+    name: "regular session cached quotes trigger cached header",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const cachedQuotes = [
+        { symbol: "AAPL", price: 180, quoteTimeMs: nowMs - 30 * 60 * 1000, source: "CACHED", session: "REGULAR" },
+      ];
+      const result = computeHeaderQuality(cachedQuotes, nowMs, "REGULAR");
+      assert.strictEqual(result.headerSourceBadge, "CACHED");
+      assert.strictEqual(result.usingCachedData, true);
+      const indicator = getMarketIndicatorData({
+        quoteSession: "REGULAR",
+        dataSource: "CACHED",
+        quoteAsOf: nowMs - 30 * 60 * 1000,
+        lastPrice: 180,
+      }, { now: new Date(nowMs) });
+      assert.ok(indicator.warningMessage.includes("Market open but live quote unavailable"));
+    },
+  },
+  {
+    name: "computeHeaderQuality keeps fresh timestamps from being treated as cached",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const realtimeQuote = normalizeHeaderQuote(
+        { symbol: "AAPL", price: 120, quoteTimeMs: nowMs - 10 * 1000, session: "REGULAR" },
+        nowMs,
+      );
+      const delayedQuote = normalizeHeaderQuote(
+        { symbol: "MSFT", price: 340, quoteTimeMs: nowMs - 30 * 60 * 1000, session: "REGULAR" },
+        nowMs,
+      );
+      const realtimeResult = computeHeaderQuality([realtimeQuote], nowMs, "REGULAR");
+      const delayedResult = computeHeaderQuality([delayedQuote], nowMs, "REGULAR");
+      assert.strictEqual(realtimeResult.headerSourceBadge, "REALTIME");
+      assert.strictEqual(delayedResult.headerSourceBadge, "DELAYED");
     },
   },
   {
@@ -2655,6 +2748,82 @@ const tests = [
       try {
         core.initLivePage();
         assert.strictEqual(marketBody.children.length, 3);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "market pulse header hides cached note when live quotes succeed",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL", "MSFT"]));
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const marketOpenText = createMockDomElement();
+      const marketSessionBadge = createMockDomElement();
+      const marketAsOf = createMockDomElement();
+      const marketSourceBadge = createMockDomElement();
+      const marketCacheNote = createMockDomElement({ classes: ["hidden"] });
+      const mockDocument = createMockDocument({
+        "market-body": marketBody,
+        "market-open-text": marketOpenText,
+        "market-session-badge": marketSessionBadge,
+        "market-as-of": marketAsOf,
+        "market-source-badge": marketSourceBadge,
+        "market-cache-note": marketCacheNote,
+      });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async (url) => {
+        const stringUrl = String(url);
+        if (stringUrl.includes("/v8/finance/chart/")) {
+          return createResponse({
+            ok: true,
+            status: 200,
+            json: {
+              chart: {
+                result: [
+                  {
+                    indicators: { quote: [{ close: [100, 101] }] },
+                    timestamp: [1700000000, 1700000600],
+                  },
+                ],
+              },
+            },
+          });
+        }
+        return createResponse({
+          ok: true,
+          status: 200,
+          json: {
+            quoteResponse: {
+              result: [
+                {
+                  symbol: "AAPL",
+                  regularMarketPrice: 190,
+                  regularMarketTime: Math.floor(Date.now() / 1000),
+                  marketState: "REGULAR",
+                },
+                {
+                  symbol: "MSFT",
+                  regularMarketPrice: 330,
+                  regularMarketTime: Math.floor(Date.now() / 1000),
+                  marketState: "REGULAR",
+                },
+              ],
+            },
+          },
+        });
+      };
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        core.initLivePage({ skipInitialLoad: true });
+        await core.runRefreshCycle({ symbols: ["AAPL", "MSFT"] });
+        assert.strictEqual(marketSourceBadge.textContent, "REALTIME");
+        assert.strictEqual(marketCacheNote.classList.contains("hidden"), true);
       } finally {
         restore();
         global.localStorage = originalLocalStorage;
