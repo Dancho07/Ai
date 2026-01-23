@@ -2374,6 +2374,27 @@ const tests = [
     },
   },
   {
+    name: "refresh cycle tracks requested symbols when timing out",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL", "MSFT"]));
+      const originalLocalStorage = global.localStorage;
+      global.localStorage = storage;
+      const { core, restore } = loadCoreWithDocument(createMockDocument());
+      try {
+        core.resetRefreshState();
+        const refreshFn = () => new Promise(() => {});
+        await core.runRefreshCycle({ timeoutMs: 10, refreshFn });
+        const summary = core.getLastRefreshSummary();
+        assert.strictEqual(summary.totalCount, 2);
+        assert.strictEqual(summary.okCount, 0);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+      }
+    },
+  },
+  {
     name: "refresh cycle aborts in-flight refresh when a new cycle starts",
     fn: async () => {
       resetRefreshState();
@@ -2409,6 +2430,66 @@ const tests = [
 
       assert.strictEqual(firstSignal.aborted, true);
       assert.strictEqual(firstAborted, true);
+    },
+  },
+  {
+    name: "refresh symbols fall back to watchlist when favorites are empty",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL", "MSFT"]));
+      const favoritesToggle = createMockElement();
+      favoritesToggle.checked = true;
+      const originalLocalStorage = global.localStorage;
+      global.localStorage = storage;
+      const { core, restore } = loadCoreWithDocument(
+        createMockDocument({
+          "filter-favorites": favoritesToggle,
+        }),
+      );
+      try {
+        const symbols = core.getRefreshSymbolsForCycle();
+        assert.deepStrictEqual(symbols, ["AAPL", "MSFT"]);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+      }
+    },
+  },
+  {
+    name: "refresh keeps cached quotes when quote fetch fails",
+    fn: async () => {
+      const storage = createStorage();
+      storage.setItem("watchlist_v1", JSON.stringify(["AAPL"]));
+      const marketBody = createMockDomElement({ tagName: "TBODY" });
+      const mockDocument = createMockDocument({ "market-body": marketBody });
+      const originalLocalStorage = global.localStorage;
+      const originalFetch = global.fetch;
+      global.localStorage = storage;
+      global.fetch = async () => {
+        throw new Error("network down");
+      };
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        const stock = core.getStockEntry("AAPL");
+        core.updateStockWithQuote(stock, {
+          price: 101,
+          change: 1,
+          changePct: 1,
+          asOfTimestamp: Date.now(),
+          session: "REGULAR",
+          source: "REALTIME",
+        });
+        stock.quoteAsOf = Date.now() - 60 * 1000;
+        stock.lastUpdatedAt = stock.quoteAsOf;
+        const summary = await core.refreshVisibleQuotes();
+        const refreshed = core.getStockEntry("AAPL");
+        assert.strictEqual(refreshed.lastPrice, 101);
+        assert.strictEqual(summary.hadQuoteFailure, true);
+      } finally {
+        restore();
+        global.localStorage = originalLocalStorage;
+        global.fetch = originalFetch;
+      }
     },
   },
   {
