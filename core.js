@@ -14,6 +14,14 @@ const symbolError = isBrowser ? document.getElementById("symbol-error") : null;
 const symbolChips = isBrowser ? document.getElementById("symbol-chips") : null;
 const submitButton = isBrowser ? form?.querySelector('button[type="submit"]') : null;
 const autoRunToggle = isBrowser ? document.getElementById("auto-run-toggle") : null;
+const quoteQualityModule =
+  typeof module !== "undefined" && module.exports
+    ? require("./quoteQuality")
+    : typeof window !== "undefined"
+      ? window.QuoteQuality
+      : null;
+const normalizeQuoteQuality = quoteQualityModule?.normalizeQuote ?? null;
+const computeHeaderQuality = quoteQualityModule?.computeHeaderQuality ?? null;
 
 const strategyModule =
   typeof module !== "undefined" && module.exports
@@ -881,6 +889,8 @@ function formatClockTime(timestamp) {
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
+    timeZone: "UTC",
+    timeZoneName: "short",
   });
 }
 
@@ -1133,6 +1143,16 @@ function logMarketDebug(symbol, stage, details = {}) {
   console.info("[Market Debug]", {
     symbol,
     stage,
+    timestamp: new Date().toISOString(),
+    ...details,
+  });
+}
+
+function logMarketPulseQuoteDebug(details) {
+  if (!MARKET_DEBUG_ENABLED) {
+    return;
+  }
+  console.info("[Market Pulse Debug]", {
     timestamp: new Date().toISOString(),
     ...details,
   });
@@ -1607,7 +1627,16 @@ async function fetchJsonWithFallback(entries, options = {}) {
   let lastError = null;
   for (const entry of entries) {
     try {
-      return await fetchJsonWithRetry(entry.url, { ...options, provider: entry.provider });
+      const startedAt = Date.now();
+      const payload = await fetchJsonWithRetry(entry.url, { ...options, provider: entry.provider });
+      if (options.onSuccess) {
+        options.onSuccess({
+          provider: entry.provider,
+          url: entry.url,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      return payload;
     } catch (error) {
       lastError = error;
       if (!shouldFallbackAfterError(error)) {
@@ -1912,6 +1941,33 @@ function getQuoteQuality(entry, { nowMs, session }) {
   return classifyQuoteQuality({ quote: entry, nowMs, session }).badge;
 }
 
+function normalizeMarketEntryForHeader(entry, nowMs, sessionOverride) {
+  if (!entry || !normalizeQuoteQuality) {
+    return null;
+  }
+  const quality = classifyQuoteQuality({
+    quote: entry,
+    nowMs,
+    session: sessionOverride ?? entry.quoteSession ?? entry.session ?? null,
+  });
+  const fallbackSource = normalizeSource(entry.dataSource ?? entry.source);
+  const resolvedSource = quality.badge === QUOTE_SOURCES.UNAVAILABLE && fallbackSource ? fallbackSource : quality.badge;
+  return normalizeQuoteQuality(
+    {
+      symbol: entry.symbol,
+      price: entry.lastPrice ?? entry.price ?? null,
+      quoteAsOf: entry.quoteAsOf ?? entry.lastUpdatedAt ?? entry.lastHistoricalTimestamp ?? null,
+      dataSource: resolvedSource,
+      source: resolvedSource,
+      session: entry.quoteSession ?? entry.session ?? sessionOverride ?? null,
+      marketState: entry.quoteSession ?? entry.session ?? sessionOverride ?? null,
+      isRealtime: entry.isRealtime ?? null,
+      isDelayed: entry.dataSource === QUOTE_SOURCES.DELAYED,
+    },
+    nowMs,
+  );
+}
+
 function getBestQuoteQuality(qualities = []) {
   const order = [
     QUOTE_SOURCES.REALTIME,
@@ -1954,23 +2010,35 @@ function getMarketIndicatorData(entry, options = {}) {
       marketStatus = "Open";
     }
   }
-  const latestQuoteAsOf = hasData
-    ? options.latestQuoteAsOf ?? getLatestQuoteAsOf(entries) ?? marketPulseState.latestQuoteAsOf
+  const normalizedQuotes = hasData
+    ? entries.map((item) => normalizeMarketEntryForHeader(item, nowMs, sessionInfo.session)).filter(Boolean)
+    : [];
+  const headerQuality = hasData && computeHeaderQuality
+    ? computeHeaderQuality(normalizedQuotes, marketPulseState.lastRefreshAt, sessionInfo.session)
     : null;
+  const headerAsOfMs =
+    headerQuality?.headerAsOfMs ??
+    (hasData ? options.latestQuoteAsOf ?? getLatestQuoteAsOf(entries) ?? marketPulseState.latestQuoteAsOf : null);
   const emptyAsOfLabel = options.emptyAsOfLabel ?? (hasData ? "As of unknown UTC" : "No data");
-  const asOfLabel = latestQuoteAsOf ? `As of ${formatAsOf(latestQuoteAsOf, { tz: "UTC" })}` : emptyAsOfLabel;
+  const asOfLabel = headerAsOfMs ? `As of ${formatAsOf(headerAsOfMs, { tz: "UTC" })}` : emptyAsOfLabel;
   const sessionBadge = hasData
     ? getSessionBadgeForSession(sessionInfo.session)
     : { label: "UNKNOWN", className: "delayed" };
-  const qualities = hasData ? entries.map((item) => getQuoteQuality(item, { nowMs, session: sessionInfo.session })) : [];
-  const bestQuality = getBestQuoteQuality(qualities);
+  const bestQuality = headerQuality?.headerSourceBadge ?? (hasData ? QUOTE_SOURCES.UNAVAILABLE : QUOTE_SOURCES.UNAVAILABLE);
   const sourceBadge = hasData ? getSourceBadge(bestQuality) : { label: "UNAVAILABLE", className: "delayed" };
+  const usingCached = hasData ? headerQuality?.usingCachedData ?? false : false;
+  const mixedQuality = headerQuality?.mixedQuality ?? false;
+  const warningMessage = shouldShowCacheWarning(sessionInfo.session, bestQuality) ? CACHE_WARNING_MESSAGE : "";
   return {
     marketStatus,
     sessionBadge,
     sourceBadge,
     asOfLabel,
-    usingCached: shouldShowUsingCached(bestQuality, sessionInfo.session, hasData),
+    usingCached,
+    mixedQuality,
+    counts: headerQuality?.counts ?? null,
+    warningMessage,
+    headerAsOfMs,
   };
 }
 
@@ -2026,8 +2094,21 @@ function updateMarketIndicator() {
   marketAsOf.textContent = data.asOfLabel;
   marketSourceBadge.textContent = data.sourceBadge.label;
   marketSourceBadge.className = `session-badge ${data.sourceBadge.className}`;
+  marketSourceBadge.title = data.sourceBadge.tooltip ?? "";
   if (marketCacheNote) {
-    marketCacheNote.classList.toggle("hidden", !data.usingCached);
+    if (data.warningMessage) {
+      marketCacheNote.textContent = `⚠ ${data.warningMessage}`;
+      marketCacheNote.title = data.warningMessage;
+      marketCacheNote.classList.remove("hidden");
+    } else if (data.mixedQuality) {
+      marketCacheNote.textContent = "Some symbols cached.";
+      marketCacheNote.title = "Some symbols are cached or unavailable.";
+      marketCacheNote.classList.remove("hidden");
+    } else {
+      marketCacheNote.textContent = "Using cached data";
+      marketCacheNote.title = "";
+      marketCacheNote.classList.add("hidden");
+    }
   }
 }
 
@@ -2041,9 +2122,15 @@ function updateMarketPulseLatestQuote(entries = marketState) {
 function updateMarketPulseCachedState(entries = marketState, nowMs = Date.now()) {
   const session = computeUsMarketSession(new Date(nowMs)).session ?? QUOTE_SESSIONS.CLOSED;
   const hasData = entries.some((item) => hasMarketIndicatorData(item));
-  const qualities = entries.map((entry) => getQuoteQuality(entry, { nowMs, session }));
-  const bestQuality = getBestQuoteQuality(qualities);
-  marketPulseState.usingCached = shouldShowUsingCached(bestQuality, session, hasData);
+  const normalizedQuotes = hasData
+    ? entries.map((entry) => normalizeMarketEntryForHeader(entry, nowMs, session)).filter(Boolean)
+    : [];
+  if (!hasData || !computeHeaderQuality) {
+    marketPulseState.usingCached = false;
+    return;
+  }
+  const headerQuality = computeHeaderQuality(normalizedQuotes, marketPulseState.lastRefreshAt, session);
+  marketPulseState.usingCached = headerQuality.usingCachedData;
 }
 
 function getSourceBadge(source) {
@@ -3761,6 +3848,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
     return { quotes: [], hadFailure: false, errors: [] };
   }
   const batchSize = options.batchSize ?? QUOTE_BATCH_SIZE;
+  const debugInfo = { batches: [], requested: uniqueSymbols.slice(), provider: PROVIDER };
   const batches = [];
   for (let i = 0; i < uniqueSymbols.length; i += batchSize) {
     batches.push(uniqueSymbols.slice(i, i + batchSize));
@@ -3773,6 +3861,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
   };
   const results = await Promise.allSettled(
     batches.map(async (batch) => {
+      const batchDebug = { symbols: batch, success: false, provider: null, url: null, durationMs: null };
       const cacheBust = Date.now();
       const quoteUrl = YAHOO_QUOTE_URL(batch);
       const plan = [];
@@ -3791,15 +3880,26 @@ async function fetchYahooQuotes(symbols, options = {}) {
           provider: entry.label,
         })),
       );
-      const quoteData = await fetchJsonWithFallback(plan, {
-        provider: PROVIDER,
-        symbol: batch.join(","),
-        fetchFn: options.fetchFn,
-        maxAttempts: options.maxAttempts,
-        timeoutMs: options.timeoutMs,
-        signal: options.signal,
-        onStatus: recordStatus,
-      });
+      let quoteData = null;
+      try {
+        quoteData = await fetchJsonWithFallback(plan, {
+          provider: PROVIDER,
+          symbol: batch.join(","),
+          fetchFn: options.fetchFn,
+          maxAttempts: options.maxAttempts,
+          timeoutMs: options.timeoutMs,
+          signal: options.signal,
+          onStatus: recordStatus,
+          onSuccess: (payload) => {
+            batchDebug.success = true;
+            batchDebug.provider = payload.provider;
+            batchDebug.url = payload.url;
+            batchDebug.durationMs = payload.durationMs;
+          },
+        });
+      } finally {
+        debugInfo.batches.push(batchDebug);
+      }
       const quoteResponse = quoteData?.quoteResponse;
       if (!quoteResponse || !Array.isArray(quoteResponse.result)) {
         throw new MarketDataError("provider_error", "Malformed quote response.", {
@@ -3818,7 +3918,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
       errors.push(result.reason);
     }
   });
-  return { quotes, hadFailure: errors.length > 0, errors };
+  return { quotes, hadFailure: errors.length > 0, errors, debug: debugInfo };
 }
 
 async function fetchHistoricalSeries(symbol, options = {}) {
@@ -4527,12 +4627,15 @@ async function refreshVisibleQuotes(options = {}) {
   let quoteResults = [];
   let forceUnavailable = false;
   let bulkError = null;
+  const fetchStartedAt = Date.now();
+  let quoteDebug = null;
   try {
     const batchResult = await fetchYahooQuotes(symbolsToFetch, {
       signal: options.signal,
       timeoutMs: requestTimeoutMs,
     });
     quoteResults = batchResult.quotes;
+    quoteDebug = batchResult.debug ?? null;
     forceUnavailable = quoteResults.length === 0 && symbolsToFetch.length > 0;
     if (forceUnavailable || batchResult.hadFailure) {
       hadQuoteFailure = true;
@@ -4592,6 +4695,43 @@ async function refreshVisibleQuotes(options = {}) {
       summary.okCount += 1;
     }
   });
+  if (MARKET_DEBUG_ENABLED) {
+    const sampleQuotes = quoteResults.slice(0, 3);
+    const quoteMeta = quoteResults.map((quote) => ({
+      symbol: quote?.symbol ?? null,
+      quoteTime: quote?.quoteTime ?? null,
+      regularMarketTime: quote?.regularMarketTime ?? null,
+      updatedAt: quote?.lastUpdatedAt ?? quote?.updatedAt ?? null,
+      isDelayed: quote?.delay ?? quote?.isDelayed ?? quote?.delayed ?? null,
+      marketState: quote?.marketState ?? quote?.regularMarketState ?? null,
+      isCached: quote?.source === QUOTE_SOURCES.CACHED || quote?.dataSource === QUOTE_SOURCES.CACHED,
+      isLastClose: quote?.source === QUOTE_SOURCES.LAST_CLOSE || quote?.dataSource === QUOTE_SOURCES.LAST_CLOSE,
+    }));
+    const indicatorData = getMarketIndicatorData(getMarketIndicatorEntry(), {
+      marketEntries: marketState,
+    });
+    logMarketPulseQuoteDebug({
+      provider: PROVIDER,
+      endpoints: quoteDebug?.batches?.map((batch) => ({
+        provider: batch.provider,
+        url: batch.url,
+        success: batch.success,
+        durationMs: batch.durationMs,
+        symbols: batch.symbols,
+      })),
+      fetchOk: quoteDebug?.batches?.every((batch) => batch.success) ?? null,
+      fetchLatencyMs: Date.now() - fetchStartedAt,
+      requestedSymbols: symbolsToFetch.length,
+      returnedQuotes: quoteResults.length,
+      sampleQuotes,
+      quoteMeta,
+      computed: {
+        badge: indicatorData?.sourceBadge?.label ?? null,
+        usingCachedData: indicatorData?.usingCached ?? null,
+        asOf: indicatorData?.asOfLabel ?? null,
+      },
+    });
+  }
   if (bulkError && isRateLimitBackoffActive()) {
     logMarketDebug("bulk", "backoff_active", { until: rateLimitBackoffUntil });
   }
