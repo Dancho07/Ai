@@ -1133,6 +1133,48 @@ const tests = [
     },
   },
   {
+    name: "retries after timeout and returns realtime quote",
+    fn: async () => {
+      resetQuoteCache();
+      let callCount = 0;
+      const fetchFn = (url, { signal }) => {
+        callCount += 1;
+        if (callCount === 1) {
+          return new Promise((resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              const error = new Error("Aborted");
+              error.name = "AbortError";
+              reject(error);
+            });
+          });
+        }
+        return Promise.resolve(
+          createResponse({
+            ok: true,
+            status: 200,
+            json: {
+              quoteResponse: {
+                result: [
+                  {
+                    symbol: "AAPL",
+                    marketState: "REGULAR",
+                    regularMarketPrice: 190,
+                    regularMarketChange: 1.5,
+                    regularMarketChangePercent: 0.8,
+                    regularMarketTime: Math.floor(Date.now() / 1000),
+                  },
+                ],
+              },
+            },
+          }),
+        );
+      };
+      const result = await getQuote("AAPL", { fetchFn, maxAttempts: 2, timeoutMs: 5 });
+      assert.strictEqual(result.source, "REALTIME");
+      assert.strictEqual(callCount, 2);
+    },
+  },
+  {
     name: "throws invalid symbol error when provider reports not found",
     fn: async () => {
       resetQuoteCache();
@@ -2605,6 +2647,72 @@ const tests = [
 
       assert.strictEqual(firstSignal.aborted, true);
       assert.strictEqual(firstAborted, true);
+    },
+  },
+  {
+    name: "refresh cycle shows partial cached banner when realtime quotes succeed",
+    fn: async () => {
+      const quoteStatusBanner = createMockDomElement({ classes: ["hidden"] });
+      const quoteStatusMessage = createMockDomElement();
+      const mockDocument = createMockDocument({
+        "quote-status-banner": quoteStatusBanner,
+        "quote-status-message": quoteStatusMessage,
+      });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        await core.runRefreshCycle({
+          timeoutMs: 1000,
+          refreshFn: async () => ({
+            symbolsCount: 2,
+            okCount: 2,
+            errorCount: 1,
+            hadQuoteFailure: true,
+            errorTypes: ["timeout"],
+            realtimeOk: 1,
+            cachedCount: 1,
+            failedCount: 0,
+          }),
+        });
+        assert.strictEqual(quoteStatusMessage.textContent, "Some symbols cached (1/2).");
+        assert.strictEqual(quoteStatusBanner.classList.contains("hidden"), false);
+        assert.strictEqual(core.getRefreshState().lastError, null);
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    name: "refresh cycle shows timeout banner when no realtime quotes succeed",
+    fn: async () => {
+      const quoteStatusBanner = createMockDomElement({ classes: ["hidden"] });
+      const quoteStatusMessage = createMockDomElement();
+      const mockDocument = createMockDocument({
+        "quote-status-banner": quoteStatusBanner,
+        "quote-status-message": quoteStatusMessage,
+      });
+      const { core, restore } = loadCoreWithDocument(mockDocument);
+      try {
+        await core.runRefreshCycle({
+          timeoutMs: 1000,
+          refreshFn: async () => ({
+            symbolsCount: 2,
+            okCount: 0,
+            errorCount: 2,
+            hadQuoteFailure: true,
+            errorTypes: ["timeout"],
+            realtimeOk: 0,
+            cachedCount: 2,
+            failedCount: 0,
+          }),
+        });
+        assert.strictEqual(
+          quoteStatusMessage.textContent,
+          "Live quotes unavailable (timeout). Showing cached/last close.",
+        );
+        assert.strictEqual(quoteStatusBanner.classList.contains("hidden"), false);
+      } finally {
+        restore();
+      }
     },
   },
   {

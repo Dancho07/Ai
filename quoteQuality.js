@@ -21,7 +21,7 @@
     UNKNOWN: "UNKNOWN",
   };
 
-  const REALTIME_FRESHNESS_MS = 30 * 1000;
+  const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
   const DELAYED_FRESHNESS_MS = 20 * 60 * 1000;
 
   function parseEpoch(value) {
