@@ -936,6 +936,58 @@ const QUOTE_SESSIONS = {
   CLOSED: "CLOSED",
 };
 
+function getZonedDateParts(date, timeZone) {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour12: false,
+      weekday: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return formatter.formatToParts(date).reduce((acc, part) => {
+      if (part.type !== "literal") {
+        acc[part.type] = part.value;
+      }
+      return acc;
+    }, {});
+  } catch (error) {
+    if (timeZone !== "America/New_York") {
+      return getZonedDateParts(date, "America/New_York");
+    }
+    return null;
+  }
+}
+
+// Assumes US equities trading hours in America/New_York (handles DST via IANA timezone rules).
+function computeUsMarketSession(now = new Date(), options = {}) {
+  const timeZone = options.timeZone ?? "America/New_York";
+  const parts = getZonedDateParts(now, timeZone);
+  if (!parts) {
+    return { session: QUOTE_SESSIONS.CLOSED, isOpen: false };
+  }
+  const weekday = parts.weekday;
+  if (weekday === "Sat" || weekday === "Sun") {
+    return { session: QUOTE_SESSIONS.CLOSED, isOpen: false };
+  }
+  const hour = Number.parseInt(parts.hour, 10);
+  const minute = Number.parseInt(parts.minute, 10);
+  const totalMinutes = (hour === 24 ? 0 : hour) * 60 + minute;
+  if (totalMinutes >= 4 * 60 && totalMinutes < 9 * 60 + 30) {
+    return { session: QUOTE_SESSIONS.PRE, isOpen: true };
+  }
+  if (totalMinutes >= 9 * 60 + 30 && totalMinutes < 16 * 60) {
+    return { session: QUOTE_SESSIONS.REGULAR, isOpen: true };
+  }
+  if (totalMinutes >= 16 * 60 && totalMinutes < 20 * 60) {
+    return { session: QUOTE_SESSIONS.POST, isOpen: true };
+  }
+  return { session: QUOTE_SESSIONS.CLOSED, isOpen: false };
+}
+
 const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
 const STALE_FRESHNESS_MS = 15 * 60 * 1000;
 const CACHE_WARNING_MESSAGE = "Market open but live quote unavailable — using cached data.";
@@ -984,14 +1036,9 @@ function deriveMarketSession(rawQuote, nowMs = Date.now()) {
       return normalized;
     }
   }
-  if (rawQuote?.regularMarketTime) {
-    const regularMs = rawQuote.regularMarketTime * 1000;
-    if (nowMs - regularMs <= 20 * 60 * 1000) {
-      return "REGULAR";
-    }
-    return "CLOSED";
-  }
-  return "UNKNOWN";
+  const timeZone = rawQuote?.exchangeTimezoneName ?? "America/New_York";
+  const computed = computeUsMarketSession(new Date(nowMs), { timeZone });
+  return computed.session;
 }
 
 function resolveQuoteSource({ sourceHint, session, asOfTimestamp, nowMs, isRealtime }) {
@@ -1787,12 +1834,16 @@ function getReferenceSymbol(symbols = getVisibleSymbols()) {
 }
 
 function getMarketIndicatorEntry() {
+  const latestEntry = getLatestMarketEntry();
+  if (latestEntry) {
+    return latestEntry;
+  }
   const referenceSymbol = getReferenceSymbol();
   const entry = referenceSymbol ? getStockEntry(referenceSymbol) : null;
   if (hasMarketIndicatorData(entry)) {
     return entry;
   }
-  return getLatestMarketEntry();
+  return null;
 }
 
 function updateMarketIndicator() {
@@ -5913,6 +5964,7 @@ const appCore = {
   getQuote,
   fetchHistoricalSeries,
   deriveMarketSession,
+  computeUsMarketSession,
   normalizeQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
