@@ -1005,6 +1005,9 @@ function computeUsMarketSession(now = new Date(), options = {}) {
 const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
 const STALE_FRESHNESS_MS = 15 * 60 * 1000;
 const MARKET_PULSE_STALE_MS = 30 * 60 * 1000;
+const MARKET_PULSE_REALTIME_SEC = 30;
+const MARKET_PULSE_DELAYED_SEC = 120;
+const MARKET_PULSE_EXTENDED_STALE_MS = 5 * 60 * 1000;
 const CACHE_WARNING_MESSAGE = "Market open but live quote unavailable — using cached data.";
 
 function normalizeSession(session) {
@@ -1828,57 +1831,111 @@ function getLatestQuoteAsOf(entries = marketState) {
   return latest;
 }
 
-function getQuoteQuality(entry, { nowMs, session }) {
-  if (!entry) {
-    return QUOTE_SOURCES.UNAVAILABLE;
+function classifyQuoteQuality({ quote, nowMs, session }) {
+  if (!quote) {
+    return { badge: QUOTE_SOURCES.UNAVAILABLE, reason: "missing_quote", isLive: false, showWarning: false };
   }
-  const price = entry.lastPrice ?? entry.price ?? null;
-  const timestamp = getQuoteTimestamp(entry);
+  const price = quote.lastPrice ?? quote.price ?? null;
+  const timestamp = getQuoteTimestamp(quote);
   if (price == null || timestamp == null) {
-    return QUOTE_SOURCES.UNAVAILABLE;
+    return { badge: QUOTE_SOURCES.UNAVAILABLE, reason: "missing_timestamp", isLive: false, showWarning: false };
   }
-  const source =
-    normalizeSource(entry.dataSource ?? entry.source) ??
-    (entry.isRealtime ? QUOTE_SOURCES.REALTIME : null);
-  if (source === QUOTE_SOURCES.DELAYED) {
-    return QUOTE_SOURCES.DELAYED;
+  const resolvedNowMs = nowMs instanceof Date ? nowMs.getTime() : nowMs ?? Date.now();
+  const normalizedSession =
+    normalizeSession(session) ??
+    normalizeSession(quote.quoteSession ?? quote.session ?? quote.lastKnownSession);
+  const resolvedSession = normalizedSession ?? QUOTE_SESSIONS.CLOSED;
+  const normalizedSource =
+    normalizeSource(quote.dataSource ?? quote.source) ??
+    (quote.isRealtime ? QUOTE_SOURCES.REALTIME : null);
+  const ageMs = Math.max(0, resolvedNowMs - timestamp);
+  if (resolvedSession !== QUOTE_SESSIONS.REGULAR) {
+    if (normalizedSource === QUOTE_SOURCES.LAST_CLOSE) {
+      return {
+        badge: QUOTE_SOURCES.LAST_CLOSE,
+        reason: "last_close",
+        isLive: false,
+        showWarning: false,
+      };
+    }
+    if (ageMs > MARKET_PULSE_EXTENDED_STALE_MS) {
+      return {
+        badge: QUOTE_SOURCES.CACHED,
+        reason: "extended_stale",
+        isLive: false,
+        showWarning: false,
+      };
+    }
+    return { badge: QUOTE_SOURCES.DELAYED, reason: "extended_hours", isLive: false, showWarning: false };
   }
-  if (source === QUOTE_SOURCES.LAST_CLOSE) {
-    return QUOTE_SOURCES.LAST_CLOSE;
+  if (normalizedSource === QUOTE_SOURCES.REALTIME) {
+    return { badge: QUOTE_SOURCES.REALTIME, reason: "provider_realtime", isLive: true, showWarning: false };
   }
-  if (source === QUOTE_SOURCES.CACHED) {
-    return QUOTE_SOURCES.CACHED;
+  if (normalizedSource === QUOTE_SOURCES.DELAYED) {
+    return { badge: QUOTE_SOURCES.DELAYED, reason: "provider_delayed", isLive: false, showWarning: false };
   }
-  const ageMs = nowMs - timestamp;
-  const refreshInterval = getRefreshIntervalForSession(session ?? QUOTE_SESSIONS.REGULAR);
-  const realtimeThreshold = refreshInterval ? refreshInterval * 2 : REALTIME_FRESHNESS_MS;
-  if (ageMs > MARKET_PULSE_STALE_MS) {
-    return QUOTE_SOURCES.CACHED;
+  if (normalizedSource === QUOTE_SOURCES.LAST_CLOSE) {
+    return {
+      badge: QUOTE_SOURCES.LAST_CLOSE,
+      reason: "provider_last_close",
+      isLive: false,
+      showWarning: true,
+    };
   }
-  if (source === QUOTE_SOURCES.UNAVAILABLE) {
-    return QUOTE_SOURCES.CACHED;
+  if (normalizedSource === QUOTE_SOURCES.CACHED && ageMs > MARKET_PULSE_DELAYED_SEC * 1000) {
+    return {
+      badge: QUOTE_SOURCES.CACHED,
+      reason: "provider_cached_stale",
+      isLive: false,
+      showWarning: true,
+    };
   }
-  if (ageMs <= realtimeThreshold) {
-    return QUOTE_SOURCES.REALTIME;
+  if (normalizedSource === QUOTE_SOURCES.UNAVAILABLE) {
+    return {
+      badge: QUOTE_SOURCES.UNAVAILABLE,
+      reason: "provider_unavailable",
+      isLive: false,
+      showWarning: true,
+    };
   }
-  return QUOTE_SOURCES.DELAYED;
+  const ageSec = ageMs / 1000;
+  if (ageSec <= MARKET_PULSE_REALTIME_SEC) {
+    return { badge: QUOTE_SOURCES.REALTIME, reason: "age_realtime", isLive: true, showWarning: false };
+  }
+  if (ageSec <= MARKET_PULSE_DELAYED_SEC) {
+    return { badge: QUOTE_SOURCES.DELAYED, reason: "age_delayed", isLive: false, showWarning: false };
+  }
+  return { badge: QUOTE_SOURCES.CACHED, reason: "age_cached", isLive: false, showWarning: true };
+}
+
+function getQuoteQuality(entry, { nowMs, session }) {
+  return classifyQuoteQuality({ quote: entry, nowMs, session }).badge;
+}
+
+function getBestQuoteQuality(qualities = []) {
+  const order = [
+    QUOTE_SOURCES.REALTIME,
+    QUOTE_SOURCES.DELAYED,
+    QUOTE_SOURCES.LAST_CLOSE,
+    QUOTE_SOURCES.CACHED,
+    QUOTE_SOURCES.UNAVAILABLE,
+  ];
+  return order.find((quality) => qualities.includes(quality)) ?? QUOTE_SOURCES.UNAVAILABLE;
+}
+
+function shouldShowUsingCached(quality, session, hasData) {
+  if (!hasData) {
+    return false;
+  }
+  if (session !== QUOTE_SESSIONS.REGULAR) {
+    return false;
+  }
+  return [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE].includes(quality);
 }
 
 function getMarketSourceBadgeForEntries(entries, { nowMs, session }) {
   const qualities = entries.map((entry) => getQuoteQuality(entry, { nowMs, session }));
-  if (qualities.some((quality) => quality === QUOTE_SOURCES.REALTIME)) {
-    return getSourceBadge(QUOTE_SOURCES.REALTIME);
-  }
-  if (qualities.some((quality) => quality === QUOTE_SOURCES.DELAYED)) {
-    return getSourceBadge(QUOTE_SOURCES.DELAYED);
-  }
-  if (qualities.some((quality) => quality === QUOTE_SOURCES.CACHED)) {
-    return getSourceBadge(QUOTE_SOURCES.CACHED);
-  }
-  if (qualities.some((quality) => quality === QUOTE_SOURCES.LAST_CLOSE)) {
-    return getSourceBadge(QUOTE_SOURCES.LAST_CLOSE);
-  }
-  return getSourceBadge(QUOTE_SOURCES.UNAVAILABLE);
+  return getSourceBadge(getBestQuoteQuality(qualities));
 }
 
 function getMarketIndicatorData(entry, options = {}) {
@@ -1905,15 +1962,15 @@ function getMarketIndicatorData(entry, options = {}) {
   const sessionBadge = hasData
     ? getSessionBadgeForSession(sessionInfo.session)
     : { label: "UNKNOWN", className: "delayed" };
-  const sourceBadge = hasData
-    ? getMarketSourceBadgeForEntries(entries, { nowMs, session: sessionInfo.session })
-    : { label: "UNAVAILABLE", className: "delayed" };
+  const qualities = hasData ? entries.map((item) => getQuoteQuality(item, { nowMs, session: sessionInfo.session })) : [];
+  const bestQuality = getBestQuoteQuality(qualities);
+  const sourceBadge = hasData ? getSourceBadge(bestQuality) : { label: "UNAVAILABLE", className: "delayed" };
   return {
     marketStatus,
     sessionBadge,
     sourceBadge,
     asOfLabel,
-    usingCached: options.usingCached === true,
+    usingCached: shouldShowUsingCached(bestQuality, sessionInfo.session, hasData),
   };
 }
 
@@ -1960,9 +2017,9 @@ function updateMarketIndicator() {
   }
   const entry = getMarketIndicatorEntry();
   const data = getMarketIndicatorData(entry, {
-    usingCached: marketPulseState.usingCached,
     marketEntries: marketState,
   });
+  marketPulseState.usingCached = data.usingCached;
   marketOpenText.textContent = data.marketStatus;
   marketSessionBadge.textContent = data.sessionBadge.label;
   marketSessionBadge.className = `session-badge ${data.sessionBadge.className}`;
@@ -1979,6 +2036,14 @@ function updateMarketPulseLatestQuote(entries = marketState) {
   if (latest != null) {
     marketPulseState.latestQuoteAsOf = latest;
   }
+}
+
+function updateMarketPulseCachedState(entries = marketState, nowMs = Date.now()) {
+  const session = computeUsMarketSession(new Date(nowMs)).session ?? QUOTE_SESSIONS.CLOSED;
+  const hasData = entries.some((item) => hasMarketIndicatorData(item));
+  const qualities = entries.map((entry) => getQuoteQuality(entry, { nowMs, session }));
+  const bestQuality = getBestQuoteQuality(qualities);
+  marketPulseState.usingCached = shouldShowUsingCached(bestQuality, session, hasData);
 }
 
 function getSourceBadge(source) {
@@ -4065,7 +4130,7 @@ async function loadInitialMarketData() {
     hadQuoteFailure = true;
   }
 
-  marketPulseState.usingCached = hadQuoteFailure;
+  updateMarketPulseCachedState();
   updateMarketPulseLatestQuote();
 }
 
@@ -4530,7 +4595,7 @@ async function refreshVisibleQuotes(options = {}) {
   if (bulkError && isRateLimitBackoffActive()) {
     logMarketDebug("bulk", "backoff_active", { until: rateLimitBackoffUntil });
   }
-  marketPulseState.usingCached = hadQuoteFailure;
+  updateMarketPulseCachedState(marketState, Date.now());
   summary.hadQuoteFailure = hadQuoteFailure;
   summary.error = bulkError ?? (hadQuoteFailure ? results.find((result) => result?.error)?.error : null);
 
@@ -5565,7 +5630,7 @@ async function refreshMarketBoard() {
   if (quoteErrors.length) {
     hadQuoteFailure = true;
   }
-  marketPulseState.usingCached = hadQuoteFailure;
+  updateMarketPulseCachedState(marketState, Date.now());
 
   updateMarketPulseLatestQuote();
   renderMarketTable();
@@ -6139,6 +6204,7 @@ const appCore = {
   hydrateMarketStateFromCache,
   getMarketRowDisplay,
   getLatestQuoteAsOf,
+  classifyQuoteQuality,
   getRefreshIntervalForSession,
   getRefreshTimeoutForSession,
   getNextRefreshDelay,
