@@ -244,6 +244,14 @@ const REFRESH_INTERVALS = {
   DELAYED: 12 * 1000,
   UNKNOWN: 12 * 1000,
 };
+const REFRESH_TIMEOUTS = {
+  REGULAR: 10 * 1000,
+  PRE: 14 * 1000,
+  POST: 14 * 1000,
+  CLOSED: 18 * 1000,
+  DELAYED: 15 * 1000,
+  UNKNOWN: 15 * 1000,
+};
 
 const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
@@ -1352,6 +1360,10 @@ function getRefreshIntervalForSession(session) {
   return REFRESH_INTERVALS[session] ?? REFRESH_INTERVALS.CLOSED;
 }
 
+function getRefreshTimeoutForSession(session) {
+  return REFRESH_TIMEOUTS[session] ?? REFRESH_TIMEOUTS.CLOSED ?? REFRESH_TIMEOUT_MS;
+}
+
 function getRefreshIntervalForSymbols(symbols) {
   const intervals = symbols.map((symbol) => {
     const entry = getStockEntry(symbol);
@@ -1385,6 +1397,11 @@ function shouldBackoffFromStatus(statusCode) {
 function getEffectiveRefreshInterval(symbols) {
   const baseInterval = getRefreshIntervalForSymbols(symbols);
   return isRateLimitBackoffActive() ? baseInterval * 2 : baseInterval;
+}
+
+function getRefreshTimeoutForSymbols(symbols = []) {
+  const session = computeUsMarketSession(new Date()).session ?? QUOTE_SESSIONS.CLOSED;
+  return getRefreshTimeoutForSession(session);
 }
 
 function getNextRefreshDelay({ symbols, visible, backoffActive }) {
@@ -4004,7 +4021,7 @@ async function loadInitialMarketData() {
   let quoteErrors = [];
   let forceUnavailable = false;
   try {
-    const batchResult = await fetchYahooQuotes(symbols);
+    const batchResult = await fetchYahooQuotes(symbols, { timeoutMs: getRefreshTimeoutForSymbols(symbols) });
     quoteResults = batchResult.quotes;
     quoteErrors = batchResult.errors;
     forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
@@ -4293,6 +4310,15 @@ function getVisibleSymbols() {
   return filtered.length ? filtered.map((stock) => stock.symbol) : marketState.map((stock) => stock.symbol);
 }
 
+function getRefreshSymbolsForCycle() {
+  const visible = getVisibleSymbols();
+  if (visible.length) {
+    return visible;
+  }
+  const watchlist = watchlistStore.getWatchlist();
+  return watchlist.length ? watchlist : [];
+}
+
 function isAwaitingQuote(stock) {
   if (!stock) {
     return true;
@@ -4396,7 +4422,7 @@ async function refreshSymbolsWithLimiter(symbols, getOptions) {
 }
 
 async function refreshVisibleQuotes(options = {}) {
-  const symbols = getVisibleSymbols();
+  const symbols = Array.isArray(options.symbols) ? options.symbols : getRefreshSymbolsForCycle();
   const summary = {
     symbolsCount: symbols.length,
     okCount: 0,
@@ -4405,6 +4431,12 @@ async function refreshVisibleQuotes(options = {}) {
     error: null,
     errorTypes: [],
   };
+  if (!symbols.length) {
+    updateMarketPulseLatestQuote();
+    renderMarketTable();
+    return summary;
+  }
+  const requestTimeoutMs = options.timeoutMs ?? getRefreshTimeoutForSymbols(symbols);
   const symbolsToFetch = symbols.filter((symbol) => {
     if (!isSymbolInWatchlist(symbol)) {
       return false;
@@ -4431,7 +4463,10 @@ async function refreshVisibleQuotes(options = {}) {
   let forceUnavailable = false;
   let bulkError = null;
   try {
-    const batchResult = await fetchYahooQuotes(symbolsToFetch, { signal: options.signal });
+    const batchResult = await fetchYahooQuotes(symbolsToFetch, {
+      signal: options.signal,
+      timeoutMs: requestTimeoutMs,
+    });
     quoteResults = batchResult.quotes;
     forceUnavailable = quoteResults.length === 0 && symbolsToFetch.length > 0;
     if (forceUnavailable || batchResult.hadFailure) {
@@ -4658,7 +4693,10 @@ function groupErrorTypes(errorTypes = []) {
   }, {});
 }
 
-async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = refreshVisibleQuotes } = {}) {
+async function runRefreshCycle(options = {}) {
+  const refreshFn = options.refreshFn ?? refreshVisibleQuotes;
+  const symbols = Array.isArray(options.symbols) ? options.symbols : getRefreshSymbolsForCycle();
+  const timeoutMs = options.timeoutMs ?? getRefreshTimeoutForSymbols(symbols) ?? REFRESH_TIMEOUT_MS;
   const startedAt = Date.now();
   const cycleId = createRequestId();
   if (refreshAbortController) {
@@ -4672,7 +4710,7 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
     stage: "start",
     cycleId,
     timeoutMs,
-    visibleSymbols: getVisibleSymbols().length,
+    visibleSymbols: symbols.length,
   });
   let summary = null;
   let error = null;
@@ -4684,7 +4722,7 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
         reject(new MarketDataError("timeout", "Refresh cycle timed out."));
       }, timeoutMs);
     });
-    summary = await Promise.race([refreshFn({ signal: controller.signal }), timeoutPromise]);
+    summary = await Promise.race([refreshFn({ signal: controller.signal, symbols }), timeoutPromise]);
   } catch (err) {
     error = err instanceof MarketDataError ? err : new MarketDataError("unavailable", err?.message ?? "Refresh failed.");
   } finally {
@@ -4702,6 +4740,13 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
       errorCount: summary.errorCount,
       lastError: summary.error ?? null,
       totalCount: summary.symbolsCount ?? summary.okCount + summary.errorCount,
+    };
+  } else {
+    lastRefreshSummary = {
+      okCount: 0,
+      errorCount: symbols.length,
+      lastError: error ?? null,
+      totalCount: symbols.length,
     };
   }
 
@@ -4741,15 +4786,18 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
   return { summary, error };
 }
 
-async function triggerImmediateRefresh() {
+async function triggerImmediateRefresh({ force = false } = {}) {
   if (!isBrowser) {
     return;
   }
   if (refreshTimerId) {
     clearTimeout(refreshTimerId);
   }
-  if (refreshInProgress) {
+  if (refreshInProgress && !force) {
     return;
+  }
+  if (refreshInProgress && force && refreshAbortController) {
+    refreshAbortController.abort();
   }
   refreshInProgress = true;
   try {
@@ -5425,9 +5473,14 @@ function renderMarketTable() {
   renderTopOpportunities(filtered);
   logMarketSummary({ filteredCount: filtered.length, totalCount: marketState.length });
   const hasWatchlist = marketState.length > 0;
+  const favoritesOnly = filterFavorites?.checked ?? false;
+  const favoritesCount = favoritesStore.getFavorites().length;
   if (marketEmptyState && marketEmptyMessage) {
     if (!hasWatchlist) {
       marketEmptyMessage.textContent = "Your watchlist is empty.";
+      marketEmptyState.classList.remove("hidden");
+    } else if (favoritesOnly && favoritesCount === 0) {
+      marketEmptyMessage.textContent = "No favorites yet.";
       marketEmptyState.classList.remove("hidden");
     } else if (!filtered.length) {
       marketEmptyMessage.textContent = "Empty filters — no matches for current filters.";
@@ -5468,7 +5521,7 @@ async function refreshMarketBoard() {
   let quoteErrors = [];
   let forceUnavailable = false;
   try {
-    const batchResult = await fetchYahooQuotes(symbols);
+    const batchResult = await fetchYahooQuotes(symbols, { timeoutMs: getRefreshTimeoutForSymbols(symbols) });
     quoteResults = batchResult.quotes;
     quoteErrors = batchResult.errors;
     forceUnavailable = quoteResults.length === 0 && symbols.length > 0;
@@ -5858,7 +5911,7 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
   if (quoteStatusRetry) {
     didInit = true;
     quoteStatusRetry.addEventListener("click", () => {
-      triggerImmediateRefresh();
+      triggerImmediateRefresh({ force: true });
     });
   }
   [
@@ -6087,6 +6140,7 @@ const appCore = {
   getMarketRowDisplay,
   getLatestQuoteAsOf,
   getRefreshIntervalForSession,
+  getRefreshTimeoutForSession,
   getNextRefreshDelay,
   applyRateLimitBackoff,
   isRateLimitBackoffActive,
@@ -6122,6 +6176,7 @@ const appCore = {
   setCachedAnalysis,
   resetAnalysisCache,
   fetchYahooQuotes,
+  getRefreshSymbolsForCycle,
   refreshVisibleQuotes,
   runRefreshCycle,
   getRefreshState,
