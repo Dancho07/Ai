@@ -225,6 +225,7 @@ const BACKOFF_BASE_MS = 500;
 const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_PARALLEL_REQUESTS = 3;
 const QUOTE_BATCH_SIZE = 8;
+const QUOTE_BATCH_CACHE_TTL_MS = 7000;
 const RETRYABLE_STATUS = new Set([429, 503, 504]);
 const RETRYABLE_ERRORS = new Set(["timeout", "rate_limit", "unavailable"]);
 const LAST_KNOWN_CACHE_KEY = "market_quote_cache_v1";
@@ -255,7 +256,7 @@ const REFRESH_INTERVALS = {
   UNKNOWN: 12 * 1000,
 };
 const REFRESH_TIMEOUTS = {
-  REGULAR: 10 * 1000,
+  REGULAR: 15 * 1000,
   PRE: 14 * 1000,
   POST: 14 * 1000,
   CLOSED: 18 * 1000,
@@ -306,6 +307,7 @@ const historicalCache = new Map();
 const inflightHistoricalRequests = new Map();
 const inflightQuoteRequests = new Map();
 const analysisCache = new Map();
+const quoteBatchCache = new Map();
 
 const ANALYSIS_CACHE_PREFIX = "analysis_cache_v1_";
 const ANALYSIS_CACHE_TTL_MS = 3 * 60 * 1000;
@@ -429,6 +431,16 @@ function logMarketDataEvent(level, payload) {
   } else {
     console.info(JSON.stringify(entry));
   }
+}
+
+function redactUrl(url = "") {
+  if (!url) {
+    return url;
+  }
+  return String(url).replace(
+    /([?&])(apikey|api_key|token|key|access_key|secret)=([^&]+)/gi,
+    (match, prefix, key) => `${prefix}${key}=REDACTED`,
+  );
 }
 
 function createConcurrencyLimiter(limit) {
@@ -1379,6 +1391,7 @@ function resetQuoteCache() {
   lastKnownQuotes.clear();
   historicalCache.clear();
   inflightHistoricalRequests.clear();
+  quoteBatchCache.clear();
   indicatorCache.clear();
   if (isBrowser && typeof localStorage !== "undefined") {
     localStorage.removeItem(LAST_KNOWN_CACHE_KEY);
@@ -1591,16 +1604,38 @@ async function fetchJsonWithRetry(
     symbol,
     onStatus,
     signal,
+    session,
   },
 ) {
   const requestId = createRequestId();
+  const redactedUrl = redactUrl(url);
+  const symbolsCount = symbol ? symbol.split(",").filter(Boolean).length : null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      if (DEV_QUOTE_LOG_ENABLED) {
+        logDevQuote("provider_request_start", {
+          requestId,
+          provider,
+          url: redactedUrl,
+          attempt,
+          maxAttempts,
+          symbolsCount,
+          timeoutMs,
+          session: session ?? null,
+        });
+      }
       const response = await fetchWithTimeout(fetchFn, url, timeoutMs, { signal });
       if (onStatus) {
         onStatus({ status: response.status, ok: response.ok });
       }
       if (!response.ok) {
+        let responseSnippet = null;
+        try {
+          const raw = await response.clone().text();
+          responseSnippet = raw ? raw.slice(0, 160) : null;
+        } catch (snippetError) {
+          responseSnippet = null;
+        }
         if (shouldBackoffFromStatus(response.status)) {
           applyRateLimitBackoff();
         }
@@ -1612,6 +1647,7 @@ async function fetchJsonWithRetry(
               : "http_error";
         throw new MarketDataError(errorType, `Request failed: ${response.status}`, {
           statusCode: response.status,
+          responseSnippet,
         });
       }
       let payload = null;
@@ -1644,6 +1680,17 @@ async function fetchJsonWithRetry(
           providerMessage: providerError?.description ?? null,
         });
       }
+      if (DEV_QUOTE_LOG_ENABLED) {
+        logDevQuote("provider_request_success", {
+          requestId,
+          provider,
+          url: redactedUrl,
+          attempt,
+          maxAttempts,
+          symbolsCount,
+          timeoutMs,
+        });
+      }
       return payload;
     } catch (error) {
       const marketError = classifyFetchError(error);
@@ -1652,7 +1699,7 @@ async function fetchJsonWithRetry(
         event: "market_data_fetch_failure",
         provider,
         symbol,
-        endpoint: url,
+        endpoint: redactedUrl,
         requestId,
         attempt,
         maxAttempts,
@@ -1661,11 +1708,30 @@ async function fetchJsonWithRetry(
         providerMessage: marketError.details?.providerMessage ?? null,
         message: marketError.message,
       });
+      if (DEV_QUOTE_LOG_ENABLED) {
+        logDevQuote("provider_request_failure", {
+          requestId,
+          provider,
+          url: redactedUrl,
+          attempt,
+          maxAttempts,
+          symbolsCount,
+          timeoutMs,
+          errorType: marketError.type,
+          statusCode: marketError.details?.statusCode ?? null,
+          responseSnippet: marketError.details?.responseSnippet ?? null,
+          message: marketError.message,
+        });
+      }
       if (!shouldRetry) {
         throw marketError;
       }
       const jitter = Math.random() * 150;
-      const delay = BACKOFF_BASE_MS * 2 ** (attempt - 1) + jitter;
+      const isRateLimit = marketError.type === "rate_limit";
+      const isRegularSession = session === QUOTE_SESSIONS.REGULAR;
+      const baseDelay =
+        isRateLimit && isRegularSession && attempt === 1 ? 750 : BACKOFF_BASE_MS * 2 ** (attempt - 1);
+      const delay = baseDelay + jitter;
       await sleep(delay);
     }
   }
@@ -2055,6 +2121,42 @@ function shouldShowUsingCached(quality, session, hasData) {
     return false;
   }
   return [QUOTE_SOURCES.CACHED, QUOTE_SOURCES.LAST_CLOSE].includes(quality);
+}
+
+function getProviderModeFromBadge(label) {
+  const normalized = String(label ?? "").toUpperCase();
+  if (normalized === "REALTIME") {
+    return "realtime";
+  }
+  if (normalized === "DELAYED") {
+    return "fallback";
+  }
+  if (normalized === "LAST CLOSE" || normalized === "CACHED") {
+    return "cached";
+  }
+  return "fallback";
+}
+
+function getFallbackReason({ providerMode, indicatorData, errorTypes }) {
+  if (providerMode === "realtime") {
+    return null;
+  }
+  if (indicatorData?.mixedQuality) {
+    return "partial_failure";
+  }
+  const prioritized = ["timeout", "rate_limit", "cors", "network_error", "unavailable"];
+  const match = prioritized.find((type) => errorTypes?.includes(type));
+  if (match) {
+    return match;
+  }
+  const badgeLabel = indicatorData?.sourceBadge?.label ?? "";
+  if (badgeLabel === "LAST CLOSE") {
+    return "last_close";
+  }
+  if (badgeLabel === "CACHED") {
+    return "cached";
+  }
+  return "unavailable";
 }
 
 function getMarketSourceBadgeForEntries(entries, { nowMs, session }) {
@@ -3917,6 +4019,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
   if (!uniqueSymbols.length) {
     return { quotes: [], hadFailure: false, errors: [] };
   }
+  const sessionInfo = computeUsMarketSession(new Date());
   const batchSize = options.batchSize ?? QUOTE_BATCH_SIZE;
   const debugInfo = { batches: [], requested: uniqueSymbols.slice(), provider: PROVIDER };
   const batches = [];
@@ -3932,6 +4035,18 @@ async function fetchYahooQuotes(symbols, options = {}) {
   const results = await Promise.allSettled(
     batches.map(async (batch) => {
       const batchDebug = { symbols: batch, success: false, provider: null, url: null, durationMs: null };
+      const requestId = createRequestId();
+      const startedAt = Date.now();
+      if (DEV_QUOTE_LOG_ENABLED) {
+        logDevQuote("quote_batch_start", {
+          requestId,
+          provider: PROVIDER,
+          symbols: batch,
+          symbolsCount: batch.length,
+          timeoutMs: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+          session: sessionInfo.session ?? null,
+        });
+      }
       const cacheBust = Date.now();
       const quoteUrl = YAHOO_QUOTE_URL(batch);
       const plan = [];
@@ -3951,22 +4066,57 @@ async function fetchYahooQuotes(symbols, options = {}) {
         })),
       );
       let quoteData = null;
+      const cacheKey = batch.join(",");
+      const cachedBatch = quoteBatchCache.get(cacheKey);
+      if (cachedBatch && Date.now() - cachedBatch.storedAt < QUOTE_BATCH_CACHE_TTL_MS) {
+        batchDebug.success = true;
+        batchDebug.provider = "memory_cache";
+        batchDebug.url = "memory_cache";
+        batchDebug.durationMs = 0;
+        if (DEV_QUOTE_LOG_ENABLED) {
+          logDevQuote("quote_batch_cache_hit", {
+            requestId,
+            provider: PROVIDER,
+            symbols: batch,
+            symbolsCount: batch.length,
+            ttlMs: QUOTE_BATCH_CACHE_TTL_MS,
+          });
+        }
+        return cachedBatch.payload;
+      }
       try {
-        quoteData = await fetchJsonWithFallback(plan, {
-          provider: PROVIDER,
-          symbol: batch.join(","),
-          fetchFn: options.fetchFn,
-          maxAttempts: options.maxAttempts,
-          timeoutMs: options.timeoutMs,
-          signal: options.signal,
-          onStatus: recordStatus,
-          onSuccess: (payload) => {
-            batchDebug.success = true;
-            batchDebug.provider = payload.provider;
-            batchDebug.url = payload.url;
-            batchDebug.durationMs = payload.durationMs;
-          },
-        });
+        quoteData = await requestLimiter(() =>
+          fetchJsonWithFallback(plan, {
+            provider: PROVIDER,
+            symbol: batch.join(","),
+            fetchFn: options.fetchFn,
+            maxAttempts: options.maxAttempts,
+            timeoutMs: options.timeoutMs,
+            signal: options.signal,
+            session: sessionInfo.session ?? null,
+            onStatus: recordStatus,
+            onSuccess: (payload) => {
+              batchDebug.success = true;
+              batchDebug.provider = payload.provider;
+              batchDebug.url = payload.url;
+              batchDebug.durationMs = payload.durationMs;
+            },
+          }),
+        );
+      } catch (error) {
+        if (DEV_QUOTE_LOG_ENABLED) {
+          logDevQuote("quote_batch_end", {
+            requestId,
+            provider: PROVIDER,
+            symbols: batch,
+            symbolsCount: batch.length,
+            durationMs: Date.now() - startedAt,
+            success: false,
+            errorType: error?.type ?? "unknown",
+            message: error?.message ?? "Quote batch failed.",
+          });
+        }
+        throw error;
       } finally {
         debugInfo.batches.push(batchDebug);
       }
@@ -3976,6 +4126,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
           hasQuoteResponse: Boolean(quoteResponse),
         });
       }
+      quoteBatchCache.set(cacheKey, { payload: quoteResponse.result, storedAt: Date.now() });
       if (DEV_QUOTE_LOG_ENABLED) {
         const sampleSymbols = ["AAPL", "MSFT", "NVDA"];
         const sampleQuotes = quoteResponse.result.filter((quote) =>
@@ -4005,6 +4156,14 @@ async function fetchYahooQuotes(symbols, options = {}) {
             })),
           });
         }
+        logDevQuote("quote_batch_end", {
+          requestId,
+          provider: PROVIDER,
+          symbols: batch,
+          symbolsCount: batch.length,
+          durationMs: Date.now() - startedAt,
+          success: true,
+        });
       }
       return quoteResponse.result;
     }),
@@ -4810,6 +4969,17 @@ async function refreshVisibleQuotes(options = {}) {
       summary.okCount += 1;
     }
   });
+  const indicatorData = getMarketIndicatorData(getMarketIndicatorEntry(), {
+    marketEntries: marketState,
+  });
+  const providerMode = getProviderModeFromBadge(indicatorData?.sourceBadge?.label ?? null);
+  summary.meta = {
+    provider: PROVIDER,
+    providerMode,
+    fallbackReason: getFallbackReason({ providerMode, indicatorData, errorTypes: summary.errorTypes }),
+    fetchedAtMs: Date.now(),
+    session: indicatorData?.sessionBadge?.label ?? null,
+  };
   if (MARKET_DEBUG_ENABLED) {
     const sampleQuotes = quoteResults.slice(0, 3);
     const quoteMeta = quoteResults.map((quote) => ({
@@ -4822,9 +4992,6 @@ async function refreshVisibleQuotes(options = {}) {
       isCached: quote?.source === QUOTE_SOURCES.CACHED || quote?.dataSource === QUOTE_SOURCES.CACHED,
       isLastClose: quote?.source === QUOTE_SOURCES.LAST_CLOSE || quote?.dataSource === QUOTE_SOURCES.LAST_CLOSE,
     }));
-    const indicatorData = getMarketIndicatorData(getMarketIndicatorEntry(), {
-      marketEntries: marketState,
-    });
     logMarketPulseQuoteDebug({
       provider: PROVIDER,
       endpoints: quoteDebug?.batches?.map((batch) => ({
@@ -4844,6 +5011,8 @@ async function refreshVisibleQuotes(options = {}) {
         badge: indicatorData?.sourceBadge?.label ?? null,
         usingCachedData: indicatorData?.usingCached ?? null,
         asOf: indicatorData?.asOfLabel ?? null,
+        providerMode: summary.meta.providerMode,
+        fallbackReason: summary.meta.fallbackReason,
       },
     });
   }
@@ -5094,6 +5263,11 @@ async function runRefreshCycle(options = {}) {
       lastError: summary.error ?? null,
       totalCount: summary.symbolsCount ?? summary.okCount + summary.errorCount,
     };
+    if (DEV_QUOTE_LOG_ENABLED) {
+      logDevQuote("refresh_meta", {
+        meta: summary.meta ?? null,
+      });
+    }
   } else {
     lastRefreshSummary = {
       okCount: 0,
