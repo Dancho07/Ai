@@ -12,6 +12,7 @@ const {
   createFavoritesStore,
   deriveMarketSession,
   computeUsMarketSession,
+  parseEpoch,
   normalizeQuote,
   persistFormState,
   loadPersistedFormState,
@@ -42,6 +43,7 @@ const {
   runBacktest30d,
   getMarketIndicatorData,
   getQuoteBadges,
+  getLatestQuoteAsOf,
   handleMarketRowAction,
   updateMarketRowCells,
   getMarketTableColumnKeys,
@@ -998,6 +1000,15 @@ const tests = [
     },
   },
   {
+    name: "parses epoch seconds and milliseconds",
+    fn: async () => {
+      assert.strictEqual(parseEpoch("1700000000"), 1700000000000);
+      assert.strictEqual(parseEpoch(1700000000), 1700000000000);
+      assert.strictEqual(parseEpoch(1700000000000), 1700000000000);
+      assert.strictEqual(parseEpoch("not-a-time"), null);
+    },
+  },
+  {
     name: "derives session from Yahoo marketState values",
     fn: async () => {
       assert.strictEqual(
@@ -1030,6 +1041,17 @@ const tests = [
       assert.strictEqual(pre.session, "PRE");
       assert.strictEqual(post.session, "POST");
       assert.strictEqual(weekend.session, "CLOSED");
+    },
+  },
+  {
+    name: "finds the latest quote timestamp across entries",
+    fn: async () => {
+      const entries = [
+        { lastPrice: 101, quoteAsOf: 1700000000000 },
+        { lastPrice: 102, quoteAsOf: 1700000500000 },
+        { lastPrice: null, quoteAsOf: 1700001000000 },
+      ];
+      assert.strictEqual(getLatestQuoteAsOf(entries), 1700000500000);
     },
   },
   {
@@ -1170,17 +1192,19 @@ const tests = [
   {
     name: "labels session badge for market indicator",
     fn: async () => {
+      const preSessionNow = new Date(Date.UTC(2024, 0, 2, 12, 0, 0));
+      const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
       const indicator = getMarketIndicatorData({
         quoteSession: "PRE",
         dataSource: "REALTIME",
         quoteAsOf: Date.now(),
-      });
+      }, { now: preSessionNow });
       const cachedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
         dataSource: "CACHED",
         quoteAsOf: Date.now(),
         lastPrice: 101,
-      });
+      }, { now: regularSessionNow });
       assert.strictEqual(indicator.sessionBadge.label, "PRE");
       assert.strictEqual(cachedIndicator.sessionBadge.label, "REGULAR");
     },
@@ -1195,27 +1219,29 @@ const tests = [
         quoteSession: "REGULAR",
         dataSource: "REALTIME",
         quoteAsOf: timestamp,
-      });
+        lastPrice: 101,
+      }, { now: new Date(Date.UTC(2024, 0, 2, 15, 0, 0)) });
       assert.strictEqual(indicator.asOfLabel, "As of 12:30 UTC");
     },
   },
   {
     name: "shows open status and realtime or delayed freshness during regular session",
     fn: async () => {
+      const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
       const realtimeIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
         dataSource: "REALTIME",
         quoteAsOf: Date.now(),
         isRealtime: true,
         lastPrice: 188,
-      });
+      }, { now: regularSessionNow });
       const delayedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
         dataSource: "DELAYED",
         quoteAsOf: Date.now(),
         isRealtime: false,
         lastPrice: 188,
-      });
+      }, { now: regularSessionNow });
       assert.strictEqual(realtimeIndicator.marketStatus, "Open");
       assert.strictEqual(realtimeIndicator.sourceBadge.label, "REALTIME");
       assert.strictEqual(delayedIndicator.marketStatus, "Open");
@@ -1225,12 +1251,13 @@ const tests = [
   {
     name: "uses cached data for market status when provider is unavailable",
     fn: async () => {
+      const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
       const cachedIndicator = getMarketIndicatorData({
         quoteSession: "REGULAR",
         dataSource: "CACHED",
         quoteAsOf: Date.now(),
         lastPrice: 150,
-      });
+      }, { now: regularSessionNow });
       assert.strictEqual(cachedIndicator.marketStatus, "Open");
       assert.strictEqual(cachedIndicator.sourceBadge.label, "CACHED");
       assert.notStrictEqual(cachedIndicator.marketStatus, "Unavailable");
@@ -1247,6 +1274,21 @@ const tests = [
     },
   },
   {
+    name: "prefers available quote quality when some entries are missing data",
+    fn: async () => {
+      const regularSessionNow = new Date(Date.UTC(2024, 0, 2, 15, 0, 0));
+      const indicator = getMarketIndicatorData(null, {
+        now: regularSessionNow,
+        marketEntries: [
+          { lastPrice: 100, quoteAsOf: Date.now(), dataSource: "REALTIME" },
+          { lastPrice: null, quoteAsOf: null, dataSource: "UNAVAILABLE" },
+        ],
+      });
+      assert.strictEqual(indicator.sourceBadge.label, "REALTIME");
+      assert.notStrictEqual(indicator.sourceBadge.label, "UNAVAILABLE");
+    },
+  },
+  {
     name: "selects badges and warnings for unavailable regular-session quotes",
     fn: async () => {
       const asOf = Date.UTC(2024, 0, 2, 15, 30, 0);
@@ -1256,7 +1298,7 @@ const tests = [
         source: "UNAVAILABLE",
         asOfTimestamp: asOf,
       });
-      assert.strictEqual(badges.sourceBadge.label, "UNAVAILABLE");
+      assert.strictEqual(badges.sourceBadge.label, "CACHED");
       assert.strictEqual(badges.sessionBadge.label, "REGULAR");
       assert.ok(badges.asOfLabel.startsWith("As of "));
       assert.strictEqual(badges.showWarning, true);
@@ -1499,7 +1541,9 @@ const tests = [
         source: "CACHED",
         unavailable: true,
       });
-      const indicator = getMarketIndicatorData(stock);
+      const indicator = getMarketIndicatorData(stock, {
+        now: new Date(Date.UTC(2024, 0, 2, 15, 0, 0)),
+      });
       assert.strictEqual(stock.quoteSession, "REGULAR");
       assert.strictEqual(indicator.marketStatus, "Open");
       assert.strictEqual(indicator.sourceBadge.label, "CACHED");
@@ -1522,7 +1566,9 @@ const tests = [
       const quote = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
       const stock = getStockEntry("AAPL");
       updateStockWithQuote(stock, quote);
-      const indicator = getMarketIndicatorData(stock);
+      const indicator = getMarketIndicatorData(stock, {
+        now: new Date(Date.UTC(2024, 0, 2, 15, 0, 0)),
+      });
       assert.strictEqual(stock.quoteSession, "REGULAR");
       assert.strictEqual(indicator.marketStatus, "Open");
       assert.strictEqual(indicator.sourceBadge.label, "CACHED");

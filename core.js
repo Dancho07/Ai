@@ -291,13 +291,11 @@ const analysisCache = new Map();
 
 const ANALYSIS_CACHE_PREFIX = "analysis_cache_v1_";
 const ANALYSIS_CACHE_TTL_MS = 3 * 60 * 1000;
-const marketIndicatorState = { usingCached: false };
+const marketPulseState = { usingCached: false, lastRefreshAt: null, latestQuoteAsOf: null };
 const refreshState = {
   status: "idle",
   lastAttemptTs: null,
-  lastSuccessTs: null,
   lastError: null,
-  lastCompletedTs: null,
 };
 let lastRefreshSummary = {
   okCount: 0,
@@ -914,11 +912,19 @@ function formatAsOf(timestamp, options = {}) {
   }
 }
 
-function normalizeEpochToMs(timestamp) {
-  if (!timestamp || Number.isNaN(timestamp)) {
+function parseEpoch(value) {
+  if (value == null) {
     return null;
   }
-  return timestamp > 1e12 ? timestamp : timestamp * 1000;
+  const numeric = typeof value === "string" ? Number.parseFloat(value) : value;
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return numeric > 1e12 ? numeric : numeric * 1000;
+}
+
+function normalizeEpochToMs(timestamp) {
+  return parseEpoch(timestamp);
 }
 
 const QUOTE_SOURCES = {
@@ -990,6 +996,7 @@ function computeUsMarketSession(now = new Date(), options = {}) {
 
 const REALTIME_FRESHNESS_MS = 2 * 60 * 1000;
 const STALE_FRESHNESS_MS = 15 * 60 * 1000;
+const MARKET_PULSE_STALE_MS = 30 * 60 * 1000;
 const CACHE_WARNING_MESSAGE = "Market open but live quote unavailable — using cached data.";
 
 function normalizeSession(session) {
@@ -1683,7 +1690,7 @@ function normalizeQuote(rawQuote, nowMs = Date.now()) {
   if (!base) {
     return null;
   }
-  const asOfTimestamp = normalizeEpochToMs(
+  const asOfTimestamp = parseEpoch(
     base.asOfTimestamp ?? base.timestamp ?? rawQuote.asOfTimestamp ?? rawQuote.timestamp ?? rawQuote.asOfTs,
   );
   const derivedSession = normalizeSession(base.session) ?? normalizeSession(rawQuote.session);
@@ -1782,29 +1789,113 @@ function hasMarketIndicatorData(entry) {
   );
 }
 
-function getMarketIndicatorData(entry, options = {}) {
-  const hasData = hasMarketIndicatorData(entry);
-  const badges = getQuoteBadges(entry, {
-    hasData,
-    showBadges: true,
-    allowUnknown: !hasData,
-    emptyAsOfLabel: "No data",
+function getQuoteTimestamp(entry) {
+  return parseEpoch(entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null);
+}
+
+function getLatestQuoteAsOf(entries = marketState) {
+  let latest = null;
+  entries.forEach((entry) => {
+    if (!entry) {
+      return;
+    }
+    const price = entry.lastPrice ?? entry.price ?? null;
+    const timestamp = getQuoteTimestamp(entry);
+    if (price == null || timestamp == null) {
+      return;
+    }
+    if (latest == null || timestamp > latest) {
+      latest = timestamp;
+    }
   });
+  return latest;
+}
+
+function getQuoteQuality(entry, { nowMs, session }) {
+  if (!entry) {
+    return QUOTE_SOURCES.UNAVAILABLE;
+  }
+  const price = entry.lastPrice ?? entry.price ?? null;
+  const timestamp = getQuoteTimestamp(entry);
+  if (price == null || timestamp == null) {
+    return QUOTE_SOURCES.UNAVAILABLE;
+  }
+  const source =
+    normalizeSource(entry.dataSource ?? entry.source) ??
+    (entry.isRealtime ? QUOTE_SOURCES.REALTIME : null);
+  if (source === QUOTE_SOURCES.DELAYED) {
+    return QUOTE_SOURCES.DELAYED;
+  }
+  if (source === QUOTE_SOURCES.LAST_CLOSE) {
+    return QUOTE_SOURCES.LAST_CLOSE;
+  }
+  if (source === QUOTE_SOURCES.CACHED) {
+    return QUOTE_SOURCES.CACHED;
+  }
+  const ageMs = nowMs - timestamp;
+  const refreshInterval = getRefreshIntervalForSession(session ?? QUOTE_SESSIONS.REGULAR);
+  const realtimeThreshold = refreshInterval ? refreshInterval * 2 : REALTIME_FRESHNESS_MS;
+  if (ageMs > MARKET_PULSE_STALE_MS) {
+    return QUOTE_SOURCES.CACHED;
+  }
+  if (source === QUOTE_SOURCES.UNAVAILABLE) {
+    return QUOTE_SOURCES.CACHED;
+  }
+  if (ageMs <= realtimeThreshold) {
+    return QUOTE_SOURCES.REALTIME;
+  }
+  return QUOTE_SOURCES.DELAYED;
+}
+
+function getMarketSourceBadgeForEntries(entries, { nowMs, session }) {
+  const qualities = entries.map((entry) => getQuoteQuality(entry, { nowMs, session }));
+  if (qualities.some((quality) => quality === QUOTE_SOURCES.REALTIME)) {
+    return getSourceBadge(QUOTE_SOURCES.REALTIME);
+  }
+  if (qualities.some((quality) => quality === QUOTE_SOURCES.DELAYED)) {
+    return getSourceBadge(QUOTE_SOURCES.DELAYED);
+  }
+  if (qualities.some((quality) => quality === QUOTE_SOURCES.CACHED)) {
+    return getSourceBadge(QUOTE_SOURCES.CACHED);
+  }
+  if (qualities.some((quality) => quality === QUOTE_SOURCES.LAST_CLOSE)) {
+    return getSourceBadge(QUOTE_SOURCES.LAST_CLOSE);
+  }
+  return getSourceBadge(QUOTE_SOURCES.UNAVAILABLE);
+}
+
+function getMarketIndicatorData(entry, options = {}) {
+  const entries = options.marketEntries ?? (entry ? [entry] : []);
+  const hasData = entries.some((item) => hasMarketIndicatorData(item));
+  const now = options.now ?? new Date();
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const sessionInfo = computeUsMarketSession(now);
   let marketStatus = "Unavailable";
   if (hasData) {
-    if (badges.session === "PRE" || badges.session === "POST") {
+    if (sessionInfo.session === "PRE" || sessionInfo.session === "POST") {
       marketStatus = "After hours";
-    } else if (badges.session === "CLOSED") {
+    } else if (sessionInfo.session === "CLOSED") {
       marketStatus = "Closed";
     } else {
       marketStatus = "Open";
     }
   }
+  const latestQuoteAsOf = hasData
+    ? options.latestQuoteAsOf ?? getLatestQuoteAsOf(entries) ?? marketPulseState.latestQuoteAsOf
+    : null;
+  const emptyAsOfLabel = options.emptyAsOfLabel ?? (hasData ? "As of unknown UTC" : "No data");
+  const asOfLabel = latestQuoteAsOf ? `As of ${formatAsOf(latestQuoteAsOf, { tz: "UTC" })}` : emptyAsOfLabel;
+  const sessionBadge = hasData
+    ? getSessionBadgeForSession(sessionInfo.session)
+    : { label: "UNKNOWN", className: "delayed" };
+  const sourceBadge = hasData
+    ? getMarketSourceBadgeForEntries(entries, { nowMs, session: sessionInfo.session })
+    : { label: "UNAVAILABLE", className: "delayed" };
   return {
     marketStatus,
-    sessionBadge: badges.sessionBadge ?? { label: "UNKNOWN", className: "delayed" },
-    sourceBadge: badges.sourceBadge ?? { label: "UNAVAILABLE", className: "delayed" },
-    asOfLabel: badges.asOfLabel,
+    sessionBadge,
+    sourceBadge,
+    asOfLabel,
     usingCached: options.usingCached === true,
   };
 }
@@ -1852,7 +1943,8 @@ function updateMarketIndicator() {
   }
   const entry = getMarketIndicatorEntry();
   const data = getMarketIndicatorData(entry, {
-    usingCached: marketIndicatorState.usingCached,
+    usingCached: marketPulseState.usingCached,
+    marketEntries: marketState,
   });
   marketOpenText.textContent = data.marketStatus;
   marketSessionBadge.textContent = data.sessionBadge.label;
@@ -1862,6 +1954,13 @@ function updateMarketIndicator() {
   marketSourceBadge.className = `session-badge ${data.sourceBadge.className}`;
   if (marketCacheNote) {
     marketCacheNote.classList.toggle("hidden", !data.usingCached);
+  }
+}
+
+function updateMarketPulseLatestQuote(entries = marketState) {
+  const latest = getLatestQuoteAsOf(entries);
+  if (latest != null) {
+    marketPulseState.latestQuoteAsOf = latest;
   }
 }
 
@@ -1915,9 +2014,12 @@ function getQuoteBadges(quote, options = {}) {
     normalizeSource(quote?.source ?? quote?.dataSource ?? options.source) ??
     normalizeSource(options.fallbackSource);
   const session = normalizedSession ?? (hasData || isUnavailable ? QUOTE_SESSIONS.CLOSED : null);
-  const source =
+  let source =
     normalizedSource ??
     (hasData || isUnavailable ? QUOTE_SOURCES.CACHED : QUOTE_SOURCES.UNAVAILABLE);
+  if (source === QUOTE_SOURCES.UNAVAILABLE && hasPrice && hasTimestamp) {
+    source = QUOTE_SOURCES.CACHED;
+  }
   const showBadges = options.showBadges ?? (hasData || isUnavailable);
   const allowUnknown = options.allowUnknown === true;
   let sessionBadge = null;
@@ -1936,13 +2038,14 @@ function getQuoteBadges(quote, options = {}) {
       sourceBadge = { label: "UNAVAILABLE", className: "delayed", tooltip: "Live quote unavailable." };
     }
   }
-  const asOfTimestamp =
+  const asOfTimestamp = parseEpoch(
     options.asOfTimestamp ??
-    quote?.asOfTimestamp ??
-    quote?.quoteAsOf ??
-    quote?.lastUpdatedAt ??
-    quote?.lastHistoricalTimestamp ??
-    null;
+      quote?.asOfTimestamp ??
+      quote?.quoteAsOf ??
+      quote?.lastUpdatedAt ??
+      quote?.lastHistoricalTimestamp ??
+      null,
+  );
   const emptyAsOfLabel =
     options.emptyAsOfLabel ?? (isUnavailable ? "Quote unavailable" : "Loading…");
   const asOfLabel = asOfTimestamp ? `As of ${formatAsOf(asOfTimestamp, { tz: "UTC" })}` : emptyAsOfLabel;
@@ -3388,7 +3491,14 @@ function updateStockWithQuote(stock, quote) {
   if (quote.changePct != null) {
     stock.lastChangePct = quote.changePct;
   }
-  stock.quoteAsOf = quote.asOfTimestamp ?? stock.quoteAsOf;
+  const quoteAsOf = parseEpoch(
+    quote.asOfTimestamp ?? quote.asOfTs ?? quote.timestamp ?? quote.quoteAsOf ?? quote.lastUpdatedAt,
+  );
+  if (quoteAsOf != null) {
+    stock.quoteAsOf = quoteAsOf;
+    stock.lastUpdatedAt = quoteAsOf;
+    stock.lastUpdated = formatTime(quoteAsOf);
+  }
   if (quote.session) {
     const normalizedSession = normalizeSession(quote.session);
     if (normalizedSession) {
@@ -3396,8 +3506,6 @@ function updateStockWithQuote(stock, quote) {
     }
   }
   stock.isRealtime = quote.isRealtime ?? stock.isRealtime;
-  stock.lastUpdated = formatTime(stock.quoteAsOf);
-  stock.lastUpdatedAt = quote.asOfTimestamp ?? stock.lastUpdatedAt ?? Date.now();
   stock.dataSource = quote.source ?? stock.dataSource;
   if (quote.unavailable && quote.price == null && quote.previousClose == null) {
     stock.dataSource = QUOTE_SOURCES.UNAVAILABLE;
@@ -3940,7 +4048,8 @@ async function loadInitialMarketData() {
     hadQuoteFailure = true;
   }
 
-  marketIndicatorState.usingCached = hadQuoteFailure;
+  marketPulseState.usingCached = hadQuoteFailure;
+  updateMarketPulseLatestQuote();
 }
 
 async function loadSymbolSnapshot(symbol, options = {}) {
@@ -4312,6 +4421,7 @@ async function refreshVisibleQuotes(options = {}) {
   });
   if (!symbolsToFetch.length) {
     summary.okCount = symbols.filter((symbol) => hasAnyMarketData(getStockEntry(symbol))).length;
+    updateMarketPulseLatestQuote();
     renderMarketTable();
     return summary;
   }
@@ -4385,7 +4495,7 @@ async function refreshVisibleQuotes(options = {}) {
   if (bulkError && isRateLimitBackoffActive()) {
     logMarketDebug("bulk", "backoff_active", { until: rateLimitBackoffUntil });
   }
-  marketIndicatorState.usingCached = hadQuoteFailure;
+  marketPulseState.usingCached = hadQuoteFailure;
   summary.hadQuoteFailure = hadQuoteFailure;
   summary.error = bulkError ?? (hadQuoteFailure ? results.find((result) => result?.error)?.error : null);
 
@@ -4419,6 +4529,7 @@ async function refreshVisibleQuotes(options = {}) {
       }),
   );
 
+  updateMarketPulseLatestQuote();
   renderMarketTable();
   if (resultCard && !resultCard.classList.contains("hidden")) {
     updateResultLivePriceDisplay(resultSymbol.textContent);
@@ -4493,7 +4604,7 @@ function updateRefreshMeta() {
     refreshCount.textContent = `Quotes loaded ${okCount}/${total}`;
   }
   if (refreshTime) {
-    refreshTime.textContent = `Last refresh ${formatClockTime(refreshState.lastCompletedTs)}`;
+    refreshTime.textContent = `Last refresh ${formatClockTime(marketPulseState.lastRefreshAt)}`;
   }
 }
 
@@ -4522,9 +4633,9 @@ function updateRefreshStatus() {
     updateRefreshMeta();
     return;
   }
-  const lastSuccess = refreshState.lastSuccessTs;
-  if (lastSuccess) {
-    const elapsed = Date.now() - lastSuccess;
+  const lastRefreshAt = marketPulseState.lastRefreshAt;
+  if (lastRefreshAt) {
+    const elapsed = Date.now() - lastRefreshAt;
     refreshStatus.textContent = `Updated ${formatElapsedLabel(elapsed)} ago`;
     refreshPill?.classList?.remove("loading", "error");
     refreshPill?.classList?.add("ok");
@@ -4596,22 +4707,22 @@ async function runRefreshCycle({ timeoutMs = REFRESH_TIMEOUT_MS, refreshFn = ref
 
   const hadFailure = summary?.hadQuoteFailure === true || Boolean(error);
   const finalStatus = hadFailure ? (error ? "error" : summary?.okCount ? "ok" : "error") : "ok";
+  const completedAt = Date.now();
+  if (summary?.okCount) {
+    marketPulseState.lastRefreshAt = completedAt;
+  }
   if (hadFailure) {
     const errorType = error?.type ?? summary?.errorTypes?.[0] ?? summary?.error?.type ?? "network_error";
     const message = getQuoteFailureMessage(errorType);
     setRefreshState({
       status: finalStatus,
       lastError: error ?? summary?.error ?? null,
-      lastSuccessTs: summary?.okCount ? Date.now() : refreshState.lastSuccessTs,
-      lastCompletedTs: Date.now(),
     });
     setQuoteStatusBanner(message, { reason: errorType });
   } else {
     setRefreshState({
       status: finalStatus,
-      lastSuccessTs: Date.now(),
       lastError: null,
-      lastCompletedTs: Date.now(),
     });
     setQuoteStatusBanner(null);
   }
@@ -4652,10 +4763,9 @@ async function triggerImmediateRefresh() {
 function resetRefreshState() {
   refreshState.status = "idle";
   refreshState.lastAttemptTs = null;
-  refreshState.lastSuccessTs = null;
   refreshState.lastError = null;
-  refreshState.lastCompletedTs = null;
   lastRefreshSummary = { okCount: 0, errorCount: 0, lastError: null, totalCount: 0 };
+  marketPulseState.lastRefreshAt = null;
   updateRefreshStatus();
 }
 
@@ -5402,8 +5512,9 @@ async function refreshMarketBoard() {
   if (quoteErrors.length) {
     hadQuoteFailure = true;
   }
-  marketIndicatorState.usingCached = hadQuoteFailure;
+  marketPulseState.usingCached = hadQuoteFailure;
 
+  updateMarketPulseLatestQuote();
   renderMarketTable();
   if (resultCard && !resultCard.classList.contains("hidden")) {
     updateResultLivePriceDisplay(resultSymbol.textContent);
@@ -5545,7 +5656,7 @@ function initTradePage() {
             usedCachedFallback = true;
             extraSymbolData.set(symbol, intermediate.entry);
             showStatus("Using cached data — refreshing with live quote...");
-            marketIndicatorState.usingCached = true;
+            marketPulseState.usingCached = true;
             updateMarketIndicator();
             perf.start("compute");
             const interimResult = analyzeSymbol({
@@ -5568,14 +5679,14 @@ function initTradePage() {
         if (snapshot?.status === QUOTE_SOURCES.CACHED) {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
           statusMessage = `Live data unavailable — showing cached price from ${lastUpdated}.`;
-          marketIndicatorState.usingCached = true;
+          marketPulseState.usingCached = true;
           updateMarketIndicator();
         } else if (snapshot?.status === "unavailable") {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
           statusMessage = snapshot.entry?.lastUpdatedAt
             ? `Data unavailable — showing cached price from ${lastUpdated}.`
             : "Data unavailable — please try again shortly.";
-          marketIndicatorState.usingCached = true;
+          marketPulseState.usingCached = true;
           updateMarketIndicator();
         } else if (snapshot?.dataSource === QUOTE_SOURCES.LAST_CLOSE) {
           const lastUpdated = formatTime(snapshot.entry?.lastUpdatedAt);
@@ -5965,6 +6076,7 @@ const appCore = {
   fetchHistoricalSeries,
   deriveMarketSession,
   computeUsMarketSession,
+  parseEpoch,
   normalizeQuote,
   loadSymbolSnapshot,
   resetSymbolCache,
@@ -5973,6 +6085,7 @@ const appCore = {
   setLastKnownQuote,
   hydrateMarketStateFromCache,
   getMarketRowDisplay,
+  getLatestQuoteAsOf,
   getRefreshIntervalForSession,
   getNextRefreshDelay,
   applyRateLimitBackoff,
