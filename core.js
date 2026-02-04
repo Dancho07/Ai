@@ -31,6 +31,15 @@ const strategyModule =
       : null;
 const strategyComputeIndicators = strategyModule?.computeIndicators ?? null;
 const strategyScoreSignal = strategyModule?.scoreSignal ?? null;
+const strategyScoreMultiTimeframe = strategyModule?.scoreMultiTimeframe ?? null;
+
+const signalConfigModule =
+  typeof module !== "undefined" && module.exports
+    ? require("./signalConfig")
+    : typeof window !== "undefined"
+      ? window.SignalConfig
+      : null;
+const SIGNAL_CONFIG = signalConfigModule ?? {};
 
 const resultSymbol = isBrowser ? document.getElementById("result-symbol") : null;
 const resultAction = isBrowser ? document.getElementById("result-action") : null;
@@ -117,13 +126,13 @@ const opportunityBuyNote = isBrowser ? document.getElementById("opportunity-buy-
 const opportunitySellNote = isBrowser ? document.getElementById("opportunity-sell-note") : null;
 const opportunityMoversNote = isBrowser ? document.getElementById("opportunity-movers-note") : null;
 
-const riskLimits = {
+const riskLimits = SIGNAL_CONFIG.risk?.limits ?? {
   low: 0.2,
   moderate: 0.4,
   high: 0.6,
 };
 
-const riskPerTrade = {
+const riskPerTrade = SIGNAL_CONFIG.risk?.perTrade ?? {
   low: 0.005,
   moderate: 0.01,
   high: 0.015,
@@ -166,18 +175,18 @@ const POSITION_SIZING_MODES = {
   CASH: "cash",
   RISK_PERCENT: "risk_percent",
 };
-const RISK_PERCENT_LIMITS = {
+const RISK_PERCENT_LIMITS = SIGNAL_CONFIG.risk?.percentLimits ?? {
   min: 0.1,
   max: 5,
   fallback: 1,
 };
 
-const ENTRY_RANGE_PCT = 0.003;
-const ATR_LOOKBACK = 30;
-const SWING_LOOKBACK = 10;
-const HOLD_LOOKBACK_MIN = 10;
-const HOLD_LOOKBACK_MAX = 20;
-const BACKTEST_MIN_CANDLES = 15;
+const ENTRY_RANGE_PCT = SIGNAL_CONFIG.tradePlan?.entryRangePct ?? 0.003;
+const ATR_LOOKBACK = SIGNAL_CONFIG.volatility?.atrLookback ?? 30;
+const SWING_LOOKBACK = SIGNAL_CONFIG.tradePlan?.swingLookback ?? 10;
+const HOLD_LOOKBACK_MIN = SIGNAL_CONFIG.tradePlan?.holdLookback?.min ?? 10;
+const HOLD_LOOKBACK_MAX = SIGNAL_CONFIG.tradePlan?.holdLookback?.max ?? 20;
+const BACKTEST_MIN_CANDLES = SIGNAL_CONFIG.backtest?.minCandles ?? 15;
 
 const DEFAULT_WATCHLIST = [
   { symbol: "AAPL", name: "Apple", sector: "Technology", cap: "Large" },
@@ -426,6 +435,7 @@ function createPerfTracker(enabled = false) {
       return null;
     }
     const total = durations.get(totalLabel);
+    tradePlan.details = tradePlanDetails;
     return {
       total,
       breakdown: Object.fromEntries(durations.entries()),
@@ -2917,12 +2927,18 @@ function getQuoteBadges(quote, options = {}) {
 }
 
 function calculateSignal(prices) {
-  if (!prices || prices.length < 5 || !strategyComputeIndicators || !strategyScoreSignal) {
+  if (!prices || prices.length < 5) {
     return "hold";
   }
   const recent = prices[prices.length - 1];
-  const indicators = strategyComputeIndicators(prices);
-  const scored = strategyScoreSignal(indicators, { price: recent });
+  const scored = strategyScoreMultiTimeframe
+    ? strategyScoreMultiTimeframe(prices, { price: recent })
+    : strategyComputeIndicators && strategyScoreSignal
+      ? strategyScoreSignal(strategyComputeIndicators(prices), { price: recent })
+      : null;
+  if (scored?.error?.message) {
+    return "hold";
+  }
   return scored?.signal ?? "hold";
 }
 
@@ -3098,10 +3114,12 @@ function getTrendStrengthLabel(trendPercent) {
     return "moderate";
   }
   const absoluteTrend = Math.abs(trendPercent);
-  if (absoluteTrend < 2) {
+  const weakThreshold = SIGNAL_CONFIG.timeHorizon?.trendWeak ?? 2;
+  const moderateThreshold = SIGNAL_CONFIG.timeHorizon?.trendModerate ?? 5;
+  if (absoluteTrend < weakThreshold) {
     return "weak";
   }
-  if (absoluteTrend < 5) {
+  if (absoluteTrend < moderateThreshold) {
     return "moderate";
   }
   return "strong";
@@ -3111,10 +3129,12 @@ function getVolatilityLevel(atrPercent) {
   if (atrPercent == null) {
     return "medium";
   }
-  if (atrPercent <= 2.5) {
+  const lowThreshold = SIGNAL_CONFIG.timeHorizon?.volatilityLow ?? 2.5;
+  const mediumThreshold = SIGNAL_CONFIG.timeHorizon?.volatilityMedium ?? 4.5;
+  if (atrPercent <= lowThreshold) {
     return "low";
   }
-  if (atrPercent <= 4.5) {
+  if (atrPercent <= mediumThreshold) {
     return "medium";
   }
   return "high";
@@ -3298,6 +3318,149 @@ function buildSignalReasons({
   return trimmed;
 }
 
+function buildExplainableReasons({ scoredSignal, recent, atrPercent } = {}) {
+  const reasons = [];
+  const timeframes = scoredSignal?.timeframes ?? null;
+  const shortIndicators = timeframes?.short?.indicators ?? null;
+  const longIndicators = timeframes?.long?.indicators ?? null;
+
+  function pushTrendReason(label, indicators) {
+    if (!indicators?.emaFast || !indicators?.emaSlow) {
+      return;
+    }
+    const diffPct = ((indicators.emaFast - indicators.emaSlow) / indicators.emaSlow) * 100;
+    const slope = indicators?.trend?.slope ?? 0;
+    const direction =
+      diffPct > 0 ? "bullish" : diffPct < 0 ? "bearish" : "flat";
+    reasons.push(
+      `${label} EMA trend is ${direction} (${diffPct.toFixed(2)}% vs slow, slope ${slope.toFixed(2)}%).`,
+    );
+  }
+
+  function pushMomentumReason(label, indicators) {
+    if (indicators?.rsi == null) {
+      return;
+    }
+    const tone = indicators.rsi > 60 ? "bullish" : indicators.rsi < 40 ? "bearish" : "neutral";
+    reasons.push(`${label} RSI is ${tone} (${indicators.rsi.toFixed(1)}).`);
+  }
+
+  if (longIndicators) {
+    pushTrendReason("Long-term", longIndicators);
+    pushMomentumReason("Long-term", longIndicators);
+  }
+  if (shortIndicators) {
+    pushTrendReason("Short-term", shortIndicators);
+    pushMomentumReason("Short-term", shortIndicators);
+  }
+  if (recent != null && atrPercent != null) {
+    reasons.push(`ATR volatility is ${formatPercentNoSign(atrPercent)} of price.`);
+  }
+  if (scoredSignal?.conflict?.resolution) {
+    reasons.push(scoredSignal.conflict.resolution);
+  }
+
+  const unique = [...new Set(reasons)].filter(Boolean);
+  const trimmed = unique.slice(0, 5);
+  while (trimmed.length < 3) {
+    trimmed.push("Signal blends short- and long-term indicators to avoid overreacting.");
+  }
+  return trimmed;
+}
+
+function buildConfidenceBreakdown({ scoredSignal, prices } = {}) {
+  const components = Array.isArray(scoredSignal?.components) ? scoredSignal.components : [];
+  const findComponent = (key) => components.find((component) => component.key === key);
+  const trend = findComponent("trend");
+  const momentum = findComponent("momentum");
+  const volatility = findComponent("volatility");
+  const longLookback = SIGNAL_CONFIG.indicators?.timeframes?.long?.lookback ?? 30;
+  const liquidityScore = Math.min(prices.length / longLookback, 1) * 100;
+
+  const breakdown = [
+    {
+      key: "trend",
+      label: "Trend",
+      score: trend?.max ? Math.round((trend.score / trend.max) * 100) : 0,
+      tooltip: "EMA cross + slope across both timeframes. Higher = aligned directional trend.",
+    },
+    {
+      key: "momentum",
+      label: "Momentum",
+      score: momentum?.max ? Math.round((momentum.score / momentum.max) * 100) : 0,
+      tooltip: "RSI strength vs 40/60 bands on short/long windows.",
+    },
+    {
+      key: "volatility",
+      label: "Volatility",
+      score: volatility?.max ? Math.round((volatility.score / volatility.max) * 100) : 0,
+      tooltip: "ATR-based regime stability. Higher = calmer tape and tighter risk control.",
+    },
+    {
+      key: "liquidity",
+      label: "Liquidity",
+      score: Math.round(liquidityScore),
+      tooltip: "Data depth proxy: % of required candles available for long lookback.",
+    },
+  ];
+  return breakdown;
+}
+
+function buildTradePlanDetails({
+  action,
+  tradePlan,
+  timeHorizon,
+  invalidationRules,
+  confidenceBreakdown,
+  dataSnapshot,
+  reasons,
+}) {
+  const normalizedSignal = action?.toUpperCase?.() ?? "HOLD";
+  const horizon = timeHorizon?.shortLabel ?? "Swing";
+  const entryZone =
+    tradePlan?.isHold
+      ? {
+          rule: "No position. Wait for breakout/breakdown confirmation.",
+          display: "No entry zone (HOLD)",
+        }
+      : {
+          low: tradePlan?.entryRangeLow ?? null,
+          high: tradePlan?.entryRangeHigh ?? null,
+          display: tradePlan?.entryDisplay ?? "n/a",
+          rule: "Enter within the highlighted range near the latest price.",
+        };
+  const stopLoss = tradePlan?.isHold
+    ? null
+    : {
+        level: tradePlan?.stopLoss ?? null,
+        method: tradePlan?.stopMethod ?? "atr",
+        display: tradePlan?.stopLossDisplay ?? "n/a",
+      };
+  const target =
+    tradePlan?.isHold || tradePlan?.takeProfit == null
+      ? null
+      : {
+          levels: [
+            {
+              level: tradePlan.takeProfit,
+              rMultiple: tradePlan.riskReward ?? null,
+            },
+          ],
+          display: tradePlan?.takeProfitDisplay ?? "n/a",
+        };
+  return {
+    signal: normalizedSignal,
+    horizon,
+    entry_zone: entryZone,
+    stop_loss: stopLoss,
+    target,
+    invalidation: invalidationRules ?? [],
+    confidence_breakdown: confidenceBreakdown ?? [],
+    data_snapshot: dataSnapshot ?? {},
+    why: reasons ?? [],
+  };
+}
+
 function buildInvalidationRules({
   action,
   recent,
@@ -3306,9 +3469,9 @@ function buildInvalidationRules({
   monthlyChange,
   atrPercent,
 }) {
-  const maThreshold = 1;
-  const volatilityThreshold = 5;
-  const volatilityHoldThreshold = 6;
+  const maThreshold = SIGNAL_CONFIG.invalidation?.maThreshold ?? 1;
+  const volatilityThreshold = SIGNAL_CONFIG.invalidation?.volatilityThreshold ?? 5;
+  const volatilityHoldThreshold = SIGNAL_CONFIG.invalidation?.volatilityHoldThreshold ?? 6;
   const momentumDirection = calculateMomentumDirection([dailyChange, monthlyChange]);
   const rules = [];
 
@@ -3422,14 +3585,20 @@ function calculateMomentumDirection(changes) {
 }
 
 function calculateSignalScore({ prices, price, indicators, signalResult } = {}) {
-  if (!strategyComputeIndicators || !strategyScoreSignal) {
+  const resolvedPrices = Array.isArray(prices) ? prices : [];
+  const resolvedPrice = price ?? (resolvedPrices.length ? resolvedPrices[resolvedPrices.length - 1] : null);
+  let scored = signalResult ?? null;
+  if (!scored) {
+    if (strategyScoreMultiTimeframe) {
+      scored = strategyScoreMultiTimeframe(resolvedPrices, { price: resolvedPrice });
+    } else if (strategyComputeIndicators && strategyScoreSignal) {
+      const resolvedIndicators = indicators ?? strategyComputeIndicators(resolvedPrices);
+      scored = strategyScoreSignal(resolvedIndicators, { price: resolvedPrice });
+    }
+  }
+  if (!scored) {
     return { total: 0, label: getSignalScoreLabel(0), components: [] };
   }
-  const resolvedIndicators =
-    indicators ?? strategyComputeIndicators(Array.isArray(prices) ? prices : []);
-  const resolvedPrice =
-    price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
-  const scored = signalResult ?? strategyScoreSignal(resolvedIndicators, { price: resolvedPrice });
   const totalScore = scored?.score ?? 0;
   return {
     total: totalScore,
@@ -3442,31 +3611,28 @@ function getVolatilityRegime(atrPercent) {
   if (atrPercent == null) {
     return { label: "Unknown", score: 12, caution: "Volatility data limited: manage risk conservatively." };
   }
-  if (atrPercent <= 2) {
-    return {
-      label: "Low",
-      score: 25,
-      caution: "Low volatility: avoid overly tight stops and confirm the move.",
-    };
-  }
-  if (atrPercent <= 4) {
+  const profiles = SIGNAL_CONFIG.volatility?.profiles ?? [];
+  const match =
+    profiles.find((profile) => typeof profile.max === "number" && atrPercent <= profile.max) ??
+    profiles[profiles.length - 1];
+  if (!match) {
     return {
       label: "Moderate",
       score: 18,
       caution: "Moderate volatility: keep sizing balanced and stops at planned levels.",
     };
   }
-  if (atrPercent <= 6) {
-    return {
-      label: "High",
-      score: 10,
-      caution: "High volatility: widen stop or reduce position size.",
-    };
-  }
+  const scoreMap = {
+    low: 25,
+    moderate: 18,
+    high: 10,
+    "very high": 5,
+  };
+  const normalizedLabel = match.label ?? "moderate";
   return {
-    label: "Very High",
-    score: 5,
-    caution: "Very high volatility: reduce size and wait for calmer price action.",
+    label: normalizedLabel.replace(/\b\w/g, (char) => char.toUpperCase()),
+    score: scoreMap[normalizedLabel] ?? 12,
+    caution: match.caution ?? "Volatility data limited: manage risk conservatively.",
   };
 }
 
@@ -3476,7 +3642,7 @@ function calculateSignalConfidence({
   indicators,
   signalResult,
 }) {
-  if (!strategyComputeIndicators || !strategyScoreSignal) {
+  if (!strategyScoreMultiTimeframe && (!strategyComputeIndicators || !strategyScoreSignal)) {
     return {
       score: 25,
       label: "Low",
@@ -3487,11 +3653,16 @@ function calculateSignalConfidence({
       caution: "Limited data: keep size small until fresh history loads.",
     };
   }
-  const resolvedIndicators =
-    indicators ?? strategyComputeIndicators(Array.isArray(prices) ? prices : []);
-  const resolvedPrice =
-    price ?? (Array.isArray(prices) && prices.length ? prices[prices.length - 1] : null);
-  const scored = signalResult ?? strategyScoreSignal(resolvedIndicators, { price: resolvedPrice });
+  const resolvedPrices = Array.isArray(prices) ? prices : [];
+  const resolvedPrice = price ?? (resolvedPrices.length ? resolvedPrices[resolvedPrices.length - 1] : null);
+  const scored =
+    signalResult ??
+    (strategyScoreMultiTimeframe
+      ? strategyScoreMultiTimeframe(resolvedPrices, { price: resolvedPrice })
+      : strategyScoreSignal(
+          indicators ?? strategyComputeIndicators(resolvedPrices),
+          { price: resolvedPrice },
+        ));
   const confidenceScore = scored?.confidence ?? 0;
   const label = getConfidenceLabel(confidenceScore);
   const reasons = [
@@ -3557,6 +3728,10 @@ function calculateTradePlan({
         breakoutTrigger: `If price breaks above ${breakoutDisplay} => BUY`,
         breakdownTrigger: `If price breaks below ${breakdownDisplay} => SELL`,
       },
+      entryRangeLow: null,
+      entryRangeHigh: null,
+      atrValue: null,
+      stopMethod: "none",
     };
   }
 
@@ -3575,28 +3750,47 @@ function calculateTradePlan({
       stopDistance: 0,
       isHold: false,
       holdLevels: null,
+      entryRangeLow: null,
+      entryRangeHigh: null,
+      atrValue: null,
+      stopMethod: "unknown",
     };
   }
 
   const entryRangeLow = resolvedEntryPrice * (1 - ENTRY_RANGE_PCT);
   const entryRangeHigh = resolvedEntryPrice * (1 + ENTRY_RANGE_PCT);
   const resolvedAtrLike = atrLike ?? calculateAtrLike(safePrices);
-  const fallbackAtr = Math.max(resolvedEntryPrice * 0.02, 0.01);
+  const fallbackAtr = Math.max(resolvedEntryPrice * (SIGNAL_CONFIG.tradePlan?.atrFallbackPct ?? 0.02), 0.01);
   const atrValue = resolvedAtrLike ?? fallbackAtr;
   const swingLevels = getSwingLevels(safePrices);
   let stopLoss = null;
+  let stopMethod = "atr";
   if (action === "buy") {
-    const atrStop = resolvedEntryPrice - atrValue * 1.2;
+    const atrStop = resolvedEntryPrice - atrValue * (SIGNAL_CONFIG.tradePlan?.atrStopMultiplier ?? 1.2);
     const candidates = [atrStop, swingLevels.low].filter(
       (value) => value != null && value < resolvedEntryPrice,
     );
-    stopLoss = candidates.length ? Math.max(...candidates) : resolvedEntryPrice * 0.97;
+    if (candidates.length) {
+      stopLoss = Math.max(...candidates);
+      if (swingLevels.low != null && stopLoss === swingLevels.low) {
+        stopMethod = "structure";
+      }
+    } else {
+      stopLoss = resolvedEntryPrice * 0.97;
+    }
   } else if (action === "sell") {
-    const atrStop = resolvedEntryPrice + atrValue * 1.2;
+    const atrStop = resolvedEntryPrice + atrValue * (SIGNAL_CONFIG.tradePlan?.atrStopMultiplier ?? 1.2);
     const candidates = [atrStop, swingLevels.high].filter(
       (value) => value != null && value > resolvedEntryPrice,
     );
-    stopLoss = candidates.length ? Math.min(...candidates) : resolvedEntryPrice * 1.03;
+    if (candidates.length) {
+      stopLoss = Math.min(...candidates);
+      if (swingLevels.high != null && stopLoss === swingLevels.high) {
+        stopMethod = "structure";
+      }
+    } else {
+      stopLoss = resolvedEntryPrice * 1.03;
+    }
   }
 
   if (stopLoss == null) {
@@ -3629,12 +3823,13 @@ function calculateTradePlan({
 
   let takeProfit = null;
   let riskReward = null;
+  const rewardMultiple = SIGNAL_CONFIG.tradePlan?.riskRewardMultiple ?? 2;
   if (stopLoss != null) {
     if (action === "buy") {
-      takeProfit = resolvedEntryPrice + 2 * (resolvedEntryPrice - stopLoss);
+      takeProfit = resolvedEntryPrice + rewardMultiple * (resolvedEntryPrice - stopLoss);
       riskReward = (takeProfit - resolvedEntryPrice) / (resolvedEntryPrice - stopLoss);
     } else if (action === "sell") {
-      takeProfit = resolvedEntryPrice - 2 * (stopLoss - resolvedEntryPrice);
+      takeProfit = resolvedEntryPrice - rewardMultiple * (stopLoss - resolvedEntryPrice);
       riskReward = (resolvedEntryPrice - takeProfit) / (stopLoss - resolvedEntryPrice);
     }
   }
@@ -3656,6 +3851,10 @@ function calculateTradePlan({
     riskReward,
     isHold: false,
     holdLevels: null,
+    entryRangeLow,
+    entryRangeHigh,
+    atrValue,
+    stopMethod,
   };
 }
 
@@ -3710,7 +3909,11 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const priceContext = resolvePriceContext(marketEntry);
   const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
   const indicators = strategyComputeIndicators ? strategyComputeIndicators(prices) : null;
-  const scoredSignal = strategyScoreSignal ? strategyScoreSignal(indicators, { price: recent }) : null;
+  const scoredSignal = strategyScoreMultiTimeframe
+    ? strategyScoreMultiTimeframe(prices, { price: recent })
+    : strategyScoreSignal
+      ? strategyScoreSignal(indicators, { price: recent })
+      : null;
   let action = "hold";
   let thesis = [
     "Signal is neutral with limited confirmation.",
@@ -3731,6 +3934,29 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     });
     const signalScore = calculateSignalScore({ prices });
     const confidence = calculateSignalConfidence({ prices });
+    const confidenceBreakdown = buildConfidenceBreakdown({ scoredSignal, prices });
+    const reasons = buildExplainableReasons({ scoredSignal, recent, atrPercent: null });
+    const tradePlanDetails = buildTradePlanDetails({
+      action: "hold",
+      tradePlan,
+      timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
+      invalidationRules: buildInvalidationRules({
+        action: "hold",
+        recent,
+        average: null,
+        dailyChange: marketEntry?.dailyChange ?? null,
+        monthlyChange: marketEntry?.monthlyChange ?? null,
+        atrPercent: null,
+      }),
+      confidenceBreakdown,
+      dataSnapshot: {
+        priceAsOf: priceContext.asOf ?? null,
+        lastCandleTimestamp,
+        indicators: scoredSignal?.timeframes ?? null,
+      },
+      reasons,
+    });
+    tradePlan.details = tradePlanDetails;
     return {
       symbol,
       ...analysisMeta,
@@ -3747,15 +3973,9 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
         "Signals are paused until a fresh quote is retrieved.",
       ],
       tradePlan,
-      signalReasons: scoredSignal?.reasons ?? [],
-      invalidationRules: buildInvalidationRules({
-        action: "hold",
-        recent,
-        average: null,
-        dailyChange: marketEntry?.dailyChange ?? null,
-        monthlyChange: marketEntry?.monthlyChange ?? null,
-        atrPercent: null,
-      }),
+      tradePlanDetails,
+      signalReasons: reasons,
+      invalidationRules: tradePlanDetails.invalidation,
       timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
       backtest: backtestSummary,
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
@@ -3766,7 +3986,13 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   if (scoredSignal?.signal) {
     action = scoredSignal.signal;
   }
-  if (scoredSignal?.reasons?.length) {
+  if (scoredSignal?.error?.message) {
+    action = "hold";
+    thesis = [
+      "Not enough history to compute a reliable multi-timeframe signal.",
+      scoredSignal.error.message,
+    ];
+  } else if (scoredSignal?.reasons?.length) {
     thesis = scoredSignal.reasons.slice(0, 2);
   }
 
@@ -3796,6 +4022,37 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     indicators,
     signalResult: scoredSignal,
   });
+  const confidenceBreakdown = buildConfidenceBreakdown({ scoredSignal, prices });
+  const baseReasons = buildExplainableReasons({ scoredSignal, recent, atrPercent });
+  const reasons = scoredSignal?.error?.message
+    ? [scoredSignal.error.message, ...baseReasons].slice(0, 5)
+    : baseReasons;
+  const invalidationRules = buildInvalidationRules({
+    action,
+    recent,
+    average: null,
+    dailyChange: marketEntry?.dailyChange ?? null,
+    monthlyChange: marketEntry?.monthlyChange ?? null,
+    atrPercent,
+  });
+  const tradePlanDetails = buildTradePlanDetails({
+    action,
+    tradePlan,
+    timeHorizon: calculateTimeHorizon(prices, atrLike),
+    invalidationRules,
+    confidenceBreakdown,
+    dataSnapshot: {
+      priceAsOf: priceContext.asOf ?? null,
+      lastCandleTimestamp,
+      indicators: scoredSignal?.timeframes ?? null,
+      periods: {
+        short: SIGNAL_CONFIG.indicators?.timeframes?.short?.periods ?? null,
+        long: SIGNAL_CONFIG.indicators?.timeframes?.long?.periods ?? null,
+      },
+    },
+    reasons,
+  });
+  tradePlan.details = tradePlanDetails;
   const shares = tradePlan.positionSize;
 
   return {
@@ -3811,15 +4068,9 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     signalScore,
     thesis,
     tradePlan,
-    signalReasons: scoredSignal?.reasons ?? [],
-    invalidationRules: buildInvalidationRules({
-      action,
-      recent,
-      average: null,
-      dailyChange: marketEntry?.dailyChange ?? null,
-      monthlyChange: marketEntry?.monthlyChange ?? null,
-      atrPercent,
-    }),
+    tradePlanDetails,
+    signalReasons: reasons,
+    invalidationRules,
     timeHorizon: calculateTimeHorizon(prices, atrLike),
     backtest: backtestSummary,
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
@@ -7479,6 +7730,9 @@ const appCore = {
   getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
+  buildExplainableReasons,
+  buildConfidenceBreakdown,
+  buildTradePlanDetails,
   buildInvalidationRules,
   formatTimestamp,
   runBacktest30d,
