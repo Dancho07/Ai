@@ -1651,11 +1651,12 @@ async function fetchJsonWithRetry(
         });
       }
       let payload = null;
+      const responseClone = typeof response.clone === "function" ? response.clone() : response;
       try {
         payload = await response.json();
       } catch (error) {
-        if (typeof response.text === "function") {
-          const raw = await response.text();
+        if (typeof responseClone.text === "function") {
+          const raw = await responseClone.text();
           if (typeof raw === "string" && raw.trim().startsWith("<")) {
             throw new MarketDataError("provider_error", "HTML response received.", {
               responseSnippet: raw.slice(0, 120),

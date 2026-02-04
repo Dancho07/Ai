@@ -68,11 +68,26 @@ const {
 const { computeHeaderQuality, normalizeQuote: normalizeHeaderQuote } = require("../quoteQuality");
 const { computeIndicators, scoreSignal } = require("../strategy");
 
-function createResponse({ ok, status, json }) {
+function createResponse({ ok, status, json, text, jsonError, textError }) {
   return {
     ok,
     status,
-    json: async () => json,
+    json: async () => {
+      if (jsonError) {
+        throw jsonError;
+      }
+      if (json instanceof Error) {
+        throw json;
+      }
+      return json;
+    },
+    text: async () => {
+      if (textError) {
+        throw textError;
+      }
+      return text ?? "";
+    },
+    clone: () => createResponse({ ok, status, json, text, jsonError, textError }),
   };
 }
 
@@ -802,6 +817,27 @@ const tests = [
           }),
         (error) => error instanceof MarketDataError && error.type === "timeout",
       );
+    },
+  },
+  {
+    name: "parses JSON from text when response.json fails",
+    fn: async () => {
+      const fetchFn = createFetchSequence([
+        createResponse({
+          ok: true,
+          status: 200,
+          json: new Error("Invalid JSON"),
+          text: JSON.stringify({ quoteResponse: { result: [] } }),
+        }),
+      ]);
+      const payload = await fetchJsonWithRetry("https://example.com", {
+        fetchFn,
+        timeoutMs: 5,
+        maxAttempts: 1,
+        provider: "Yahoo Finance",
+        symbol: "AAPL",
+      });
+      assert.deepStrictEqual(payload, { quoteResponse: { result: [] } });
     },
   },
   {
