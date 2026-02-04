@@ -39,6 +39,9 @@ const {
   getConfidenceLabel,
   calculateTradePlan,
   buildSignalReasons,
+  buildExplainableReasons,
+  buildConfidenceBreakdown,
+  buildTradePlanDetails,
   buildInvalidationRules,
   formatTimestamp,
   runBacktest30d,
@@ -67,7 +70,7 @@ const {
   initLivePage,
 } = require("../core");
 const { computeHeaderQuality, normalizeQuote: normalizeHeaderQuote } = require("../quoteQuality");
-const { computeIndicators, scoreSignal } = require("../strategy");
+const { computeIndicators, scoreSignal, scoreMultiTimeframe } = require("../strategy");
 
 function createResponse({ ok, status, json, text, jsonError, textError }) {
   return {
@@ -2086,10 +2089,69 @@ const tests = [
   {
     name: "calculates deterministic signal scores",
     fn: async () => {
-      const prices = [100, 102, 101, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115];
-      const score = calculateSignalScore({ prices, price: 115 });
-      assert.strictEqual(score.total, 54);
+      const prices = Array.from({ length: 40 }, (_, index) => 100 + index);
+      const score = calculateSignalScore({ prices, price: prices[prices.length - 1] });
+      assert.strictEqual(score.total, 76);
       assert.strictEqual(score.components.length, 4);
+    },
+  },
+  {
+    name: "returns multi-timeframe error on insufficient candles",
+    fn: async () => {
+      const candles = buildTrendCandles({ start: 100, step: 1.2, count: 8 });
+      const scored = scoreMultiTimeframe(candles, { price: candles[candles.length - 1].close });
+      assert.strictEqual(scored.signal, "hold");
+      assert.ok(scored.error);
+      assert.ok(scored.error.message.includes("Not enough price history"));
+    },
+  },
+  {
+    name: "builds explainable reasons snapshot for multi-timeframe signal",
+    fn: async () => {
+      const candles = buildTrendCandles({ start: 100, step: 1.2, count: 40 });
+      const scored = scoreMultiTimeframe(candles, { price: candles[candles.length - 1].close });
+      const reasons = buildExplainableReasons({
+        scoredSignal: scored,
+        recent: candles[candles.length - 1].close,
+        atrPercent: 1.8,
+      });
+      assert.deepStrictEqual(reasons.slice(0, 3), [
+        "Long-term EMA trend is bullish (5.13% vs slow, slope 0.86%).",
+        "Long-term RSI is bullish (100.0).",
+        "Short-term EMA trend is bullish (1.79% vs slow, slope 0.83%).",
+      ]);
+    },
+  },
+  {
+    name: "builds trade plan details schema",
+    fn: async () => {
+      const tradePlan = calculateTradePlan({
+        action: "buy",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices: Array.from({ length: 20 }, (_, index) => 90 + index),
+        cash: 10000,
+        risk: "moderate",
+      });
+      const details = buildTradePlanDetails({
+        action: "buy",
+        tradePlan,
+        timeHorizon: { shortLabel: "Swing" },
+        invalidationRules: ["Price closes below key EMA."],
+        confidenceBreakdown: buildConfidenceBreakdown({ scoredSignal: null, prices: [1, 2, 3] }),
+        dataSnapshot: { priceAsOf: 123, indicators: {} },
+        reasons: ["Short-term trend aligned with long-term bias."],
+      });
+      assert.strictEqual(details.signal, "BUY");
+      assert.strictEqual(details.horizon, "Swing");
+      assert.ok(details.entry_zone);
+      assert.ok(details.stop_loss);
+      assert.ok(details.target);
+      assert.ok(details.invalidation.length);
+      assert.ok(details.confidence_breakdown.length);
+      assert.ok(details.data_snapshot);
+      assert.ok(details.why.length);
     },
   },
   {

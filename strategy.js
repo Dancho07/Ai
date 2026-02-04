@@ -1,16 +1,58 @@
-const DEFAULT_PERIODS = {
-  emaFast: 12,
-  emaSlow: 26,
-  rsi: 14,
-  atr: 14,
-  returns: 10,
-  slope: 5,
+const signalConfig =
+  typeof module !== "undefined" && module.exports
+    ? require("./signalConfig")
+    : typeof window !== "undefined"
+      ? window.SignalConfig
+      : null;
+
+const DEFAULT_CONFIG = {
+  indicators: {
+    timeframes: {
+      long: {
+        periods: {
+          emaFast: 12,
+          emaSlow: 26,
+          rsi: 14,
+          atr: 14,
+          returns: 10,
+          slope: 5,
+        },
+      },
+    },
+  },
+  score: {
+    thresholds: { buy: 65, sell: 35 },
+    weights: {
+      trend: 22,
+      momentum: 13,
+      meanReversion: 10,
+      volatility: 5,
+    },
+    trendDiffDivider: 2,
+    trendSlopeDivider: 1.5,
+    trendBiasDivider: 2,
+    meanReversionDivider: 3.5,
+  },
+  volatility: {
+    profiles: [
+      { max: 2.5, label: "low", stability: 1, bias: 0.1, caution: "Low volatility: confirm momentum." },
+      { max: 4, label: "moderate", stability: 0.8, bias: 0, caution: "Moderate volatility: stay disciplined." },
+      { max: 6, label: "high", stability: 0.45, bias: -0.4, caution: "High volatility: reduce size or wait." },
+      { max: Infinity, label: "very high", stability: 0.2, bias: -0.7, caution: "Very high volatility: avoid choppy tape." },
+    ],
+  },
+  confidence: {
+    alignmentWeight: 50,
+    distanceWeight: 30,
+    volatilityWeight: 20,
+    conflictPenalty: 12,
+  },
 };
 
-const SCORE_THRESHOLDS = {
-  buy: 65,
-  sell: 35,
-};
+const ACTIVE_CONFIG = signalConfig ?? DEFAULT_CONFIG;
+
+const DEFAULT_PERIODS = ACTIVE_CONFIG.indicators.timeframes.long.periods;
+const SCORE_THRESHOLDS = ACTIVE_CONFIG.score.thresholds;
 
 function clampNumber(value, min, max) {
   if (value == null || Number.isNaN(value)) {
@@ -163,20 +205,20 @@ function computeIndicators(candles, params = {}) {
   };
 }
 
-function buildVolatilityProfile(atrPercent) {
+function buildVolatilityProfile(atrPercent, config = ACTIVE_CONFIG) {
   if (atrPercent == null) {
     return { label: "unknown", stability: 0.45, bias: 0, caution: "Volatility data limited." };
   }
-  if (atrPercent <= 2.5) {
-    return { label: "low", stability: 1, bias: 0.1, caution: "Low volatility: confirm momentum." };
-  }
-  if (atrPercent <= 4) {
-    return { label: "moderate", stability: 0.8, bias: 0, caution: "Moderate volatility: stay disciplined." };
-  }
-  if (atrPercent <= 6) {
-    return { label: "high", stability: 0.45, bias: -0.4, caution: "High volatility: reduce size or wait." };
-  }
-  return { label: "very high", stability: 0.2, bias: -0.7, caution: "Very high volatility: avoid choppy tape." };
+  const profiles = config?.volatility?.profiles ?? DEFAULT_CONFIG.volatility.profiles;
+  const match =
+    profiles.find((profile) => typeof profile.max === "number" && atrPercent <= profile.max) ??
+    profiles[profiles.length - 1];
+  return {
+    label: match?.label ?? "unknown",
+    stability: match?.stability ?? 0.45,
+    bias: match?.bias ?? 0,
+    caution: match?.caution ?? "Volatility data limited.",
+  };
 }
 
 function formatPercent(value) {
@@ -192,12 +234,8 @@ function formatPercent(value) {
  * and volatility regime are blended into a weighted score and confidence.
  */
 function scoreSignal(indicators, params = {}) {
-  const weights = {
-    trend: 22,
-    momentum: 13,
-    meanReversion: 10,
-    volatility: 5,
-  };
+  const config = params.config ?? ACTIVE_CONFIG;
+  const weights = config?.score?.weights ?? DEFAULT_CONFIG.score.weights;
   const price = params.price ?? null;
   const emaFast = indicators?.emaFast ?? null;
   const emaSlow = indicators?.emaSlow ?? null;
@@ -209,8 +247,10 @@ function scoreSignal(indicators, params = {}) {
   let trendBias = 0;
   if (emaFast != null && emaSlow != null) {
     const diffPct = ((emaFast - emaSlow) / emaSlow) * 100;
-    const slopeAdj = trend.slope / 1.5;
-    trendBias = clampNumber((diffPct / 2 + slopeAdj) / 2, -1, 1);
+    const slopeAdj = trend.slope / (config?.score?.trendSlopeDivider ?? DEFAULT_CONFIG.score.trendSlopeDivider);
+    const diffWeight = config?.score?.trendDiffDivider ?? DEFAULT_CONFIG.score.trendDiffDivider;
+    const biasDivisor = config?.score?.trendBiasDivider ?? DEFAULT_CONFIG.score.trendBiasDivider;
+    trendBias = clampNumber((diffPct / diffWeight + slopeAdj) / biasDivisor, -1, 1);
   }
 
   let momentumBias = 0;
@@ -225,10 +265,11 @@ function scoreSignal(indicators, params = {}) {
   let meanReversionBias = 0;
   if (price != null && emaFast != null) {
     const distancePct = ((price - emaFast) / emaFast) * 100;
-    meanReversionBias = clampNumber(-distancePct / 3.5, -1, 1);
+    const divider = config?.score?.meanReversionDivider ?? DEFAULT_CONFIG.score.meanReversionDivider;
+    meanReversionBias = clampNumber(-distancePct / divider, -1, 1);
   }
 
-  const volatilityProfile = buildVolatilityProfile(atrPercent);
+  const volatilityProfile = buildVolatilityProfile(atrPercent, config);
 
   const contributions = [
     { key: "trend", label: "Trend", weight: weights.trend, bias: trendBias },
@@ -246,7 +287,8 @@ function scoreSignal(indicators, params = {}) {
     100,
   );
 
-  const signal = score >= SCORE_THRESHOLDS.buy ? "buy" : score <= SCORE_THRESHOLDS.sell ? "sell" : "hold";
+  const thresholds = config?.score?.thresholds ?? SCORE_THRESHOLDS;
+  const signal = score >= thresholds.buy ? "buy" : score <= thresholds.sell ? "sell" : "hold";
 
   const alignedCount = contributions.filter((component) => {
     if (signal === "hold") {
@@ -254,16 +296,23 @@ function scoreSignal(indicators, params = {}) {
     }
     return signal === "buy" ? component.bias > 0.1 : component.bias < -0.1;
   }).length;
-  const alignmentScore = (alignedCount / contributions.length) * 50;
+  const alignmentWeight =
+    config?.confidence?.alignmentWeight ?? DEFAULT_CONFIG.confidence.alignmentWeight;
+  const alignmentScore = (alignedCount / contributions.length) * alignmentWeight;
   const distanceFromThreshold =
     signal === "buy"
-      ? (score - SCORE_THRESHOLDS.buy) / (100 - SCORE_THRESHOLDS.buy)
+      ? (score - thresholds.buy) / (100 - thresholds.buy)
       : signal === "sell"
-        ? (SCORE_THRESHOLDS.sell - score) / SCORE_THRESHOLDS.sell
-        : Math.min(score - SCORE_THRESHOLDS.sell, SCORE_THRESHOLDS.buy - score) / 30;
-  const distanceScore = clampNumber(distanceFromThreshold, 0, 1) * 30;
-  const volatilityScore = volatilityProfile.stability * 20;
-  const confidence = clampNumber(Math.round(alignmentScore + distanceScore + volatilityScore), 0, 100);
+        ? (thresholds.sell - score) / thresholds.sell
+        : Math.min(score - thresholds.sell, thresholds.buy - score) / 30;
+  const confidenceConfig = config?.confidence ?? DEFAULT_CONFIG.confidence;
+  const distanceScore = clampNumber(distanceFromThreshold, 0, 1) * confidenceConfig.distanceWeight;
+  const volatilityScore = volatilityProfile.stability * confidenceConfig.volatilityWeight;
+  const confidence = clampNumber(
+    Math.round(alignmentScore + distanceScore + volatilityScore),
+    0,
+    100,
+  );
 
   const reasons = [
     trendBias > 0.15
@@ -295,11 +344,121 @@ function scoreSignal(indicators, params = {}) {
       label: component.label,
       max: component.weight,
       score: Math.round(((component.bias + 1) / 2) * component.weight),
+      bias: component.bias,
     })),
   };
 }
 
-const strategy = { computeIndicators, scoreSignal, SCORE_THRESHOLDS };
+function getMinCandles(periods) {
+  if (!periods) {
+    return 0;
+  }
+  const values = Object.values(periods).filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) + 1 : 0;
+}
+
+function scoreMultiTimeframe(candles = [], params = {}) {
+  const config = params.config ?? ACTIVE_CONFIG;
+  const timeframes = config?.indicators?.timeframes ?? DEFAULT_CONFIG.indicators.timeframes;
+  const shortConfig = timeframes.short ?? timeframes.long;
+  const longConfig = timeframes.long ?? timeframes.short;
+  const prices = Array.isArray(candles) ? candles : [];
+  const resolvedPrice =
+    params.price ??
+    (prices.length
+      ? typeof prices[prices.length - 1] === "number"
+        ? prices[prices.length - 1]
+        : prices[prices.length - 1]?.close ?? prices[prices.length - 1]?.price ?? null
+      : null);
+  const shortSlice = prices.slice(-shortConfig.lookback);
+  const longSlice = prices.slice(-longConfig.lookback);
+  const shortMin = getMinCandles(shortConfig.periods);
+  const longMin = getMinCandles(longConfig.periods);
+
+  if (shortSlice.length < shortMin || longSlice.length < longMin) {
+    const needed = Math.max(shortMin, longMin);
+    return {
+      signal: "hold",
+      score: 50,
+      confidence: 0,
+      reasons: [],
+      components: [],
+      error: {
+        message: "Not enough price history to compute multi-timeframe signals.",
+        needed,
+        available: prices.length,
+      },
+    };
+  }
+
+  const shortIndicators = computeIndicators(shortSlice, { periods: shortConfig.periods });
+  const longIndicators = computeIndicators(longSlice, { periods: longConfig.periods });
+  const shortScore = scoreSignal(shortIndicators, { price: resolvedPrice, config });
+  const longScore = scoreSignal(longIndicators, { price: resolvedPrice, config });
+
+  const shortWeight = shortConfig.weight ?? 0.5;
+  const longWeight = longConfig.weight ?? 0.5;
+  const combinedScore = Math.round(shortScore.score * shortWeight + longScore.score * longWeight);
+  const thresholds = config?.score?.thresholds ?? SCORE_THRESHOLDS;
+  let signal = combinedScore >= thresholds.buy ? "buy" : combinedScore <= thresholds.sell ? "sell" : "hold";
+  let conflict = null;
+  if (shortScore.signal !== longScore.signal) {
+    const conflictPenalty = config?.confidence?.conflictPenalty ?? DEFAULT_CONFIG.confidence.conflictPenalty;
+    if (
+      (longScore.signal === "buy" && shortScore.signal === "sell") ||
+      (longScore.signal === "sell" && shortScore.signal === "buy")
+    ) {
+      signal = "hold";
+    }
+    conflict = {
+      shortSignal: shortScore.signal,
+      longSignal: longScore.signal,
+      resolution:
+        signal === "hold"
+          ? "Short-term and long-term signals conflict; defaulting to HOLD."
+          : `Long-term ${longScore.signal.toUpperCase()} trend dominates; treat short-term ${shortScore.signal.toUpperCase()} as tactical timing.`,
+      penalty: conflictPenalty,
+    };
+  }
+
+  const mergedComponents = (shortScore.components ?? []).map((component) => {
+    const match = (longScore.components ?? []).find((entry) => entry.key === component.key);
+    const shortComponentScore = component.score ?? 0;
+    const longComponentScore = match?.score ?? 0;
+    return {
+      key: component.key,
+      label: component.label,
+      max: component.max ?? match?.max ?? 0,
+      score: Math.round(shortComponentScore * shortWeight + longComponentScore * longWeight),
+      bias: clampNumber(((component.bias ?? 0) + (match?.bias ?? 0)) / 2, -1, 1),
+    };
+  });
+
+  return {
+    signal,
+    score: combinedScore,
+    confidence: Math.round((shortScore.confidence + longScore.confidence) / 2),
+    reasons: [...(longScore.reasons ?? []), ...(shortScore.reasons ?? [])].slice(0, 5),
+    components: mergedComponents,
+    timeframes: {
+      short: {
+        label: shortConfig.label,
+        lookback: shortConfig.lookback,
+        indicators: shortIndicators,
+        score: shortScore,
+      },
+      long: {
+        label: longConfig.label,
+        lookback: longConfig.lookback,
+        indicators: longIndicators,
+        score: longScore,
+      },
+    },
+    conflict,
+  };
+}
+
+const strategy = { computeIndicators, scoreSignal, scoreMultiTimeframe, SCORE_THRESHOLDS };
 
 if (typeof window !== "undefined") {
   window.Strategy = strategy;
