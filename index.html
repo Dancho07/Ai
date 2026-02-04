@@ -72,12 +72,15 @@
           <label>
             Position sizing mode
             <select name="positionSizing" id="position-sizing" required>
-              <option value="cash" selected>Use available cash (current)</option>
+              <option value="cash" selected>Default (risk by tolerance)</option>
+              <option value="risk_auto">Risk % of account (auto)</option>
+              <option value="atr_stop">ATR stop sizing</option>
+              <option value="max_position_cap">Max position cap (% of account)</option>
               <option value="risk_percent">Risk per trade (%)</option>
             </select>
           </label>
           <label id="risk-percent-field" class="hidden">
-            Risk per trade (%)
+            Risk per trade (%) - manual
             <input
               type="number"
               id="risk-percent"
@@ -142,7 +145,11 @@
                 <dd id="plan-position"></dd>
               </div>
               <div>
-                <dt>Risk amount</dt>
+                <dt>Notional</dt>
+                <dd id="plan-notional"></dd>
+              </div>
+              <div>
+                <dt>Estimated risk at stop</dt>
                 <dd id="plan-risk-amount"></dd>
               </div>
               <div>
@@ -154,6 +161,11 @@
                 <dd id="plan-risk-reward"></dd>
               </div>
             </dl>
+            <div class="plan-notes">
+              <h4>Sizing rationale</h4>
+              <ul id="plan-sizing-reasons"></ul>
+              <ul id="plan-sizing-warnings" class="plan-warnings hidden"></ul>
+            </div>
             <div class="hold-levels hidden" id="plan-hold-levels">
               <p class="hold-note" id="plan-hold-note"></p>
               <h4>Levels to watch</h4>

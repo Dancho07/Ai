@@ -76,6 +76,11 @@
       min: 10,
       max: 20,
     },
+    stopDistanceLimits: {
+      minPct: 0.0025,
+      maxPct: 0.2,
+      minAbs: 0.05,
+    },
   },
   invalidation: {
     maThreshold: 1,
@@ -99,11 +104,46 @@
       moderate: 0.01,
       high: 0.015,
     },
+    sizing: {
+      riskPercentByTolerance: {
+        low: 0.5,
+        moderate: 1,
+        high: 2,
+      },
+      maxPositionPctByTolerance: {
+        low: 0.1,
+        moderate: 0.15,
+        high: 0.25,
+      },
+    },
     percentLimits: {
       min: 0.1,
       max: 5,
       fallback: 1,
     },
+  },
+  broker: {
+    allowFractional: false,
+    fractionalPrecision: 2,
+  },
+  portfolio: {
+    sectorExposureCap: {
+      low: 0.2,
+      moderate: 0.25,
+      high: 0.3,
+    },
+    correlationBucketCap: {
+      low: 0.2,
+      moderate: 0.25,
+      high: 0.3,
+    },
+    maxOpenPositionsByHorizon: {
+      scalp: 3,
+      swing: 5,
+      position: 7,
+    },
+    megaCapTechSymbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"],
+    openPositions: [],
   },
   backtest: {
     minCandles: 15,

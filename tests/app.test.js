@@ -1988,6 +1988,8 @@ const tests = [
       const prices = [10, 10, 10, 10, 9.9, 10, 10, 10, 10, 10, 10];
       const plan = calculateTradePlan({
         action: "buy",
+        symbol: "TEST",
+        sector: "Technology",
         entryPrice: 10,
         priceLabel: "Last close",
         priceAsOf: null,
@@ -1997,7 +1999,8 @@ const tests = [
         positionSizingMode: "risk_percent",
         riskPercent: 5,
       });
-      assert.strictEqual(plan.riskAmount, 50);
+      assert.strictEqual(plan.riskBudget, 50);
+      assert.ok(plan.riskAmount <= plan.riskBudget);
       assert.strictEqual(plan.positionSize, 100);
       assert.ok(plan.stopDistance > 0);
     },
@@ -2008,6 +2011,8 @@ const tests = [
       const prices = Array.from({ length: 12 }, () => 100);
       const plan = calculateTradePlan({
         action: "sell",
+        symbol: "TEST",
+        sector: "Technology",
         entryPrice: 100,
         priceLabel: "Last close",
         priceAsOf: null,
@@ -2017,9 +2022,98 @@ const tests = [
         positionSizingMode: "risk_percent",
         riskPercent: 1,
       });
-      assert.strictEqual(plan.riskAmount, 100);
+      assert.strictEqual(plan.riskBudget, 100);
+      assert.ok(plan.riskAmount <= plan.riskBudget);
       assert.strictEqual(plan.positionSize, 33);
       assert.ok(plan.stopDistance > 0);
+    },
+  },
+  {
+    name: "sizes positions from auto risk percent by tolerance",
+    fn: async () => {
+      const prices = Array.from({ length: 12 }, () => 100);
+      const plan = calculateTradePlan({
+        action: "buy",
+        symbol: "AUTO",
+        sector: "Technology",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 10000,
+        risk: "high",
+        positionSizingMode: "risk_auto",
+        atrLike: 2,
+      });
+      assert.strictEqual(plan.riskBudget, 200);
+      assert.strictEqual(plan.positionSize, 83);
+    },
+  },
+  {
+    name: "caps positions by max position percent",
+    fn: async () => {
+      const prices = Array.from({ length: 12 }, () => 100);
+      const plan = calculateTradePlan({
+        action: "buy",
+        symbol: "CAP",
+        sector: "Technology",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 10000,
+        risk: "moderate",
+        positionSizingMode: "max_position_cap",
+        atrLike: 2,
+      });
+      assert.strictEqual(plan.positionSize, 15);
+    },
+  },
+  {
+    name: "applies sector exposure caps from portfolio",
+    fn: async () => {
+      const prices = Array.from({ length: 12 }, () => 100);
+      const plan = calculateTradePlan({
+        action: "buy",
+        symbol: "SECTOR",
+        sector: "Technology",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 10000,
+        risk: "moderate",
+        positionSizingMode: "risk_auto",
+        atrLike: 2,
+        portfolioPositions: [
+          { symbol: "EXIST", sector: "Technology", notional: 2400, horizon: "swing" },
+        ],
+      });
+      assert.strictEqual(plan.positionSize, 7);
+      assert.ok(plan.sizingWarnings.length === 0);
+      assert.ok(plan.sizingNotes.some((note) => note.includes("portfolio")));
+    },
+  },
+  {
+    name: "supports fractional shares when broker allows",
+    fn: async () => {
+      const prices = Array.from({ length: 12 }, () => 100);
+      const plan = calculateTradePlan({
+        action: "buy",
+        symbol: "FRAC",
+        sector: "Technology",
+        entryPrice: 100,
+        priceLabel: "Last close",
+        priceAsOf: null,
+        prices,
+        cash: 10000,
+        risk: "moderate",
+        positionSizingMode: "risk_percent",
+        riskPercent: 1,
+        atrLike: 2.5,
+        broker: { allowFractional: true, fractionalPrecision: 2 },
+      });
+      assert.strictEqual(plan.positionSize, 33.33);
     },
   },
   {
