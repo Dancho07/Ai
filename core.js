@@ -74,10 +74,13 @@ const planStopLoss = isBrowser ? document.getElementById("plan-stop-loss") : nul
 const planTakeProfitRow = isBrowser ? document.getElementById("plan-take-profit-row") : null;
 const planTakeProfit = isBrowser ? document.getElementById("plan-take-profit") : null;
 const planPosition = isBrowser ? document.getElementById("plan-position") : null;
+const planNotional = isBrowser ? document.getElementById("plan-notional") : null;
 const planRiskAmount = isBrowser ? document.getElementById("plan-risk-amount") : null;
 const planStopDistance = isBrowser ? document.getElementById("plan-stop-distance") : null;
 const planRiskRewardRow = isBrowser ? document.getElementById("plan-risk-reward-row") : null;
 const planRiskReward = isBrowser ? document.getElementById("plan-risk-reward") : null;
+const planSizingReasons = isBrowser ? document.getElementById("plan-sizing-reasons") : null;
+const planSizingWarnings = isBrowser ? document.getElementById("plan-sizing-warnings") : null;
 const planHoldLevels = isBrowser ? document.getElementById("plan-hold-levels") : null;
 const planHoldNote = isBrowser ? document.getElementById("plan-hold-note") : null;
 const planHoldBreakout = isBrowser ? document.getElementById("plan-hold-breakout") : null;
@@ -173,12 +176,51 @@ const FAVORITES_STORAGE_KEY = "favorites_v1";
 const BACKTEST_CACHE_PREFIX = "backtest30d_v1";
 const POSITION_SIZING_MODES = {
   CASH: "cash",
+  RISK_AUTO: "risk_auto",
+  ATR_STOP: "atr_stop",
+  MAX_POSITION_CAP: "max_position_cap",
   RISK_PERCENT: "risk_percent",
 };
+const PORTFOLIO_POSITIONS_KEY = "portfolio_positions_v1";
 const RISK_PERCENT_LIMITS = SIGNAL_CONFIG.risk?.percentLimits ?? {
   min: 0.1,
   max: 5,
   fallback: 1,
+};
+const RISK_SIZING_PROFILES = SIGNAL_CONFIG.risk?.sizing ?? {
+  riskPercentByTolerance: {
+    low: 0.5,
+    moderate: 1,
+    high: 2,
+  },
+  maxPositionPctByTolerance: {
+    low: 0.1,
+    moderate: 0.15,
+    high: 0.25,
+  },
+};
+const PORTFOLIO_CONSTRAINTS = SIGNAL_CONFIG.portfolio ?? {
+  sectorExposureCap: {
+    low: 0.2,
+    moderate: 0.25,
+    high: 0.3,
+  },
+  correlationBucketCap: {
+    low: 0.2,
+    moderate: 0.25,
+    high: 0.3,
+  },
+  maxOpenPositionsByHorizon: {
+    scalp: 3,
+    swing: 5,
+    position: 7,
+  },
+  megaCapTechSymbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"],
+  openPositions: [],
+};
+const BROKER_DEFAULTS = SIGNAL_CONFIG.broker ?? {
+  allowFractional: false,
+  fractionalPrecision: 2,
 };
 
 const ENTRY_RANGE_PCT = SIGNAL_CONFIG.tradePlan?.entryRangePct ?? 0.003;
@@ -748,16 +790,23 @@ function createFavoritesStore({ storage }) {
   return store;
 }
 
+function normalizePositionSizingMode(mode) {
+  if (Object.values(POSITION_SIZING_MODES).includes(mode)) {
+    return mode;
+  }
+  return POSITION_SIZING_MODES.CASH;
+}
+
 function persistFormState(storage, { symbol, cash, risk, positionSizing, riskPercent }) {
   if (!storage?.setItem) {
     return;
   }
+  const normalizedSizing = normalizePositionSizingMode(positionSizing);
   const payload = {
     symbol: normalizeSymbolInput(symbol ?? ""),
     cash: typeof cash === "string" ? cash : cash?.toString?.() ?? "",
     risk: Object.keys(riskLimits).includes(risk) ? risk : "moderate",
-    positionSizing:
-      positionSizing === POSITION_SIZING_MODES.RISK_PERCENT ? POSITION_SIZING_MODES.RISK_PERCENT : POSITION_SIZING_MODES.CASH,
+    positionSizing: normalizedSizing,
     riskPercent: typeof riskPercent === "string" ? riskPercent : riskPercent?.toString?.() ?? "",
   };
   storage.setItem(FORM_STATE_KEY, JSON.stringify(payload));
@@ -777,10 +826,7 @@ function loadPersistedFormState(storage) {
       symbol: normalizeSymbolInput(parsed.symbol ?? ""),
       cash: parsed.cash ?? "",
       risk: Object.keys(riskLimits).includes(parsed.risk) ? parsed.risk : "moderate",
-      positionSizing:
-        parsed.positionSizing === POSITION_SIZING_MODES.RISK_PERCENT
-          ? POSITION_SIZING_MODES.RISK_PERCENT
-          : POSITION_SIZING_MODES.CASH,
+      positionSizing: normalizePositionSizingMode(parsed.positionSizing),
       riskPercent: parsed.riskPercent ?? "",
     };
   } catch (error) {
@@ -3679,8 +3725,168 @@ function calculateSignalConfidence({
   };
 }
 
+function getRiskPercentByTolerance(risk) {
+  return (
+    RISK_SIZING_PROFILES.riskPercentByTolerance?.[risk] ??
+    RISK_SIZING_PROFILES.riskPercentByTolerance?.moderate ??
+    1
+  );
+}
+
+function getMaxPositionPctByTolerance(risk) {
+  return (
+    RISK_SIZING_PROFILES.maxPositionPctByTolerance?.[risk] ??
+    RISK_SIZING_PROFILES.maxPositionPctByTolerance?.moderate ??
+    0.15
+  );
+}
+
+function getHorizonKey(timeHorizon) {
+  const label = timeHorizon?.shortLabel?.toLowerCase?.() ?? "";
+  if (label.includes("scalp")) {
+    return "scalp";
+  }
+  if (label.includes("position")) {
+    return "position";
+  }
+  return "swing";
+}
+
+function resolveCorrelationBucket({ symbol, sector }) {
+  const normalizedSymbol = symbol?.toUpperCase?.() ?? "";
+  if (PORTFOLIO_CONSTRAINTS.megaCapTechSymbols?.includes?.(normalizedSymbol)) {
+    return "mega_cap_tech";
+  }
+  if (sector) {
+    return `sector:${sector}`;
+  }
+  return "unknown";
+}
+
+function loadPortfolioPositions(storage = storageAdapter) {
+  const stored = storage?.get?.(PORTFOLIO_POSITIONS_KEY);
+  if (!Array.isArray(stored)) {
+    return Array.isArray(PORTFOLIO_CONSTRAINTS.openPositions) ? PORTFOLIO_CONSTRAINTS.openPositions : [];
+  }
+  return stored;
+}
+
+function normalizePortfolioPositions(positions = []) {
+  return positions
+    .filter((position) => position && typeof position === "object")
+    .map((position) => {
+      const sector = position.sector ?? "Unknown";
+      const symbol = position.symbol ?? "";
+      const notional = Number.isFinite(position.notional) ? position.notional : 0;
+      const horizon = position.horizon ?? null;
+      return {
+        ...position,
+        symbol,
+        sector,
+        notional,
+        horizon,
+        bucket: position.bucket ?? resolveCorrelationBucket({ symbol, sector }),
+      };
+    });
+}
+
+function normalizeShareSize(size, { allowFractional, precision }) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return 0;
+  }
+  if (!allowFractional) {
+    return Math.floor(size);
+  }
+  const safePrecision = Number.isFinite(precision) ? Math.max(0, Math.min(6, precision)) : 2;
+  const factor = 10 ** safePrecision;
+  return Math.floor(size * factor) / factor;
+}
+
+function formatShareDisplay(size, { allowFractional, precision }) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 shares";
+  }
+  if (!allowFractional || Number.isInteger(size)) {
+    return `${Math.floor(size)} shares`;
+  }
+  const safePrecision = Number.isFinite(precision) ? Math.max(0, Math.min(6, precision)) : 2;
+  return `${size.toFixed(safePrecision)} shares`;
+}
+
+function applyPortfolioConstraints({
+  proposedShares,
+  entryPrice,
+  cash,
+  risk,
+  sector,
+  symbol,
+  timeHorizon,
+  portfolioPositions,
+}) {
+  const warnings = [];
+  const notes = [];
+  const positions = normalizePortfolioPositions(portfolioPositions);
+  if (!positions.length) {
+    return { shares: proposedShares, notes, warnings, bucket: resolveCorrelationBucket({ symbol, sector }) };
+  }
+  const accountValue = cash + positions.reduce((sum, position) => sum + (position.notional ?? 0), 0);
+  const bucket = resolveCorrelationBucket({ symbol, sector });
+  const horizonKey = getHorizonKey(timeHorizon);
+  const maxPositions =
+    PORTFOLIO_CONSTRAINTS.maxOpenPositionsByHorizon?.[horizonKey] ??
+    PORTFOLIO_CONSTRAINTS.maxOpenPositionsByHorizon?.swing ??
+    5;
+
+  if (positions.filter((position) => (position.horizon ?? horizonKey) === horizonKey).length >= maxPositions) {
+    warnings.push(`Max ${horizonKey} positions reached (${maxPositions}).`);
+    return { shares: 0, notes, warnings, bucket };
+  }
+
+  let adjustedShares = proposedShares;
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return { shares: 0, notes, warnings, bucket };
+  }
+
+  const sectorCap =
+    PORTFOLIO_CONSTRAINTS.sectorExposureCap?.[risk] ??
+    PORTFOLIO_CONSTRAINTS.sectorExposureCap?.moderate ??
+    0.25;
+  const currentSectorNotional = positions
+    .filter((position) => position.sector === sector)
+    .reduce((sum, position) => sum + (position.notional ?? 0), 0);
+  const sectorAllowance = sectorCap * accountValue - currentSectorNotional;
+  if (sectorAllowance <= 0) {
+    warnings.push(`Sector exposure cap reached for ${sector}.`);
+    return { shares: 0, notes, warnings, bucket };
+  }
+
+  const correlationCap =
+    PORTFOLIO_CONSTRAINTS.correlationBucketCap?.[risk] ??
+    PORTFOLIO_CONSTRAINTS.correlationBucketCap?.moderate ??
+    0.25;
+  const currentBucketNotional = positions
+    .filter((position) => position.bucket === bucket)
+    .reduce((sum, position) => sum + (position.notional ?? 0), 0);
+  const bucketAllowance = correlationCap * accountValue - currentBucketNotional;
+  if (bucketAllowance <= 0) {
+    warnings.push("Correlation bucket cap reached.");
+    return { shares: 0, notes, warnings, bucket };
+  }
+
+  const notional = adjustedShares * entryPrice;
+  const maxNotional = Math.min(sectorAllowance, bucketAllowance);
+  if (notional > maxNotional) {
+    adjustedShares = maxNotional / entryPrice;
+    notes.push("Position trimmed to portfolio exposure caps.");
+  }
+
+  return { shares: adjustedShares, notes, warnings, bucket };
+}
+
 function calculateTradePlan({
   action,
+  symbol,
+  sector,
   entryPrice,
   priceLabel,
   priceAsOf,
@@ -3690,6 +3896,9 @@ function calculateTradePlan({
   positionSizingMode,
   riskPercent,
   atrLike,
+  portfolioPositions,
+  timeHorizon,
+  broker,
 }) {
   const entryMeta = priceLabel
     ? `Based on ${priceLabel}${priceAsOf ? ` (${formatAsOf(priceAsOf, { tz: "UTC" })})` : ""}`
@@ -3712,14 +3921,21 @@ function calculateTradePlan({
       stopLossDisplay: "",
       takeProfitDisplay: "",
       positionSizeDisplay: "No position recommended",
+      notionalDisplay: "—",
       riskAmountDisplay: "—",
       stopDistanceDisplay: "—",
       riskRewardDisplay: "",
       positionSize: 0,
+      notional: 0,
       riskAmount: 0,
+      riskBudget: 0,
       stopDistance: 0,
       isHold: true,
       holdNotice: "No position recommended",
+      sizingNotes: [],
+      sizingWarnings: [],
+      sizingMode: normalizePositionSizingMode(positionSizingMode),
+      riskPercentUsed: getRiskPercentByTolerance(risk),
       holdLevels: {
         breakoutLevel,
         breakdownLevel,
@@ -3742,14 +3958,21 @@ function calculateTradePlan({
       stopLossDisplay: "Not available",
       takeProfitDisplay: "Not available",
       positionSizeDisplay: "0 shares",
+      notionalDisplay: "Not available",
       riskAmountDisplay: "Not available",
       stopDistanceDisplay: "Not available",
       riskRewardDisplay: "Not available",
       positionSize: 0,
+      notional: 0,
       riskAmount: 0,
+      riskBudget: 0,
       stopDistance: 0,
       isHold: false,
       holdLevels: null,
+      sizingNotes: [],
+      sizingWarnings: [],
+      sizingMode: normalizePositionSizingMode(positionSizingMode),
+      riskPercentUsed: getRiskPercentByTolerance(risk),
       entryRangeLow: null,
       entryRangeHigh: null,
       atrValue: null,
@@ -3802,24 +4025,103 @@ function calculateTradePlan({
           : resolvedEntryPrice;
   }
 
-  const riskPerShare = stopLoss != null ? Math.abs(resolvedEntryPrice - stopLoss) : null;
-  const safePositionSizing =
-    positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
-      ? POSITION_SIZING_MODES.RISK_PERCENT
-      : POSITION_SIZING_MODES.CASH;
+  const rawStopDistance = stopLoss != null ? Math.abs(resolvedEntryPrice - stopLoss) : null;
+  const stopDistanceLimits = SIGNAL_CONFIG.tradePlan?.stopDistanceLimits ?? {
+    minPct: 0.0025,
+    maxPct: 0.2,
+    minAbs: 0.05,
+  };
+  const minStopDistance = Math.max(stopDistanceLimits.minAbs ?? 0, (stopDistanceLimits.minPct ?? 0) * resolvedEntryPrice);
+  const maxStopDistance =
+    stopDistanceLimits.maxPct != null ? stopDistanceLimits.maxPct * resolvedEntryPrice : null;
+  const sizingWarnings = [];
+  let sizingStopDistance = rawStopDistance ?? 0;
+  if (rawStopDistance && rawStopDistance > 0) {
+    if (minStopDistance && rawStopDistance < minStopDistance) {
+      sizingStopDistance = minStopDistance;
+      sizingWarnings.push("Stop distance was very tight; sizing uses a safer minimum distance.");
+    }
+    if (maxStopDistance && rawStopDistance > maxStopDistance) {
+      sizingWarnings.push("Stop distance is wide; size may be small to keep risk controlled.");
+    }
+  }
+
+  const safePositionSizing = normalizePositionSizingMode(positionSizingMode);
   const normalizedRiskPercent = Number.isFinite(riskPercent)
     ? clampNumber(riskPercent, RISK_PERCENT_LIMITS.min, RISK_PERCENT_LIMITS.max)
     : RISK_PERCENT_LIMITS.fallback;
-  const riskBudget =
-    safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT
-      ? cash * (normalizedRiskPercent / 100)
-      : cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
-  const maxShares = Math.max(Math.floor(cash / resolvedEntryPrice), 0);
-  const positionSize =
-    riskPerShare && riskPerShare > 0
-      ? Math.min(Math.floor(riskBudget / riskPerShare), maxShares)
-      : 0;
-  const stopDistance = riskPerShare && riskPerShare > 0 ? riskPerShare : 0;
+  const riskPercentByTolerance = getRiskPercentByTolerance(risk);
+  const brokerConfig = broker ?? BROKER_DEFAULTS;
+  const allowFractional = brokerConfig.allowFractional ?? false;
+  const fractionalPrecision = brokerConfig.fractionalPrecision ?? 2;
+
+  let riskBudget = cash * (riskPerTrade[risk] ?? riskPerTrade.moderate);
+  let sizingDistance = sizingStopDistance;
+  const sizingNotes = [];
+
+  if (safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT) {
+    riskBudget = cash * (normalizedRiskPercent / 100);
+    sizingNotes.push(`Manual risk budget set to ${normalizedRiskPercent.toFixed(2)}% of account.`);
+  } else if (safePositionSizing === POSITION_SIZING_MODES.RISK_AUTO) {
+    riskBudget = cash * (riskPercentByTolerance / 100);
+    sizingNotes.push(`Risk budget set to ${riskPercentByTolerance}% based on ${risk} tolerance.`);
+  } else if (safePositionSizing === POSITION_SIZING_MODES.ATR_STOP) {
+    riskBudget = cash * (riskPercentByTolerance / 100);
+    const atrStopDistance = atrValue * (SIGNAL_CONFIG.tradePlan?.atrStopMultiplier ?? 1.2);
+    if (atrStopDistance > 0) {
+      sizingDistance = atrStopDistance;
+      sizingNotes.push("ATR stop distance used for sizing.");
+    }
+    sizingNotes.push(`Risk budget set to ${riskPercentByTolerance}% based on ${risk} tolerance.`);
+  } else if (safePositionSizing === POSITION_SIZING_MODES.MAX_POSITION_CAP) {
+    riskBudget = cash * (riskPercentByTolerance / 100);
+    sizingNotes.push(`Risk budget set to ${riskPercentByTolerance}% based on ${risk} tolerance.`);
+  } else {
+    sizingNotes.push(`Risk budget set to ${(riskPerTrade[risk] ?? riskPerTrade.moderate) * 100}% of account.`);
+  }
+
+  const maxSharesByCash = Math.max(cash / resolvedEntryPrice, 0);
+  let positionSize = 0;
+  if (safePositionSizing === POSITION_SIZING_MODES.MAX_POSITION_CAP) {
+    const maxPositionPct = getMaxPositionPctByTolerance(risk);
+    const maxNotional = cash * maxPositionPct;
+    const maxSharesByCap = maxNotional / resolvedEntryPrice;
+    sizingNotes.push(`Max position cap set to ${(maxPositionPct * 100).toFixed(0)}% of account.`);
+    const riskBasedShares =
+      sizingDistance && sizingDistance > 0 ? riskBudget / sizingDistance : 0;
+    positionSize = Math.min(maxSharesByCap, riskBasedShares, maxSharesByCash);
+  } else if (sizingDistance && sizingDistance > 0) {
+    positionSize = Math.min(riskBudget / sizingDistance, maxSharesByCash);
+  }
+
+  if (!allowFractional) {
+    positionSize = Math.floor(positionSize);
+  }
+
+  const portfolioResult = applyPortfolioConstraints({
+    proposedShares: positionSize,
+    entryPrice: resolvedEntryPrice,
+    cash,
+    risk,
+    sector,
+    symbol,
+    timeHorizon,
+    portfolioPositions: portfolioPositions ?? loadPortfolioPositions(),
+  });
+  if (portfolioResult.notes.length) {
+    sizingNotes.push(...portfolioResult.notes);
+  }
+  if (portfolioResult.warnings.length) {
+    sizingWarnings.push(...portfolioResult.warnings);
+  }
+  const constrainedShares = normalizeShareSize(portfolioResult.shares, {
+    allowFractional,
+    precision: fractionalPrecision,
+  });
+
+  const stopDistance = rawStopDistance && rawStopDistance > 0 ? rawStopDistance : 0;
+  const notional = constrainedShares * resolvedEntryPrice;
+  const riskAtStop = stopDistance ? constrainedShares * stopDistance : 0;
 
   let takeProfit = null;
   let riskReward = null;
@@ -3839,16 +4141,27 @@ function calculateTradePlan({
     entryMeta,
     stopLossDisplay: quoteFormatter.format(stopLoss),
     takeProfitDisplay: takeProfit != null ? quoteFormatter.format(takeProfit) : quoteFormatter.format(stopLoss),
-    positionSizeDisplay: positionSize > 0 ? `${positionSize} shares` : "0 shares",
-    riskAmountDisplay: quoteFormatter.format(riskBudget),
+    positionSizeDisplay: formatShareDisplay(constrainedShares, {
+      allowFractional,
+      precision: fractionalPrecision,
+    }),
+    notionalDisplay: notional ? quoteFormatter.format(notional) : quoteFormatter.format(0),
+    riskAmountDisplay: quoteFormatter.format(riskAtStop),
     stopDistanceDisplay: stopDistance ? quoteFormatter.format(stopDistance) : "Not available",
     riskRewardDisplay: riskReward != null ? `${riskReward.toFixed(2)}:1` : "1.00:1",
-    positionSize,
-    riskAmount: riskBudget,
+    positionSize: constrainedShares,
+    notional,
+    riskAmount: riskAtStop,
+    riskBudget,
     stopDistance,
     stopLoss,
     takeProfit,
     riskReward,
+    sizingNotes,
+    sizingWarnings,
+    sizingMode: safePositionSizing,
+    riskPercentUsed:
+      safePositionSizing === POSITION_SIZING_MODES.RISK_PERCENT ? normalizedRiskPercent : riskPercentByTolerance,
     isHold: false,
     holdLevels: null,
     entryRangeLow,
@@ -3862,8 +4175,7 @@ function analyzeSymbol({ symbol, cash, riskTolerance, sizingMode, riskPercent, m
   const normalized = normalizeSymbolInput(symbol ?? "");
   const resolvedCash = Number.isFinite(cash) && cash > 0 ? cash : 10000;
   const resolvedRisk = Object.keys(riskLimits).includes(riskTolerance) ? riskTolerance : "moderate";
-  const resolvedSizingMode =
-    sizingMode === POSITION_SIZING_MODES.RISK_PERCENT ? POSITION_SIZING_MODES.RISK_PERCENT : POSITION_SIZING_MODES.CASH;
+  const resolvedSizingMode = normalizePositionSizingMode(sizingMode);
   const resolvedRiskPercent = Number.isFinite(riskPercent) ? riskPercent : null;
   return analyzeTrade({
     symbol: normalized,
@@ -3909,6 +4221,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const priceContext = resolvePriceContext(marketEntry);
   const recent = priceContext.price ?? indicatorSnapshot?.recent ?? null;
   const indicators = strategyComputeIndicators ? strategyComputeIndicators(prices) : null;
+  const atrLike = indicatorSnapshot?.atrLike ?? calculateAtrLike(prices);
+  const timeHorizon = calculateTimeHorizon(prices, atrLike);
   const scoredSignal = strategyScoreMultiTimeframe
     ? strategyScoreMultiTimeframe(prices, { price: recent })
     : strategyScoreSignal
@@ -3923,6 +4237,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   if (!recent) {
     const tradePlan = calculateTradePlan({
       action: "hold",
+      symbol,
+      sector: marketEntry?.sector ?? "Unknown",
       entryPrice: null,
       priceLabel: priceContext.label,
       priceAsOf: priceContext.asOf,
@@ -3931,6 +4247,9 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       risk,
       positionSizingMode,
       riskPercent,
+      portfolioPositions: loadPortfolioPositions(),
+      timeHorizon,
+      broker: BROKER_DEFAULTS,
     });
     const signalScore = calculateSignalScore({ prices });
     const confidence = calculateSignalConfidence({ prices });
@@ -3939,7 +4258,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     const tradePlanDetails = buildTradePlanDetails({
       action: "hold",
       tradePlan,
-      timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
+      timeHorizon,
       invalidationRules: buildInvalidationRules({
         action: "hold",
         recent,
@@ -3976,7 +4295,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
       tradePlanDetails,
       signalReasons: reasons,
       invalidationRules: tradePlanDetails.invalidation,
-      timeHorizon: calculateTimeHorizon(prices, indicatorSnapshot?.atrLike ?? null),
+      timeHorizon,
       backtest: backtestSummary,
       disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
       generatedAt: new Date().toLocaleString(),
@@ -3996,7 +4315,6 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     thesis = scoredSignal.reasons.slice(0, 2);
   }
 
-  const atrLike = indicatorSnapshot?.atrLike ?? calculateAtrLike(prices);
   const atrPercent = atrLike ? (atrLike / recent) * 100 : null;
   const confidence = calculateSignalConfidence({
     prices,
@@ -4006,6 +4324,8 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   });
   const tradePlan = calculateTradePlan({
     action,
+    symbol,
+    sector: marketEntry?.sector ?? "Unknown",
     entryPrice: recent,
     priceLabel: priceContext.label,
     priceAsOf: priceContext.asOf,
@@ -4015,6 +4335,9 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     positionSizingMode,
     riskPercent,
     atrLike,
+    portfolioPositions: loadPortfolioPositions(),
+    timeHorizon,
+    broker: BROKER_DEFAULTS,
   });
   const signalScore = calculateSignalScore({
     prices,
@@ -4038,7 +4361,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
   const tradePlanDetails = buildTradePlanDetails({
     action,
     tradePlan,
-    timeHorizon: calculateTimeHorizon(prices, atrLike),
+    timeHorizon,
     invalidationRules,
     confidenceBreakdown,
     dataSnapshot: {
@@ -4071,7 +4394,7 @@ function analyzeTrade({ symbol, cash, risk, positionSizingMode, riskPercent }) {
     tradePlanDetails,
     signalReasons: reasons,
     invalidationRules,
-    timeHorizon: calculateTimeHorizon(prices, atrLike),
+    timeHorizon,
     backtest: backtestSummary,
     disclaimer: "Educational demo only — not financial advice. Always validate with professional guidance.",
     generatedAt: new Date().toLocaleString(),
@@ -4283,7 +4606,7 @@ function renderResult(result) {
   }
   resultShares.textContent = result.tradePlan.isHold
     ? "No position recommended"
-    : `${result.shares} shares`;
+    : result.tradePlan.positionSizeDisplay;
   updateResultLivePriceDisplay(result.symbol);
   resultPrice.textContent = result.estimatedPrice
     ? `Estimated price: ${quoteFormatter.format(result.estimatedPrice)}`
@@ -4345,6 +4668,9 @@ function renderResult(result) {
   if (planPosition) {
     planPosition.textContent = result.tradePlan.positionSizeDisplay;
   }
+  if (planNotional) {
+    planNotional.textContent = result.tradePlan.notionalDisplay ?? "—";
+  }
   if (planRiskAmount) {
     planRiskAmount.textContent = result.tradePlan.riskAmountDisplay;
   }
@@ -4353,6 +4679,17 @@ function renderResult(result) {
   }
   if (planRiskReward) {
     planRiskReward.textContent = result.tradePlan.riskRewardDisplay;
+  }
+  if (planSizingReasons) {
+    const notes = Array.isArray(result.tradePlan.sizingNotes) ? result.tradePlan.sizingNotes : [];
+    const fallback = ["Sizing aligned to risk tolerance and current stop distance."];
+    const lines = notes.length ? notes : fallback;
+    planSizingReasons.innerHTML = lines.map((line) => `<li>${line}</li>`).join("");
+  }
+  if (planSizingWarnings) {
+    const warnings = Array.isArray(result.tradePlan.sizingWarnings) ? result.tradePlan.sizingWarnings : [];
+    planSizingWarnings.innerHTML = warnings.map((line) => `<li>${line}</li>`).join("");
+    planSizingWarnings.classList.toggle("hidden", warnings.length === 0);
   }
   const isHold = result.tradePlan.isHold;
   if (planStopLossRow) {
@@ -7236,10 +7573,7 @@ function initTradePage() {
       if (!Object.keys(riskLimits).includes(risk)) {
         validationErrors.push("Risk tolerance must be low, moderate, or high.");
       }
-      const safePositionSizing =
-        positionSizingMode === POSITION_SIZING_MODES.RISK_PERCENT
-          ? POSITION_SIZING_MODES.RISK_PERCENT
-          : POSITION_SIZING_MODES.CASH;
+      const safePositionSizing = normalizePositionSizingMode(positionSizingMode);
       const riskPercentMessage = getRiskPercentValidationMessage(safePositionSizing, riskPercentRaw);
       setRiskPercentError(riskPercentMessage);
       if (riskPercentMessage) {

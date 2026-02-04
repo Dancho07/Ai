@@ -1265,6 +1265,33 @@ td[data-col="actions"] {
   color: #6c728d;
 }
 
+.plan-notes {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e1e5ff;
+  display: grid;
+  gap: 8px;
+}
+
+.plan-notes h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #30344a;
+}
+
+.plan-notes ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #30344a;
+  font-size: 0.88rem;
+}
+
+.plan-warnings {
+  color: #b54141;
+}
+
 .hold-levels {
   margin-top: 16px;
   padding-top: 12px;
