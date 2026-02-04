@@ -3641,6 +3641,15 @@ const tests = [
     },
   },
   {
+    name: "market table terminal styles enforce dark header and action column backgrounds",
+    fn: async () => {
+      const css = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+      assert.match(css, /\.terminal-ui th\s*{[^}]*background:\s*rgba\(/);
+      assert.match(css, /\.terminal-ui td\[data-col="actions"\][^{]*{[^}]*background:/);
+      assert.match(css, /table\s*{[^}]*min-width:\s*1600px/);
+    },
+  },
+  {
     name: "trade page init is a no-op without a browser DOM",
     fn: async () => {
       assert.strictEqual(initTradePage(), false);
