@@ -10,6 +10,7 @@ const {
   createStorageAdapter,
   createWatchlistStore,
   createFavoritesStore,
+  createSavedViewsStore,
   deriveMarketSession,
   computeUsMarketSession,
   parseEpoch,
@@ -2659,7 +2660,7 @@ const tests = [
     },
   },
   {
-    name: "watchlist store never persists an empty list",
+    name: "watchlist store allows empty active lists",
     fn: async () => {
       const backing = createStorage();
       const storage = createStorageAdapter(backing);
@@ -2667,7 +2668,7 @@ const tests = [
       store.removeSymbol("AAPL");
       store.removeSymbol("MSFT");
       const reloaded = createWatchlistStore({ storage, defaultSymbols: ["AAPL", "MSFT"] });
-      assert.deepStrictEqual(reloaded.getWatchlist(), ["AAPL", "MSFT"]);
+      assert.deepStrictEqual(reloaded.getWatchlist(), []);
     },
   },
   {
@@ -2748,6 +2749,68 @@ const tests = [
       first.addSymbol("TSLA");
       const second = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
       assert.ok(second.getWatchlist().includes("TSLA"));
+    },
+  },
+  {
+    name: "watchlist store persists multiple watchlists",
+    fn: async () => {
+      const storage = createStorageAdapter(createStorage());
+      const store = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      const created = store.addWatchlist("Momentum");
+      assert.strictEqual(created.created, true);
+      const momentumId = created.entry.id;
+      store.addSymbol("TSLA");
+      store.setActiveWatchlist("default");
+      store.addSymbol("MSFT");
+      const reloaded = createWatchlistStore({ storage, defaultSymbols: ["AAPL"] });
+      const lists = reloaded.getWatchlists();
+      assert.strictEqual(lists.length, 2);
+      reloaded.setActiveWatchlist(momentumId);
+      assert.ok(reloaded.getWatchlist().includes("TSLA"));
+    },
+  },
+  {
+    name: "saved views persist filter state",
+    fn: async () => {
+      const storage = createStorageAdapter(createStorage());
+      const store = createSavedViewsStore({
+        storage,
+        defaultState: {
+          search: "",
+          sector: "all",
+          cap: "all",
+          signal: "all",
+          min: "",
+          max: "",
+          minMonth: "",
+          favoritesOnly: false,
+          sortBy: "signal",
+        },
+      });
+      store.saveView("Momentum", {
+        search: "TSLA",
+        sector: "Technology",
+        cap: "Large",
+        signal: "buy",
+        min: 10,
+        max: 500,
+        minMonth: 5,
+        favoritesOnly: true,
+        sortBy: "change1d",
+      });
+      const reloaded = createSavedViewsStore({ storage });
+      const saved = reloaded.getViews().find((view) => view.name === "Momentum");
+      assert.deepStrictEqual(saved.state, {
+        search: "TSLA",
+        sector: "Technology",
+        cap: "Large",
+        signal: "buy",
+        min: 10,
+        max: 500,
+        minMonth: 5,
+        favoritesOnly: true,
+        sortBy: "change1d",
+      });
     },
   },
   {
