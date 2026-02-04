@@ -119,6 +119,25 @@ const filterFavorites = isBrowser ? document.getElementById("filter-favorites") 
 const watchlistInput = isBrowser ? document.getElementById("watchlist-input") : null;
 const watchlistAddButton = isBrowser ? document.getElementById("watchlist-add-button") : null;
 const watchlistError = isBrowser ? document.getElementById("watchlist-error") : null;
+const watchlistSelect = isBrowser ? document.getElementById("watchlist-select") : null;
+const watchlistCreateInput = isBrowser ? document.getElementById("watchlist-name") : null;
+const watchlistCreateButton = isBrowser ? document.getElementById("watchlist-create") : null;
+const watchlistDeleteButton = isBrowser ? document.getElementById("watchlist-delete") : null;
+const savedViewSelect = isBrowser ? document.getElementById("saved-view-select") : null;
+const savedViewNameInput = isBrowser ? document.getElementById("saved-view-name") : null;
+const savedViewSaveButton = isBrowser ? document.getElementById("saved-view-save") : null;
+const savedViewDeleteButton = isBrowser ? document.getElementById("saved-view-delete") : null;
+const degradedBanner = isBrowser ? document.getElementById("degraded-banner") : null;
+const degradedMessage = isBrowser ? document.getElementById("degraded-message") : null;
+const degradedRefresh = isBrowser ? document.getElementById("degraded-refresh") : null;
+const analysisPanel = isBrowser ? document.getElementById("analysis-panel") : null;
+const analysisSymbol = isBrowser ? document.getElementById("analysis-symbol") : null;
+const analysisCompany = isBrowser ? document.getElementById("analysis-company") : null;
+const analysisChart = isBrowser ? document.getElementById("analysis-chart") : null;
+const analysisPlan = isBrowser ? document.getElementById("analysis-plan") : null;
+const analysisProvenance = isBrowser ? document.getElementById("analysis-provenance") : null;
+const analysisPerformance = isBrowser ? document.getElementById("analysis-performance") : null;
+const analysisClose = isBrowser ? document.getElementById("analysis-close") : null;
 let sortBySelect = isBrowser ? document.getElementById("sort-by") : null;
 const opportunitiesToggle = isBrowser ? document.getElementById("opportunities-toggle") : null;
 const opportunitiesContent = isBrowser ? document.getElementById("opportunities-content") : null;
@@ -160,12 +179,15 @@ const MARKET_TABLE_COLUMNS = [
   { key: "signal" },
   { key: "horizon" },
   { key: "price", className: "num-cell" },
+  { key: "sparkline", className: "sparkline-cell" },
   { key: "perf", className: "performance-cell" },
   { key: "actions", className: "actions-cell" },
 ];
 
 const FORM_STATE_KEY = "trade_form_state_v1";
 const WATCHLIST_STORAGE_KEY = "watchlist_v1";
+const WATCHLISTS_STORAGE_KEY = "market_pulse_watchlists_v1";
+const SAVED_VIEWS_STORAGE_KEY = "market_pulse_saved_views_v1";
 const WATCHLIST_STORAGE_KEYS = [
   WATCHLIST_STORAGE_KEY,
   "watchlist",
@@ -253,11 +275,14 @@ const watchlistStore = createWatchlistStore({
   defaultSymbols: DEFAULT_WATCHLIST_SYMBOLS,
 });
 const favoritesStore = createFavoritesStore({ storage: storageAdapter });
+const savedViewsStore = createSavedViewsStore({ storage: storageAdapter });
 
 let marketState = [];
 let marketStateIndex = new Map();
 let activeWatchlistSymbols = new Set();
 const extraSymbolData = new Map();
+let activeAnalysisSymbol = null;
+let activeSavedViewId = "default";
 
 const quoteFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -388,6 +413,7 @@ let lastRefreshSummary = {
   totalCount: 0,
 };
 const lastQuoteRequestStatus = new Map();
+const rowFetchState = new Map();
 const indicatorCache = new Map();
 
 let refreshTimerId = null;
@@ -662,6 +688,49 @@ function sanitizeSymbolList(list) {
   return [...new Set(filtered)];
 }
 
+function normalizeWatchlistRecord(list, fallbackName) {
+  if (!list || typeof list !== "object") {
+    return null;
+  }
+  const rawName = typeof list.name === "string" ? list.name.trim() : "";
+  const name = rawName || fallbackName;
+  const id = typeof list.id === "string" && list.id ? list.id : createRequestId();
+  const symbols = sanitizeSymbolList(list.symbols ?? list.entries ?? list.list);
+  return { id, name, symbols };
+}
+
+function getStoredWatchlists({ storage = storageAdapter, defaultSymbols = DEFAULT_WATCHLIST_SYMBOLS } = {}) {
+  const fallbackSymbols = sanitizeSymbolList(defaultSymbols);
+  const stored = storage?.get?.(WATCHLISTS_STORAGE_KEY);
+  if (stored && typeof stored === "object" && Array.isArray(stored.lists)) {
+    const lists = stored.lists
+      .map((entry, index) => normalizeWatchlistRecord(entry, `Watchlist ${index + 1}`))
+      .filter(Boolean);
+    if (lists.length) {
+      const ids = new Set();
+      const deduped = lists.map((entry, index) => {
+        let nextId = entry.id;
+        while (ids.has(nextId)) {
+          nextId = `${entry.id}-${index + 1}`;
+        }
+        ids.add(nextId);
+        return { ...entry, id: nextId };
+      });
+      const activeId = deduped.some((entry) => entry.id === stored.activeId)
+        ? stored.activeId
+        : deduped[0].id;
+      return { lists: deduped, activeId, sourceKey: WATCHLISTS_STORAGE_KEY };
+    }
+  }
+  const legacy = getWatchlist({ storage, defaultSymbols: fallbackSymbols });
+  const defaultList = {
+    id: "default",
+    name: "Core",
+    symbols: legacy.symbols.length ? legacy.symbols : fallbackSymbols,
+  };
+  return { lists: [defaultList], activeId: defaultList.id, sourceKey: legacy.sourceKey };
+}
+
 function getWatchlist({ storage = storageAdapter, defaultSymbols = DEFAULT_WATCHLIST_SYMBOLS } = {}) {
   const fallback = sanitizeSymbolList(defaultSymbols);
   const keys = WATCHLIST_STORAGE_KEYS;
@@ -684,51 +753,145 @@ function createWatchlistStore({ storage, defaultSymbols }) {
     if (cached) {
       return cached;
     }
-    const loaded = getWatchlist({ storage, defaultSymbols: defaults });
-    cached = loaded.symbols.length ? loaded.symbols : defaults;
+    const loaded = getStoredWatchlists({ storage, defaultSymbols: defaults });
+    cached = loaded;
     sourceKey = loaded.sourceKey;
     return cached;
   };
 
   const persist = () => {
-    if (!cached || cached.length === 0) {
+    if (!cached) {
       return;
     }
-    storage?.set?.(WATCHLIST_STORAGE_KEY, cached);
+    storage?.set?.(WATCHLISTS_STORAGE_KEY, {
+      activeId: cached.activeId,
+      lists: cached.lists,
+    });
+    const active = cached.lists.find((entry) => entry.id === cached.activeId) ?? cached.lists[0];
+    if (active) {
+      storage?.set?.(WATCHLIST_STORAGE_KEY, active.symbols);
+    }
+  };
+
+  const updateActive = (nextActiveId) => {
+    const state = load();
+    const activeId = state.lists.some((entry) => entry.id === nextActiveId)
+      ? nextActiveId
+      : state.lists[0]?.id;
+    cached = { ...state, activeId };
+    persist();
+    return cached;
   };
 
   const store = {
-    getWatchlist: () => [...load()],
+    getWatchlist: () => {
+      const state = load();
+      const active = state.lists.find((entry) => entry.id === state.activeId) ?? state.lists[0];
+      return active ? [...active.symbols] : [];
+    },
+    getWatchlists: () => {
+      const state = load();
+      return state.lists.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        count: entry.symbols.length,
+      }));
+    },
+    getActiveWatchlist: () => {
+      const state = load();
+      return state.lists.find((entry) => entry.id === state.activeId) ?? state.lists[0] ?? null;
+    },
+    setActiveWatchlist: (watchlistId) => updateActive(watchlistId),
+    addWatchlist: (name) => {
+      const trimmed = typeof name === "string" ? name.trim() : "";
+      if (!trimmed) {
+        return { created: false, reason: "empty" };
+      }
+      const state = load();
+      if (state.lists.some((entry) => entry.name.toLowerCase() === trimmed.toLowerCase())) {
+        return { created: false, reason: "duplicate" };
+      }
+      const entry = { id: createRequestId(), name: trimmed, symbols: [] };
+      cached = { ...state, lists: [...state.lists, entry], activeId: entry.id };
+      persist();
+      return { created: true, entry };
+    },
+    removeWatchlist: (watchlistId) => {
+      const state = load();
+      if (state.lists.length <= 1) {
+        return { removed: false, reason: "minimum" };
+      }
+      const nextLists = state.lists.filter((entry) => entry.id !== watchlistId);
+      if (nextLists.length === state.lists.length) {
+        return { removed: false, reason: "missing" };
+      }
+      const nextActiveId =
+        state.activeId === watchlistId ? nextLists[0]?.id ?? null : state.activeId;
+      cached = { ...state, lists: nextLists, activeId: nextActiveId };
+      persist();
+      return { removed: true };
+    },
     addSymbol: (symbol) => {
       const normalized = normalizeWatchlistSymbol(symbol);
       if (!normalized || !isValidWatchlistSymbol(normalized)) {
         return { added: false, symbol: normalized, reason: "invalid" };
       }
-      const current = load();
-      if (current.includes(normalized)) {
+      const state = load();
+      const active = state.lists.find((entry) => entry.id === state.activeId) ?? state.lists[0];
+      if (!active) {
+        return { added: false, symbol: normalized, reason: "missing" };
+      }
+      if (active.symbols.includes(normalized)) {
         return { added: false, symbol: normalized, reason: "duplicate" };
       }
-      cached = [...current, normalized];
+      const next = {
+        ...active,
+        symbols: [...active.symbols, normalized],
+      };
+      cached = {
+        ...state,
+        lists: state.lists.map((entry) => (entry.id === next.id ? next : entry)),
+      };
       persist();
       return { added: true, symbol: normalized };
     },
     removeSymbol: (symbol) => {
       const normalized = normalizeWatchlistSymbol(symbol);
-      const current = load();
-      const next = current.filter((entry) => entry !== normalized);
-      if (next.length === current.length) {
+      const state = load();
+      const active = state.lists.find((entry) => entry.id === state.activeId) ?? state.lists[0];
+      if (!active) {
         return false;
       }
-      cached = next.length ? next : [...defaults];
+      const nextSymbols = active.symbols.filter((entry) => entry !== normalized);
+      if (nextSymbols.length === active.symbols.length) {
+        return false;
+      }
+      const next = { ...active, symbols: nextSymbols };
+      cached = {
+        ...state,
+        lists: state.lists.map((entry) => (entry.id === next.id ? next : entry)),
+      };
       persist();
       return true;
     },
     resetToDefault: () => {
-      cached = [...defaults];
+      cached = {
+        lists: [{ id: "default", name: "Core", symbols: [...defaults] }],
+        activeId: "default",
+      };
       persist();
-      return [...cached];
+      return [...defaults];
     },
-    getWatchlistMeta: () => ({ sourceKey, count: cached ? cached.length : 0 }),
+    getWatchlistMeta: () => {
+      const state = load();
+      const active = state.lists.find((entry) => entry.id === state.activeId) ?? state.lists[0];
+      return {
+        sourceKey,
+        count: active?.symbols.length ?? 0,
+        activeId: active?.id ?? null,
+        name: active?.name ?? "Core",
+      };
+    },
   };
 
   return store;
@@ -784,6 +947,108 @@ function createFavoritesStore({ storage }) {
       cached = next;
       persist();
       return true;
+    },
+  };
+
+  return store;
+}
+
+function normalizeSavedViewState(state = {}) {
+  return {
+    search: typeof state.search === "string" ? state.search : "",
+    sector: typeof state.sector === "string" ? state.sector : "all",
+    cap: typeof state.cap === "string" ? state.cap : "all",
+    signal: typeof state.signal === "string" ? state.signal : "all",
+    min: Number.isFinite(state.min) ? state.min : state.min === "" ? "" : Number(state.min) || "",
+    max: Number.isFinite(state.max) ? state.max : state.max === "" ? "" : Number(state.max) || "",
+    minMonth:
+      Number.isFinite(state.minMonth) ? state.minMonth : state.minMonth === "" ? "" : Number(state.minMonth) || "",
+    favoritesOnly: Boolean(state.favoritesOnly),
+    sortBy: typeof state.sortBy === "string" ? state.sortBy : DEFAULT_SORT_KEY,
+  };
+}
+
+function createSavedViewsStore({ storage, defaultState } = {}) {
+  let cached = null;
+  const baseState = normalizeSavedViewState(defaultState ?? {});
+  const defaultView = { id: "default", name: "Default", state: baseState };
+
+  const load = () => {
+    if (cached) {
+      return cached;
+    }
+    const stored = storage?.get?.(SAVED_VIEWS_STORAGE_KEY);
+    if (stored && Array.isArray(stored.views)) {
+      const views = stored.views
+        .map((view, index) => {
+          if (!view || typeof view !== "object") {
+            return null;
+          }
+          const name = typeof view.name === "string" ? view.name.trim() : "";
+          const id = typeof view.id === "string" && view.id ? view.id : `view-${index + 1}`;
+          if (!name) {
+            return null;
+          }
+          return { id, name, state: normalizeSavedViewState(view.state ?? {}) };
+        })
+        .filter(Boolean);
+      const hasDefault = views.some((view) => view.id === "default");
+      cached = { views: hasDefault ? views : [defaultView, ...views] };
+      return cached;
+    }
+    cached = { views: [defaultView] };
+    return cached;
+  };
+
+  const persist = () => {
+    if (!cached) {
+      return;
+    }
+    storage?.set?.(SAVED_VIEWS_STORAGE_KEY, cached);
+  };
+
+  const store = {
+    getViews: () => load().views.map((view) => ({ ...view, state: { ...view.state } })),
+    saveView: (name, state) => {
+      const trimmed = typeof name === "string" ? name.trim() : "";
+      if (!trimmed) {
+        return { saved: false, reason: "empty" };
+      }
+      const nextState = normalizeSavedViewState(state);
+      const current = load();
+      const existing = current.views.find((view) => view.name.toLowerCase() === trimmed.toLowerCase());
+      if (existing && existing.id !== "default") {
+        const updated = { ...existing, name: trimmed, state: nextState };
+        cached = {
+          views: current.views.map((view) => (view.id === existing.id ? updated : view)),
+        };
+        persist();
+        return { saved: true, view: updated, updated: true };
+      }
+      const entry = existing?.id === "default" ? defaultView : { id: createRequestId(), name: trimmed, state: nextState };
+      cached = {
+        views: existing?.id === "default" ? current.views : [...current.views, entry],
+      };
+      persist();
+      return { saved: true, view: entry, updated: false };
+    },
+    deleteView: (viewId) => {
+      if (viewId === "default") {
+        return { deleted: false, reason: "default" };
+      }
+      const current = load();
+      const nextViews = current.views.filter((view) => view.id !== viewId);
+      if (nextViews.length === current.views.length) {
+        return { deleted: false, reason: "missing" };
+      }
+      cached = { views: nextViews.length ? nextViews : [defaultView] };
+      persist();
+      return { deleted: true };
+    },
+    reset: () => {
+      cached = { views: [defaultView] };
+      persist();
+      return [defaultView];
     },
   };
 
@@ -2842,6 +3107,15 @@ function updateMarketIndicator() {
       marketCacheNote.textContent = "Using cached data";
       marketCacheNote.title = "";
       marketCacheNote.classList.add("hidden");
+    }
+  }
+  if (degradedBanner && degradedMessage) {
+    if (data.warningMessage || data.usingCached || data.mixedQuality) {
+      const message = data.warningMessage || (data.mixedQuality ? "Mixed freshness — some rows are cached." : "Cached data active.");
+      degradedMessage.textContent = message;
+      degradedBanner.classList.remove("hidden");
+    } else {
+      degradedBanner.classList.add("hidden");
     }
   }
 }
@@ -5110,6 +5384,10 @@ function removeSymbolFromWatchlist(symbol, { watchlist = watchlistStore, favorit
   const removed = watchlist.removeSymbol(symbol);
   if (removed) {
     favorites.removeSymbol(symbol);
+    if (activeAnalysisSymbol === symbol) {
+      activeAnalysisSymbol = null;
+      renderAnalysisPanel(null);
+    }
   }
   return removed;
 }
@@ -5889,6 +6167,49 @@ function getMarketFilterValues() {
   };
 }
 
+function getCurrentViewState() {
+  const filters = getMarketFilterValues();
+  return normalizeSavedViewState({
+    ...filters,
+    min: filterMin?.value ?? "",
+    max: filterMax?.value ?? "",
+    minMonth: filterMonth?.value ?? "",
+    favoritesOnly: filterFavorites?.checked ?? false,
+    sortBy: sortBySelect?.value ?? DEFAULT_SORT_KEY,
+  });
+}
+
+function applyViewState(state) {
+  const next = normalizeSavedViewState(state);
+  if (filterSearch) {
+    filterSearch.value = next.search;
+  }
+  if (filterSector) {
+    filterSector.value = next.sector;
+  }
+  if (filterCap) {
+    filterCap.value = next.cap;
+  }
+  if (filterSignal) {
+    filterSignal.value = next.signal;
+  }
+  if (filterMin) {
+    filterMin.value = next.min === "" ? "" : next.min;
+  }
+  if (filterMax) {
+    filterMax.value = next.max === "" ? "" : next.max;
+  }
+  if (filterMonth) {
+    filterMonth.value = next.minMonth === "" ? "" : next.minMonth;
+  }
+  if (filterFavorites) {
+    filterFavorites.checked = next.favoritesOnly;
+  }
+  if (sortBySelect) {
+    sortBySelect.value = next.sortBy ?? DEFAULT_SORT_KEY;
+  }
+}
+
 function clearMarketFilters() {
   if (filterSearch) {
     filterSearch.value = "";
@@ -6171,6 +6492,10 @@ async function refreshVisibleQuotes(options = {}) {
     return summary;
   }
 
+  symbolsToFetch.forEach((symbol) => {
+    rowFetchState.set(symbol, "loading");
+  });
+
   let hadQuoteFailure = false;
   let quoteResults = [];
   let forceUnavailable = false;
@@ -6253,6 +6578,14 @@ async function refreshVisibleQuotes(options = {}) {
     };
   });
   results.forEach((result) => {
+    const symbol = result?.symbol;
+    if (symbol) {
+      if (result?.error || result?.hadQuoteFailure || result?.quote?.unavailable) {
+        rowFetchState.set(symbol, "error");
+      } else {
+        rowFetchState.delete(symbol);
+      }
+    }
     if (result?.error || result?.hadQuoteFailure || result?.quote?.unavailable) {
       hadQuoteFailure = true;
       summary.errorCount += 1;
@@ -6972,6 +7305,72 @@ function compareScoreConfidence(a, b) {
   return a.stock.symbol.localeCompare(b.stock.symbol);
 }
 
+function extractHistorySeries(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return values
+    .map((entry) => (typeof entry === "number" ? entry : entry?.close))
+    .filter((value) => Number.isFinite(value));
+}
+
+function buildSparklineSvg(values, { className = "", ariaLabel = "Price trend" } = {}) {
+  if (!values || values.length < 2) {
+    return `<span class="sparkline-empty">—</span>`;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const points = values.map((value, index) => {
+    const x = (index / (values.length - 1)) * 100;
+    const y = 100 - ((value - min) / range) * 100;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  const path = `M ${points.join(" L ")}`;
+  return `
+    <svg class="sparkline ${className}" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="${escapeAttribute(
+      ariaLabel,
+    )}">
+      <path d="${path}"></path>
+    </svg>
+  `;
+}
+
+function getSparklineMarkup(stock, { window = 30, label = "30 day trend" } = {}) {
+  const history = extractHistorySeries(stock?.history ?? []);
+  const sliced = window ? history.slice(-window) : history;
+  if (sliced.length < 2) {
+    return buildSparklineSvg([]);
+  }
+  const change = sliced[sliced.length - 1] - sliced[0];
+  const className = change === 0 ? "neutral" : change > 0 ? "positive" : "negative";
+  return buildSparklineSvg(sliced, { className, ariaLabel: label });
+}
+
+function getRowFreshnessState(stock) {
+  if (!stock) {
+    return { className: "loading", label: "Loading" };
+  }
+  if (stock.quoteUnavailable) {
+    return { className: "error", label: "Quote unavailable" };
+  }
+  const fetchState = rowFetchState.get(stock.symbol);
+  if (fetchState === "loading") {
+    return { className: "loading", label: "Refreshing" };
+  }
+  if (fetchState === "error") {
+    return { className: "error", label: "Quote unavailable" };
+  }
+  const source = normalizeSource(stock.dataSource ?? stock.source);
+  if (source === QUOTE_SOURCES.CACHED || source === QUOTE_SOURCES.LAST_CLOSE) {
+    return { className: "cached", label: "Cached data" };
+  }
+  if (isQuoteFreshForInterval(stock.symbol)) {
+    return { className: "fresh", label: "Fresh" };
+  }
+  return { className: "stale", label: "Stale" };
+}
+
 function buildTopOpportunitiesGroups(entries) {
   const safeEntries = Array.isArray(entries) ? [...entries] : [];
   const decorated = safeEntries.map((stock) => {
@@ -7013,7 +7412,7 @@ function createMarketRowSkeleton(stock) {
   row.dataset.symbol = stock.symbol;
   row.tabIndex = 0;
   row.setAttribute("role", "button");
-  row.setAttribute("aria-label", `Analyze ${stock.symbol}`);
+  row.setAttribute("aria-label", `Open analysis panel for ${stock.symbol}`);
   row.innerHTML = buildMarketRowMarkup();
   return row;
 }
@@ -7117,14 +7516,21 @@ function updateMarketRowCells(row, stock) {
   const signalCell = row.querySelector('[data-col="signal"]');
   const horizonCell = row.querySelector('[data-col="horizon"]');
   const priceCell = row.querySelector('[data-col="price"]');
+  const sparklineCell = row.querySelector('[data-col="sparkline"]');
   const perfCell = row.querySelector('[data-col="perf"]');
   const actionsCell = row.querySelector('[data-col="actions"]');
   const favoriteCell = row.querySelector('[data-col="favorite"]');
 
   const isFavorite = favoritesStore.isFavorite(stock.symbol);
+  const freshness = getRowFreshnessState(stock);
 
   if (symbolCell) {
-    symbolCell.textContent = stock.symbol;
+    symbolCell.innerHTML = `
+      <span class="symbol-cell">
+        <span class="freshness-dot ${freshness.className}" title="${escapeAttribute(freshness.label)}"></span>
+        <span>${stock.symbol}</span>
+      </span>
+    `;
   }
   if (favoriteCell) {
     favoriteCell.innerHTML = `
@@ -7184,6 +7590,9 @@ function updateMarketRowCells(row, stock) {
         <div class="price-meta"${metaTitle}>${meta}</div>
       </div>
     `;
+  }
+  if (sparklineCell) {
+    sparklineCell.innerHTML = getSparklineMarkup(stock, { window: 30, label: `${stock.symbol} 30D trend` });
   }
   if (perfCell) {
     const formatPerfValue = (value) => (value === "n/a" ? "—" : value);
@@ -7373,6 +7782,110 @@ function updateMarketDebugReadout({ filteredCount = 0 } = {}) {
   debugLine.classList.remove("hidden");
 }
 
+function setActiveMarketRow(symbol) {
+  if (!marketBody) {
+    return;
+  }
+  marketBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
+    row.classList.toggle("is-active", row.dataset.symbol === symbol);
+  });
+}
+
+function renderAnalysisPanel(symbol) {
+  if (!analysisPanel || !analysisSymbol || !analysisCompany || !analysisChart || !analysisPlan) {
+    return;
+  }
+  if (!symbol) {
+    analysisSymbol.textContent = "Select a row";
+    analysisCompany.textContent = "Click a symbol to see the trade plan.";
+    analysisChart.innerHTML = `<p class="muted">Sparkline will appear here.</p>`;
+    analysisPlan.innerHTML = `
+      <div>
+        <dt>Entry</dt>
+        <dd>—</dd>
+      </div>
+      <div>
+        <dt>Stop</dt>
+        <dd>—</dd>
+      </div>
+      <div>
+        <dt>Target</dt>
+        <dd>—</dd>
+      </div>
+      <div>
+        <dt>Invalidation</dt>
+        <dd>—</dd>
+      </div>
+    `;
+    if (analysisProvenance) {
+      analysisProvenance.innerHTML = "";
+    }
+    if (analysisPerformance) {
+      analysisPerformance.innerHTML = "";
+    }
+    return;
+  }
+  const stock = getStockEntry(symbol);
+  if (!stock) {
+    return;
+  }
+  activeAnalysisSymbol = symbol;
+  setActiveMarketRow(symbol);
+  analysisSymbol.textContent = symbol;
+  analysisCompany.textContent = stock.name ?? "—";
+  analysisChart.innerHTML = getSparklineMarkup(stock, { window: 90, label: `${symbol} 90D trend` });
+  const analysis = getCachedAnalysis(symbol) ?? analyzeSymbol({ symbol });
+  if (!getCachedAnalysis(symbol)) {
+    setCachedAnalysis(symbol, analysis);
+  }
+  const tradePlan = analysis?.tradePlan ?? {};
+  const invalidation = analysis?.invalidationRules?.[0] ?? "—";
+  analysisPlan.innerHTML = `
+    <div>
+      <dt>Entry</dt>
+      <dd>${tradePlan.entryDisplay ?? "—"}</dd>
+    </div>
+    <div>
+      <dt>Stop</dt>
+      <dd>${tradePlan.stopLossDisplay ?? "—"}</dd>
+    </div>
+    <div>
+      <dt>Target</dt>
+      <dd>${tradePlan.takeProfitDisplay ?? "—"}</dd>
+    </div>
+    <div>
+      <dt>Invalidation</dt>
+      <dd>${invalidation}</dd>
+    </div>
+  `;
+  if (analysisProvenance) {
+    const asOf = stock.quoteAsOf ?? stock.lastUpdatedAt ?? null;
+    const source = normalizeSource(stock.dataSource ?? stock.source) ?? "UNKNOWN";
+    const session = normalizeSession(stock.quoteSession) ?? "UNKNOWN";
+    const fallback = stock.lastHistoricalTimestamp ? `Fallback: ${formatTimestamp(stock.lastHistoricalTimestamp)}` : null;
+    analysisProvenance.innerHTML = [
+      `<li>Source: ${source}</li>`,
+      `<li>Session: ${session}</li>`,
+      `<li>As of: ${formatTimestamp(asOf)}</li>`,
+      fallback ? `<li>${fallback}</li>` : "",
+    ]
+      .filter(Boolean)
+      .join("");
+  }
+  if (analysisPerformance) {
+    const display = getMarketRowDisplay(stock);
+    const score = getSignalScoreForStock(stock);
+    const confidence = getSignalConfidenceForStock(stock, analysis?.action);
+    analysisPerformance.innerHTML = [
+      `<li>1D: ${display.dayDisplay ?? "—"}</li>`,
+      `<li>1M: ${display.monthDisplay ?? "—"}</li>`,
+      `<li>1Y: ${display.yearDisplay ?? "—"}</li>`,
+      `<li>Signal score: ${score == null ? "n/a" : Math.round(score)}</li>`,
+      `<li>Confidence: ${confidence == null ? "n/a" : Math.round(confidence)}</li>`,
+    ].join("");
+  }
+}
+
 function renderMarketTable() {
   if (!marketBody) {
     return;
@@ -7421,6 +7934,7 @@ function renderMarketTable() {
   validateMarketTableStructure(marketBody.closest("table"));
   updateMarketDebugReadout({ filteredCount: filtered.length });
   updateMarketIndicator();
+  setActiveMarketRow(activeAnalysisSymbol);
 }
 
 async function refreshMarketBoard() {
@@ -7494,6 +8008,55 @@ function buildAnalyzeUrl(symbol, { autoRun = true } = {}) {
     params.set("autorun", "1");
   }
   return `index.html?${params.toString()}`;
+}
+
+function renderWatchlistOptions() {
+  if (!watchlistSelect) {
+    return;
+  }
+  const lists = watchlistStore.getWatchlists();
+  const active = watchlistStore.getActiveWatchlist();
+  watchlistSelect.innerHTML = lists
+    .map((list) => `<option value="${list.id}">${list.name} (${list.count})</option>`)
+    .join("");
+  if (active?.id) {
+    watchlistSelect.value = active.id;
+  }
+  if (watchlistDeleteButton) {
+    watchlistDeleteButton.disabled = lists.length <= 1;
+  }
+}
+
+function renderSavedViewOptions(selectedId) {
+  if (!savedViewSelect) {
+    return;
+  }
+  const views = savedViewsStore.getViews();
+  savedViewSelect.innerHTML = views
+    .map((view) => `<option value="${view.id}">${view.name}</option>`)
+    .join("");
+  const resolvedId = views.some((view) => view.id === selectedId)
+    ? selectedId
+    : activeSavedViewId ?? views[0]?.id;
+  if (resolvedId) {
+    savedViewSelect.value = resolvedId;
+    activeSavedViewId = resolvedId;
+  }
+  if (savedViewDeleteButton) {
+    savedViewDeleteButton.disabled = savedViewSelect.value === "default";
+  }
+}
+
+function applySavedViewById(viewId) {
+  const view = savedViewsStore.getViews().find((entry) => entry.id === viewId);
+  if (!view) {
+    return;
+  }
+  activeSavedViewId = view.id;
+  applyViewState(view.state);
+  renderMarketTable();
+  updateRefreshStatus();
+  scheduleNextMarketRefresh();
 }
 
 function initTradePage() {
@@ -7803,6 +8366,9 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     console.info("[Market Init]", { stage: "skeleton_rendered", renderRowsCalled: false });
   }
   sortBySelect = ensureSortControl() ?? sortBySelect;
+  renderWatchlistOptions();
+  renderSavedViewOptions(activeSavedViewId);
+  renderAnalysisPanel(activeAnalysisSymbol);
   if (refreshPill) {
     didInit = true;
     refreshPill.addEventListener("click", () => {
@@ -7818,6 +8384,20 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     didInit = true;
     quoteStatusRetry.addEventListener("click", () => {
       triggerImmediateRefresh({ force: true });
+    });
+  }
+  if (degradedRefresh) {
+    didInit = true;
+    degradedRefresh.addEventListener("click", () => {
+      triggerImmediateRefresh({ force: true });
+    });
+  }
+  if (analysisClose) {
+    didInit = true;
+    analysisClose.addEventListener("click", () => {
+      activeAnalysisSymbol = null;
+      setActiveMarketRow(null);
+      renderAnalysisPanel(null);
     });
   }
   [
@@ -7843,6 +8423,100 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
     }
   });
 
+  if (savedViewSelect) {
+    didInit = true;
+    savedViewSelect.addEventListener("change", () => {
+      applySavedViewById(savedViewSelect.value);
+      renderSavedViewOptions(savedViewSelect.value);
+    });
+  }
+
+  if (savedViewSaveButton) {
+    didInit = true;
+    savedViewSaveButton.addEventListener("click", () => {
+      const name = savedViewNameInput?.value ?? "";
+      const result = savedViewsStore.saveView(name, getCurrentViewState());
+      if (!result.saved) {
+        return;
+      }
+      if (savedViewNameInput) {
+        savedViewNameInput.value = "";
+      }
+      renderSavedViewOptions(result.view?.id ?? savedViewSelect?.value);
+    });
+  }
+
+  if (savedViewDeleteButton) {
+    didInit = true;
+    savedViewDeleteButton.addEventListener("click", () => {
+      const selected = savedViewSelect?.value ?? "";
+      const result = savedViewsStore.deleteView(selected);
+      if (!result.deleted) {
+        return;
+      }
+      renderSavedViewOptions("default");
+    });
+  }
+
+  if (watchlistSelect) {
+    didInit = true;
+    watchlistSelect.addEventListener("change", () => {
+      watchlistStore.setActiveWatchlist(watchlistSelect.value);
+      syncMarketStateWithWatchlist();
+      if (activeAnalysisSymbol && !isSymbolInWatchlist(activeAnalysisSymbol)) {
+        activeAnalysisSymbol = null;
+        renderAnalysisPanel(null);
+      }
+      if (shouldRender) {
+        renderSkeletonRows(watchlistStore.getWatchlist());
+        renderMarketTable();
+        updateRefreshStatus();
+        scheduleNextMarketRefresh(0);
+        refreshVisibleQuotes();
+      }
+      renderWatchlistOptions();
+    });
+  }
+
+  if (watchlistCreateButton) {
+    didInit = true;
+    watchlistCreateButton.addEventListener("click", () => {
+      const name = watchlistCreateInput?.value ?? "";
+      const result = watchlistStore.addWatchlist(name);
+      if (!result.created) {
+        return;
+      }
+      if (watchlistCreateInput) {
+        watchlistCreateInput.value = "";
+      }
+      syncMarketStateWithWatchlist();
+      renderWatchlistOptions();
+      if (shouldRender) {
+        renderSkeletonRows(watchlistStore.getWatchlist());
+        renderMarketTable();
+        updateRefreshStatus();
+      }
+    });
+  }
+
+  if (watchlistDeleteButton) {
+    didInit = true;
+    watchlistDeleteButton.addEventListener("click", () => {
+      const activeId = watchlistSelect?.value ?? "";
+      const result = watchlistStore.removeWatchlist(activeId);
+      if (!result.removed) {
+        return;
+      }
+      syncMarketStateWithWatchlist();
+      renderWatchlistOptions();
+      if (shouldRender) {
+        renderSkeletonRows(watchlistStore.getWatchlist());
+        renderMarketTable();
+        updateRefreshStatus();
+      }
+    });
+  }
+
   if (watchlistInput) {
     didInit = true;
     watchlistInput.addEventListener("input", () => {
@@ -7857,6 +8531,17 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
       }
       event.preventDefault();
       watchlistAddButton?.click();
+    });
+  }
+
+  if (watchlistCreateInput) {
+    didInit = true;
+    watchlistCreateInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      watchlistCreateButton?.click();
     });
   }
 
@@ -7888,6 +8573,7 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
       watchlistInput.value = "";
       setWatchlistError("");
       syncMarketStateWithWatchlist();
+      renderWatchlistOptions();
       if (shouldRender) {
         renderSkeletonRows(watchlistStore.getWatchlist());
         renderMarketTable();
@@ -7962,6 +8648,7 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
           const removed = removeSymbolFromWatchlist(symbol);
           if (removed) {
             syncMarketStateWithWatchlist();
+            renderWatchlistOptions();
             if (shouldRender) {
               renderSkeletonRows(watchlistStore.getWatchlist());
               renderMarketTable();
@@ -7979,6 +8666,28 @@ function initLivePage({ onAnalyze, skipInitialLoad = false, skipRender = false }
           handleAnalyze?.(symbol);
           return;
         }
+        return;
+      }
+      const row = event.target.closest("tr[data-symbol]");
+      if (row) {
+        const symbol = row.dataset.symbol ?? "";
+        if (symbol) {
+          renderAnalysisPanel(symbol);
+        }
+      }
+    });
+    marketBody.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      const row = event.target.closest("tr[data-symbol]");
+      if (!row) {
+        return;
+      }
+      event.preventDefault();
+      const symbol = row.dataset.symbol ?? "";
+      if (symbol) {
+        renderAnalysisPanel(symbol);
       }
     });
   }
@@ -8026,6 +8735,7 @@ const appCore = {
   createStorageAdapter,
   createWatchlistStore,
   createFavoritesStore,
+  createSavedViewsStore,
   persistFormState,
   loadPersistedFormState,
   getRiskPercentValidationMessage,

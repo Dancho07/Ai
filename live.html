@@ -6,7 +6,7 @@
     <title>Market Pulse Dashboard</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
+  <body class="terminal-ui">
     <main class="page">
       <header class="hero">
         <div>
@@ -32,7 +32,8 @@
         </div>
       </header>
 
-      <section class="market-card">
+      <div class="market-shell">
+        <section class="market-card">
         <div class="market-header">
           <div>
             <p class="eyebrow">Live prices</p>
@@ -70,12 +71,30 @@
           <span id="market-cache-note" class="market-indicator-note hidden">Using cached data</span>
         </div>
         <p class="market-debug hidden" id="market-debug"></p>
+        <div class="degraded-banner hidden" id="degraded-banner" role="status" aria-live="polite">
+          <span id="degraded-message">Degraded mode enabled.</span>
+          <button type="button" id="degraded-refresh" class="secondary-button">Refresh now</button>
+        </div>
         <div class="quote-status-banner hidden" id="quote-status-banner" role="status" aria-live="polite">
           <span id="quote-status-message">Live quotes unavailable.</span>
           <button type="button" id="quote-status-retry" class="secondary-button">Retry now</button>
         </div>
 
         <div class="watchlist-controls">
+          <label class="watchlist-select">
+            Watchlist
+            <div class="watchlist-select-row">
+              <select id="watchlist-select"></select>
+              <button type="button" id="watchlist-delete" class="secondary-button">Delete</button>
+            </div>
+          </label>
+          <label class="watchlist-create">
+            New watchlist
+            <div class="watchlist-input-row">
+              <input type="text" id="watchlist-name" placeholder="e.g. Momentum" />
+              <button type="button" id="watchlist-create" class="primary-button">Create</button>
+            </div>
+          </label>
           <label class="watchlist-input">
             Add symbol
             <div class="watchlist-input-row">
@@ -87,6 +106,23 @@
           <label class="favorites-toggle">
             <input type="checkbox" id="filter-favorites" />
             Show favorites only
+          </label>
+        </div>
+
+        <div class="view-controls">
+          <label class="view-select">
+            Saved view
+            <div class="view-select-row">
+              <select id="saved-view-select"></select>
+              <button type="button" id="saved-view-delete" class="secondary-button">Delete</button>
+            </div>
+          </label>
+          <label class="view-save">
+            Save current view
+            <div class="view-save-row">
+              <input type="text" id="saved-view-name" placeholder="e.g. High momentum" />
+              <button type="button" id="saved-view-save" class="primary-button">Save view</button>
+            </div>
           </label>
         </div>
 
@@ -201,6 +237,7 @@
             <col data-col="signal" style="width: 80px" />
             <col data-col="horizon" style="width: 100px" />
             <col data-col="price" style="width: 150px" />
+            <col data-col="sparkline" style="width: 140px" />
             <col data-col="perf" style="width: 260px" />
             <col data-col="actions" style="width: 160px" />
           </colgroup>
@@ -214,6 +251,7 @@
               <th data-col="signal">Signal</th>
               <th data-col="horizon">Time horizon</th>
               <th data-col="price" class="num-cell">Live price</th>
+              <th data-col="sparkline">30D trend</th>
               <th data-col="perf">Performance</th>
               <th data-col="actions">Actions</th>
             </tr>
@@ -222,6 +260,54 @@
           </table>
         </div>
       </section>
+
+      <aside class="analysis-panel" id="analysis-panel" aria-live="polite">
+        <div class="analysis-panel-header">
+          <div>
+            <p class="eyebrow">Analysis panel</p>
+            <h3 id="analysis-symbol">Select a row</h3>
+            <p class="muted" id="analysis-company">Click a symbol to see the trade plan.</p>
+          </div>
+          <button type="button" id="analysis-close" class="icon-button" aria-label="Close analysis panel">
+            ✕
+          </button>
+        </div>
+        <div class="analysis-panel-body">
+          <div class="analysis-chart" id="analysis-chart">
+            <p class="muted">Sparkline will appear here.</p>
+          </div>
+          <div class="analysis-section">
+            <h4>Trade plan</h4>
+            <dl class="analysis-list" id="analysis-plan">
+              <div>
+                <dt>Entry</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Stop</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Target</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Invalidation</dt>
+                <dd>—</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="analysis-section">
+            <h4>Provenance &amp; freshness</h4>
+            <ul class="analysis-meta" id="analysis-provenance"></ul>
+          </div>
+          <div class="analysis-section">
+            <h4>Recent performance</h4>
+            <ul class="analysis-meta" id="analysis-performance"></ul>
+          </div>
+        </div>
+      </aside>
+    </div>
     </main>
     <script src="signalConfig.js"></script>
     <script src="strategy.js"></script>
