@@ -218,6 +218,7 @@ const percentFormatter = new Intl.NumberFormat("en-US", {
 });
 
 const PROVIDER = "Yahoo Finance";
+const SECONDARY_PROVIDER = "Stooq";
 const MAX_RETRIES = 4;
 const REQUEST_TIMEOUT_MS = 9000;
 const REFRESH_TIMEOUT_MS = 15000;
@@ -263,11 +264,22 @@ const REFRESH_TIMEOUTS = {
   DELAYED: 18 * 1000,
   UNKNOWN: 18 * 1000,
 };
+const MARKET_STREAM_POLL_INTERVAL_MS = 30 * 1000;
+const MARKET_STREAM_PARAM = "stream";
+const MARKET_STREAM_URL =
+  isBrowser && typeof window !== "undefined"
+    ? window.MARKET_STREAM_URL ??
+      window.__MARKET_STREAM_URL__ ??
+      new URLSearchParams(window.location.search).get(MARKET_STREAM_PARAM)
+    : null;
 
 const YAHOO_QUOTE_URL = (symbols) =>
   `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
 const YAHOO_CHART_URL = (symbol, range, interval = "1d") =>
   `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=${interval}&includePrePost=false`;
+const STOOQ_SYMBOL_SUFFIX = ".us";
+const STOOQ_QUOTE_URL = (symbols) =>
+  `https://stooq.com/q/l/?s=${symbols.join(",")}&f=sd2t2ohlcv&h&e=csv`;
 const QUOTE_PROXY_CHAIN = [
   {
     label: "Server proxy",
@@ -300,6 +312,7 @@ const CHART_PROXY_CHAIN = [
     build: (url, cacheBust) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&cache=${cacheBust}`,
   },
 ];
+const STOOQ_PROXY_CHAIN = [...CHART_PROXY_CHAIN];
 
 const quoteCache = new Map();
 const lastKnownQuotes = new Map();
@@ -331,6 +344,8 @@ let refreshInProgress = false;
 let refreshAbortController = null;
 let rateLimitBackoffUntil = 0;
 let isSubmitting = false;
+let marketStream = null;
+let marketStreamActive = false;
 const RESULT_HIGHLIGHT_CLASS = "result-highlight";
 
 function getScrollBehavior() {
@@ -944,6 +959,39 @@ function formatAsOf(timestamp, options = {}) {
   }
 }
 
+function formatDataTypeLabel(dataType) {
+  switch (dataType) {
+    case QUOTE_DATA_TYPES.LAST_TRADE:
+      return "Last trade";
+    case QUOTE_DATA_TYPES.LAST_QUOTE:
+      return "Last quote";
+    case QUOTE_DATA_TYPES.CLOSE:
+      return "Close";
+    default:
+      return "Unknown";
+  }
+}
+
+function formatCacheAge(cacheAgeSeconds) {
+  if (!Number.isFinite(cacheAgeSeconds)) {
+    return "unknown";
+  }
+  if (cacheAgeSeconds < 60) {
+    return `${cacheAgeSeconds}s`;
+  }
+  if (cacheAgeSeconds < 3600) {
+    return `${Math.round(cacheAgeSeconds / 60)}m`;
+  }
+  return `${Math.round(cacheAgeSeconds / 3600)}h`;
+}
+
+function escapeAttribute(value) {
+  if (value == null) {
+    return "";
+  }
+  return String(value).replace(/"/g, "&quot;");
+}
+
 function parseEpoch(value) {
   if (value == null) {
     return null;
@@ -984,6 +1032,12 @@ const QUOTE_SOURCES = {
   CACHED: "CACHED",
   LAST_CLOSE: "LAST_CLOSE",
   UNAVAILABLE: "UNAVAILABLE",
+};
+const QUOTE_DATA_TYPES = {
+  LAST_TRADE: "LAST_TRADE",
+  LAST_QUOTE: "LAST_QUOTE",
+  CLOSE: "CLOSE",
+  UNKNOWN: "UNKNOWN",
 };
 
 const QUOTE_SESSIONS = {
@@ -1074,6 +1128,68 @@ function normalizeSource(source) {
     return normalized;
   }
   return null;
+}
+
+function normalizeDataType(dataType) {
+  if (!dataType) {
+    return null;
+  }
+  const normalized = String(dataType).toUpperCase();
+  if (Object.values(QUOTE_DATA_TYPES).includes(normalized)) {
+    return normalized;
+  }
+  return null;
+}
+
+function computeCacheAgeSeconds(lastSuccessAt) {
+  if (!lastSuccessAt || !Number.isFinite(lastSuccessAt)) {
+    return null;
+  }
+  return Math.max(0, Math.round((Date.now() - lastSuccessAt) / 1000));
+}
+
+function toStooqSymbol(symbol) {
+  if (!symbol) {
+    return "";
+  }
+  const normalized = String(symbol).trim().toLowerCase();
+  return normalized.includes(".") ? normalized : `${normalized}${STOOQ_SYMBOL_SUFFIX}`;
+}
+
+function fromStooqSymbol(symbol) {
+  if (!symbol) {
+    return "";
+  }
+  const normalized = String(symbol).trim().toUpperCase();
+  const suffix = STOOQ_SYMBOL_SUFFIX.toUpperCase();
+  return normalized.endsWith(suffix) ? normalized.slice(0, -suffix.length) : normalized;
+}
+
+function parseStooqNumber(value) {
+  if (value == null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed || trimmed.toUpperCase() === "N/A") {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseStooqTimestamp(dateValue, timeValue) {
+  if (!dateValue || String(dateValue).toUpperCase() === "N/A") {
+    return null;
+  }
+  const timePart =
+    !timeValue || String(timeValue).toUpperCase() === "N/A" ? "00:00:00" : String(timeValue).trim();
+  const iso = `${String(dateValue).trim()}T${timePart}Z`;
+  const parsed = Date.parse(iso);
+  if (!Number.isNaN(parsed)) {
+    return parsed;
+  }
+  const fallback = Date.parse(String(dateValue).trim());
+  return Number.isNaN(fallback) ? null : fallback;
 }
 
 function shouldShowCacheWarning(session, source) {
@@ -1167,6 +1283,9 @@ function getDebugFreshnessLabel(source) {
 function getQuoteFallbackLabel(quote) {
   if (!quote) {
     return "unavailable";
+  }
+  if (quote.fallbackReason === "secondary_provider") {
+    return "secondary_provider";
   }
   if (quote.source === QUOTE_SOURCES.CACHED) {
     return "cached";
@@ -1374,6 +1493,10 @@ function normalizeQuoteForCache(quote) {
     name: quote.name ?? null,
     exchangeTimezoneName: quote.exchangeTimezoneName ?? null,
     exchangeTimezoneShortName: quote.exchangeTimezoneShortName ?? null,
+    providerUsed: quote.providerUsed ?? null,
+    lastSuccessAt: quote.lastSuccessAt ?? null,
+    dataType: quote.dataType ?? null,
+    fallbackReason: quote.fallbackReason ?? null,
   };
 }
 
@@ -1403,6 +1526,14 @@ function getCachedQuote(symbol) {
   const entry = quoteCache.get(symbol);
   if (entry && entry.expiresAt > Date.now()) {
     return entry.quote;
+  }
+  return null;
+}
+
+function getCachedQuoteEntry(symbol) {
+  const entry = quoteCache.get(symbol);
+  if (entry && entry.expiresAt > Date.now()) {
+    return entry;
   }
   return null;
 }
@@ -1481,12 +1612,117 @@ function shouldBackoffFromStatus(statusCode) {
 
 function getEffectiveRefreshInterval(symbols) {
   const baseInterval = getRefreshIntervalForSymbols(symbols);
-  return isRateLimitBackoffActive() ? baseInterval * 2 : baseInterval;
+  const adjustedInterval = marketStreamActive ? Math.max(baseInterval, MARKET_STREAM_POLL_INTERVAL_MS) : baseInterval;
+  return isRateLimitBackoffActive() ? adjustedInterval * 2 : adjustedInterval;
 }
 
 function getRefreshTimeoutForSymbols(symbols = []) {
-  const session = computeUsMarketSession(new Date()).session ?? QUOTE_SESSIONS.CLOSED;
+  const session = computeUsMarketSession(new Date(Date.now())).session ?? QUOTE_SESSIONS.CLOSED;
   return getRefreshTimeoutForSession(session);
+}
+
+function shouldUseMarketStream() {
+  if (!MARKET_STREAM_URL || typeof EventSource === "undefined") {
+    return false;
+  }
+  const session = computeUsMarketSession(new Date(Date.now())).session ?? QUOTE_SESSIONS.CLOSED;
+  return isPageVisible() && session === QUOTE_SESSIONS.REGULAR;
+}
+
+function handleMarketStreamMessage(event) {
+  const payload = parseJsonPayload(event?.data);
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+  const symbol = normalizeSymbolInput(payload.symbol ?? "");
+  if (!symbol) {
+    return;
+  }
+  const nowMs = Date.now();
+  const quotePayload = {
+    symbol,
+    price: payload.price ?? payload.lastPrice ?? null,
+    change: payload.change ?? payload.lastChange ?? null,
+    changePct: payload.changePct ?? payload.lastChangePct ?? null,
+    asOfTimestamp: payload.asOfTimestamp ?? payload.timestamp ?? nowMs,
+    session: payload.session ?? payload.quoteSession ?? payload.marketState ?? QUOTE_SESSIONS.REGULAR,
+    source: payload.source ?? QUOTE_SOURCES.REALTIME,
+    providerUsed: payload.providerUsed ?? payload.provider ?? "stream",
+    dataType: payload.dataType ?? QUOTE_DATA_TYPES.LAST_TRADE,
+    lastSuccessAt: nowMs,
+  };
+  const normalized = normalizeQuote(quotePayload, nowMs);
+  if (!normalized) {
+    return;
+  }
+  const fullQuote = {
+    ...normalized,
+    change: normalized.changeAbs,
+    changePct: normalized.changePct,
+    asOfTimestamp: normalized.asOfTs,
+    providerUsed: normalized.providerUsed ?? quotePayload.providerUsed,
+    lastSuccessAt: normalized.lastSuccessAt ?? nowMs,
+    cacheAgeSeconds: 0,
+    dataType: normalized.dataType ?? QUOTE_DATA_TYPES.LAST_TRADE,
+    fallbackReason: null,
+  };
+  const stock = getStockEntry(symbol);
+  if (stock) {
+    updateStockWithQuote(stock, fullQuote);
+    updateQuoteCache(symbol, fullQuote);
+    setLastKnownQuote(symbol, fullQuote);
+    renderMarketTable();
+  }
+}
+
+function startMarketStream() {
+  if (marketStream || !MARKET_STREAM_URL) {
+    return;
+  }
+  try {
+    marketStream = new EventSource(MARKET_STREAM_URL);
+    marketStream.onmessage = handleMarketStreamMessage;
+    marketStream.onopen = () => {
+      marketStreamActive = true;
+      logMarketDataEvent("info", {
+        event: "market_stream_open",
+        provider: "stream",
+        endpoint: MARKET_STREAM_URL,
+      });
+    };
+    marketStream.onerror = () => {
+      logMarketDataEvent("warn", {
+        event: "market_stream_error",
+        provider: "stream",
+        endpoint: MARKET_STREAM_URL,
+      });
+    };
+  } catch (error) {
+    logMarketDataEvent("error", {
+      event: "market_stream_error",
+      provider: "stream",
+      endpoint: MARKET_STREAM_URL,
+      message: error?.message ?? "Stream error",
+    });
+  }
+}
+
+function stopMarketStream() {
+  if (!marketStream) {
+    marketStreamActive = false;
+    return;
+  }
+  marketStream.close?.();
+  marketStream = null;
+  marketStreamActive = false;
+}
+
+function updateMarketStreamState() {
+  if (shouldUseMarketStream()) {
+    startMarketStream();
+  } else {
+    stopMarketStream();
+  }
 }
 
 function getNextRefreshDelay({ symbols, visible, backoffActive }) {
@@ -1611,6 +1847,7 @@ async function fetchJsonWithRetry(
   const redactedUrl = redactUrl(url);
   const symbolsCount = symbol ? symbol.split(",").filter(Boolean).length : null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptStartedAt = Date.now();
     try {
       if (DEV_QUOTE_LOG_ENABLED) {
         logDevQuote("provider_request_start", {
@@ -1651,6 +1888,8 @@ async function fetchJsonWithRetry(
         });
       }
       let payload = null;
+      const responseTimestamp =
+        typeof response.headers?.get === "function" ? response.headers.get("date") : null;
       const responseClone = typeof response.clone === "function" ? response.clone() : response;
       try {
         payload = await response.json();
@@ -1692,6 +1931,18 @@ async function fetchJsonWithRetry(
           timeoutMs,
         });
       }
+      logMarketDataEvent("info", {
+        event: "market_data_fetch_success",
+        provider,
+        symbol,
+        endpoint: redactedUrl,
+        requestId,
+        attempt,
+        maxAttempts,
+        durationMs: Date.now() - attemptStartedAt,
+        responseTimestamp,
+        statusCode: response.status,
+      });
       return payload;
     } catch (error) {
       const marketError = classifyFetchError(error);
@@ -1755,12 +2006,238 @@ async function fetchJsonWithFallback(entries, options = {}) {
       return payload;
     } catch (error) {
       lastError = error;
+      logMarketDataEvent("warn", {
+        event: "market_data_fetch_fallback",
+        provider: entry.provider,
+        symbol: options.symbol ?? null,
+        endpoint: redactUrl(entry.url),
+        errorType: error?.type ?? "unknown",
+        message: error?.message ?? "Fetch failed",
+      });
       if (!shouldFallbackAfterError(error)) {
         throw error;
       }
     }
   }
   throw lastError ?? new MarketDataError("unavailable", "Failed to fetch market data.");
+}
+
+async function fetchTextWithRetry(
+  url,
+  {
+    fetchFn = fetch,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    maxAttempts = MAX_RETRIES,
+    provider,
+    symbol,
+    onStatus,
+    signal,
+    session,
+  },
+) {
+  const requestId = createRequestId();
+  const redactedUrl = redactUrl(url);
+  const symbolsCount = symbol ? symbol.split(",").filter(Boolean).length : null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptStartedAt = Date.now();
+    try {
+      const response = await fetchWithTimeout(fetchFn, url, timeoutMs, { signal });
+      if (onStatus) {
+        onStatus({ status: response.status, ok: response.ok });
+      }
+      if (!response.ok) {
+        let responseSnippet = null;
+        try {
+          const raw = await response.clone().text();
+          responseSnippet = raw ? raw.slice(0, 160) : null;
+        } catch (snippetError) {
+          responseSnippet = null;
+        }
+        if (shouldBackoffFromStatus(response.status)) {
+          applyRateLimitBackoff();
+        }
+        const errorType =
+          response.status === 429
+            ? "rate_limit"
+            : RETRYABLE_STATUS.has(response.status)
+              ? "unavailable"
+              : "http_error";
+        throw new MarketDataError(errorType, `Request failed: ${response.status}`, {
+          statusCode: response.status,
+          responseSnippet,
+        });
+      }
+      const responseTimestamp =
+        typeof response.headers?.get === "function" ? response.headers.get("date") : null;
+      const payload = await response.text();
+      logMarketDataEvent("info", {
+        event: "market_data_fetch_success",
+        provider,
+        symbol,
+        endpoint: redactedUrl,
+        requestId,
+        attempt,
+        maxAttempts,
+        durationMs: Date.now() - attemptStartedAt,
+        responseTimestamp,
+        statusCode: response.status,
+      });
+      return payload;
+    } catch (error) {
+      const marketError = classifyFetchError(error);
+      const shouldRetry = RETRYABLE_ERRORS.has(marketError.type) && attempt < maxAttempts;
+      logMarketDataEvent(shouldRetry ? "warn" : "error", {
+        event: "market_data_fetch_failure",
+        provider,
+        symbol,
+        endpoint: redactedUrl,
+        requestId,
+        attempt,
+        maxAttempts,
+        errorType: marketError.type,
+        statusCode: marketError.details?.statusCode ?? null,
+        providerMessage: marketError.details?.providerMessage ?? null,
+        message: marketError.message,
+      });
+      if (!shouldRetry) {
+        throw marketError;
+      }
+      const jitter = Math.random() * 150;
+      const isRateLimit = marketError.type === "rate_limit";
+      const isRegularSession = session === QUOTE_SESSIONS.REGULAR;
+      const baseDelay =
+        isRateLimit && isRegularSession && attempt === 1 ? 750 : BACKOFF_BASE_MS * 2 ** (attempt - 1);
+      const delay = baseDelay + jitter;
+      await sleep(delay);
+    }
+  }
+  throw new MarketDataError("unavailable", "Failed to fetch market data.");
+}
+
+async function fetchTextWithFallback(entries, options = {}) {
+  let lastError = null;
+  for (const entry of entries) {
+    try {
+      const startedAt = Date.now();
+      const payload = await fetchTextWithRetry(entry.url, { ...options, provider: entry.provider });
+      if (options.onSuccess) {
+        options.onSuccess({
+          provider: entry.provider,
+          url: entry.url,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      return payload;
+    } catch (error) {
+      lastError = error;
+      logMarketDataEvent("warn", {
+        event: "market_data_fetch_fallback",
+        provider: entry.provider,
+        symbol: options.symbol ?? null,
+        endpoint: redactUrl(entry.url),
+        errorType: error?.type ?? "unknown",
+        message: error?.message ?? "Fetch failed",
+      });
+      if (!shouldFallbackAfterError(error)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new MarketDataError("unavailable", "Failed to fetch market data.");
+}
+
+function parseStooqCsv(payload) {
+  if (!payload) {
+    return [];
+  }
+  const lines = String(payload).trim().split(/\r?\n/);
+  if (!lines.length) {
+    return [];
+  }
+  const header = lines.shift();
+  if (!header) {
+    return [];
+  }
+  const headers = header.split(",").map((cell) => cell.trim());
+  return lines
+    .map((line) => line.split(","))
+    .filter((cells) => cells.length >= headers.length)
+    .map((cells) => {
+      const record = {};
+      headers.forEach((key, index) => {
+        record[key] = cells[index];
+      });
+      return record;
+    });
+}
+
+async function fetchStooqQuotes(symbols, options = {}) {
+  const uniqueSymbols = Array.from(new Set(symbols.map((symbol) => symbol.toUpperCase())));
+  if (!uniqueSymbols.length) {
+    return { quotes: [], hadFailure: false, errors: [] };
+  }
+  const sessionInfo = computeUsMarketSession(new Date(Date.now()));
+  const requestSymbols = uniqueSymbols.map((symbol) => toStooqSymbol(symbol));
+  const url = STOOQ_QUOTE_URL(requestSymbols);
+  const cacheBust = Date.now();
+  const plan = [];
+  if (!isBrowser) {
+    plan.push({ url, provider: SECONDARY_PROVIDER });
+  }
+  plan.push(
+    ...STOOQ_PROXY_CHAIN.map((entry) => ({
+      url: entry.build(url, cacheBust),
+      provider: entry.label,
+    })),
+  );
+  let rawPayload = null;
+  const errors = [];
+  try {
+    rawPayload = await requestLimiter(() =>
+      fetchTextWithFallback(plan, {
+        provider: SECONDARY_PROVIDER,
+        symbol: uniqueSymbols.join(","),
+        fetchFn: options.fetchFn,
+        maxAttempts: options.maxAttempts ?? 2,
+        timeoutMs: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+        signal: options.signal,
+        session: sessionInfo.session ?? null,
+      }),
+    );
+  } catch (error) {
+    errors.push(error);
+    return { quotes: [], hadFailure: true, errors };
+  }
+  const records = parseStooqCsv(rawPayload);
+  const quotes = records
+    .map((record) => {
+      const symbol = fromStooqSymbol(record.Symbol ?? "");
+      if (!symbol) {
+        return null;
+      }
+      const price = parseStooqNumber(record.Close);
+      if (price == null) {
+        return null;
+      }
+      const asOfTimestamp = parseStooqTimestamp(record.Date, record.Time);
+      const session = sessionInfo.session ?? QUOTE_SESSIONS.CLOSED;
+      const sourceHint = session === QUOTE_SESSIONS.CLOSED ? QUOTE_SOURCES.LAST_CLOSE : QUOTE_SOURCES.DELAYED;
+      return {
+        symbol,
+        price,
+        change: null,
+        changePct: null,
+        asOfTimestamp,
+        isRealtime: false,
+        session,
+        source: sourceHint,
+        provider: SECONDARY_PROVIDER,
+        dataType: QUOTE_DATA_TYPES.CLOSE,
+        lastSuccessAt: Date.now(),
+      };
+    })
+    .filter(Boolean);
+  return { quotes, hadFailure: errors.length > 0, errors };
 }
 
 function buildQuoteFromYahoo(quote) {
@@ -1837,6 +2314,7 @@ function buildQuoteFromYahoo(quote) {
     currency: quote.currency ?? null,
     exchangeTimezoneName: quote.exchangeTimezoneName ?? null,
     exchangeTimezoneShortName: quote.exchangeTimezoneShortName ?? null,
+    dataType: QUOTE_DATA_TYPES.LAST_TRADE,
   };
 }
 
@@ -1908,6 +2386,10 @@ function normalizeQuote(rawQuote, nowMs = Date.now()) {
     currency: base.currency ?? rawQuote.currency ?? null,
     exchangeTimezoneName: base.exchangeTimezoneName ?? rawQuote.exchangeTimezoneName ?? null,
     exchangeTimezoneShortName: base.exchangeTimezoneShortName ?? rawQuote.exchangeTimezoneShortName ?? null,
+    providerUsed: rawQuote.providerUsed ?? rawQuote.provider ?? base.providerUsed ?? base.provider ?? null,
+    dataType: normalizeDataType(rawQuote.dataType ?? base.dataType) ?? QUOTE_DATA_TYPES.UNKNOWN,
+    lastSuccessAt: parseEpoch(rawQuote.lastSuccessAt ?? null),
+    fallbackReason: rawQuote.fallbackReason ?? null,
   };
 }
 
@@ -1958,7 +2440,15 @@ function hasMarketIndicatorData(entry) {
 }
 
 function getQuoteTimestamp(entry) {
-  return parseEpoch(entry?.quoteAsOf ?? entry?.lastUpdatedAt ?? entry?.lastHistoricalTimestamp ?? null);
+  return parseEpoch(
+    entry?.quoteAsOf ??
+      entry?.lastUpdatedAt ??
+      entry?.lastHistoricalTimestamp ??
+      entry?.asOfTimestamp ??
+      entry?.asOfTs ??
+      entry?.timestamp ??
+      null,
+  );
 }
 
 function getLatestQuoteAsOf(entries = marketState) {
@@ -2019,6 +2509,14 @@ function classifyQuoteQuality({ quote, nowMs, session }) {
         showWarning: false,
       };
     }
+    if (normalizedSource === QUOTE_SOURCES.CACHED) {
+      return {
+        badge: QUOTE_SOURCES.CACHED,
+        reason: "cached_off_hours",
+        isLive: false,
+        showWarning: false,
+      };
+    }
     if (ageMs > MARKET_PULSE_EXTENDED_STALE_MS) {
       return {
         badge: QUOTE_SOURCES.CACHED,
@@ -2033,10 +2531,19 @@ function classifyQuoteQuality({ quote, nowMs, session }) {
     return { badge: QUOTE_SOURCES.DELAYED, reason: "extended_hours", isLive: false, showWarning: false };
   }
   if (normalizedSource === QUOTE_SOURCES.REALTIME) {
-    return { badge: QUOTE_SOURCES.REALTIME, reason: "provider_realtime", isLive: true, showWarning: false };
+    if (ageMs <= REALTIME_FRESHNESS_MS) {
+      return { badge: QUOTE_SOURCES.REALTIME, reason: "provider_realtime", isLive: true, showWarning: false };
+    }
+    if (ageMs <= DELAYED_FRESHNESS_MS) {
+      return { badge: QUOTE_SOURCES.DELAYED, reason: "stale_realtime", isLive: false, showWarning: false };
+    }
+    return { badge: QUOTE_SOURCES.CACHED, reason: "stale_realtime_cached", isLive: false, showWarning: true };
   }
   if (normalizedSource === QUOTE_SOURCES.DELAYED) {
-    return { badge: QUOTE_SOURCES.DELAYED, reason: "provider_delayed", isLive: false, showWarning: false };
+    if (ageMs <= DELAYED_FRESHNESS_MS) {
+      return { badge: QUOTE_SOURCES.DELAYED, reason: "provider_delayed", isLive: false, showWarning: false };
+    }
+    return { badge: QUOTE_SOURCES.CACHED, reason: "stale_delayed_cached", isLive: false, showWarning: true };
   }
   if (normalizedSource === QUOTE_SOURCES.LAST_CLOSE) {
     return {
@@ -2168,7 +2675,7 @@ function getMarketSourceBadgeForEntries(entries, { nowMs, session }) {
 function getMarketIndicatorData(entry, options = {}) {
   const entries = options.marketEntries ?? (entry ? [entry] : []);
   const hasData = entries.some((item) => hasMarketIndicatorData(item));
-  const now = options.now ?? new Date();
+  const now = options.now ?? new Date(Date.now());
   const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const sessionInfo = computeUsMarketSession(now);
   let marketStatus = "Unavailable";
@@ -2354,10 +2861,21 @@ function getQuoteBadges(quote, options = {}) {
     normalizeSource(quote?.source ?? quote?.dataSource ?? options.source) ??
     normalizeSource(options.fallbackSource);
   const session = normalizedSession ?? (hasData || isUnavailable ? QUOTE_SESSIONS.CLOSED : null);
-  let source =
-    normalizedSource ??
-    (hasData || isUnavailable ? QUOTE_SOURCES.CACHED : QUOTE_SOURCES.UNAVAILABLE);
-  if (source === QUOTE_SOURCES.UNAVAILABLE && hasPrice && hasTimestamp) {
+  const quality = hasData
+    ? classifyQuoteQuality({
+        quote: {
+          ...quote,
+          dataSource: normalizedSource ?? quote?.dataSource,
+          quoteSession: session,
+        },
+        nowMs: options.nowMs ?? Date.now(),
+        session,
+      })
+    : null;
+  let source = quality?.badge ?? normalizedSource ?? (hasData || isUnavailable ? QUOTE_SOURCES.CACHED : QUOTE_SOURCES.UNAVAILABLE);
+  if (isUnavailable) {
+    source = hasPrice || hasTimestamp ? QUOTE_SOURCES.CACHED : QUOTE_SOURCES.UNAVAILABLE;
+  } else if (source === QUOTE_SOURCES.UNAVAILABLE && hasPrice && hasTimestamp) {
     source = QUOTE_SOURCES.CACHED;
   }
   const showBadges = options.showBadges ?? (hasData || isUnavailable);
@@ -2390,7 +2908,10 @@ function getQuoteBadges(quote, options = {}) {
     options.emptyAsOfLabel ?? (isUnavailable ? "Quote unavailable" : "Loading…");
   const asOfLabel = asOfTimestamp ? `As of ${formatAsOf(asOfTimestamp, { tz: "UTC" })}` : emptyAsOfLabel;
   const showWarning = Boolean(
-    (options.showWarning ?? hasPrice) && session && source && shouldShowCacheWarning(session, source),
+    (options.showWarning ?? hasPrice) &&
+      session &&
+      source &&
+      (quality?.showWarning ?? shouldShowCacheWarning(session, source)),
   );
   return { sourceBadge, sessionBadge, asOfLabel, showWarning, session, source, asOfTimestamp };
 }
@@ -3740,6 +4261,8 @@ function updateResultLivePriceDisplay(symbol) {
     showBadges: livePrice !== null,
     emptyAsOfLabel: "Awaiting quote",
   });
+  const metaTooltip = buildProvenanceTooltip(marketEntry, badges);
+  const metaTitle = metaTooltip ? ` title="${escapeAttribute(metaTooltip)}"` : "";
   const warningIcon =
     livePrice !== null && badges.showWarning
       ? `<span class="warning-icon" title="${CACHE_WARNING_MESSAGE}" aria-label="${CACHE_WARNING_MESSAGE}">⚠</span>`
@@ -3754,7 +4277,7 @@ function updateResultLivePriceDisplay(symbol) {
         badges.sessionBadge
           ? `<span class="session-badge ${badges.sessionBadge.className}" title="${badges.sessionBadge.tooltip}">${badges.sessionBadge.label}</span>`
           : ""
-      } ${warningIcon} <span class="price-meta">${asOf}</span>`
+      } ${warningIcon} <span class="price-meta"${metaTitle}>${asOf}</span>`
     : "Live price: Not available";
 }
 
@@ -3863,6 +4386,23 @@ function updateStockWithQuote(stock, quote) {
   if (quote.exchangeTimezoneShortName) {
     stock.exchangeTimezoneShortName = quote.exchangeTimezoneShortName;
   }
+  if (quote.providerUsed || quote.provider) {
+    stock.quoteProvider = quote.providerUsed ?? quote.provider ?? stock.quoteProvider;
+  }
+  if (quote.lastSuccessAt) {
+    stock.quoteLastSuccessAt = quote.lastSuccessAt;
+  }
+  if (quote.cacheAgeSeconds != null) {
+    stock.quoteCacheAgeSeconds = quote.cacheAgeSeconds;
+  } else if (stock.quoteLastSuccessAt) {
+    stock.quoteCacheAgeSeconds = computeCacheAgeSeconds(stock.quoteLastSuccessAt);
+  }
+  if (quote.dataType) {
+    stock.quoteDataType = quote.dataType;
+  }
+  if (quote.fallbackReason) {
+    stock.quoteFallbackReason = quote.fallbackReason;
+  }
 }
 
 function updateStockWithHistorical(stock, historyPayload) {
@@ -3899,8 +4439,16 @@ function updateStockWithHistorical(stock, historyPayload) {
   if (!stock.quoteSession) {
     stock.quoteSession = QUOTE_SESSIONS.CLOSED;
   }
-  if (!stock.dataSource || stock.dataSource === QUOTE_SOURCES.REALTIME) {
+  if (
+    !stock.isRealtime &&
+    (!stock.dataSource ||
+      stock.dataSource === QUOTE_SOURCES.REALTIME ||
+      stock.dataSource === QUOTE_SOURCES.UNAVAILABLE)
+  ) {
     stock.dataSource = QUOTE_SOURCES.LAST_CLOSE;
+  }
+  if (!stock.quoteDataType) {
+    stock.quoteDataType = QUOTE_DATA_TYPES.CLOSE;
   }
 }
 
@@ -3926,6 +4474,11 @@ function createSymbolEntry(symbol, fallbackName) {
     quoteUnavailable: false,
     dataSource: QUOTE_SOURCES.REALTIME,
     quoteWarnings: [],
+    quoteProvider: null,
+    quoteLastSuccessAt: null,
+    quoteCacheAgeSeconds: null,
+    quoteDataType: null,
+    quoteFallbackReason: null,
   };
 }
 
@@ -3988,7 +4541,7 @@ function applyCachedMarketData(symbol, entry, options = {}) {
 
 function updateQuoteCache(symbol, quote) {
   const ttl = getCacheTtl(quote.session);
-  quoteCache.set(symbol, { quote, expiresAt: Date.now() + ttl });
+  quoteCache.set(symbol, { quote, expiresAt: Date.now() + ttl, storedAt: Date.now() });
 }
 
 function cacheHistorical(key, payload, ttlMs) {
@@ -4013,8 +4566,9 @@ function isHistoricalStale(symbol, { range = "1mo", interval = "1d" } = {}) {
   return !entry || Date.now() - entry.storedAt >= ttlMs;
 }
 
-// Quote pipeline: Provider (Yahoo) -> /api/quote proxy -> fetchYahooQuotes -> buildQuoteFromYahoo/normalizeQuote
-// -> marketState entries -> normalizeMarketEntryForHeader -> computeHeaderQuality -> UI badges.
+// Quote pipeline: Primary (Yahoo) -> fetchYahooQuotes -> normalizeQuote
+// Secondary fallback (Stooq) -> fetchStooqQuotes -> normalizeQuote
+// Cache fallback -> marketState entries -> normalizeMarketEntryForHeader -> computeHeaderQuality -> UI badges.
 async function fetchYahooQuotes(symbols, options = {}) {
   const uniqueSymbols = [...new Set(symbols)];
   if (!uniqueSymbols.length) {
@@ -4022,7 +4576,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
   }
   const requestId = createRequestId();
   const startedAt = Date.now();
-  const sessionInfo = computeUsMarketSession(new Date());
+  const sessionInfo = computeUsMarketSession(new Date(Date.now()));
   const batchSize = options.batchSize ?? QUOTE_BATCH_SIZE;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const maxAttempts = options.maxAttempts ?? 2;
@@ -4170,7 +4724,7 @@ async function fetchYahooQuotes(symbols, options = {}) {
           success: true,
         });
       }
-      return quoteResponse.result;
+      return quoteResponse.result.map((quote) => ({ ...quote, provider: PROVIDER }));
     }),
   );
   const quotes = [];
@@ -4256,12 +4810,18 @@ function deriveHistoricalQuote(closes, timestamps, sessionOverride = QUOTE_SESSI
     isRealtime: false,
     session: sessionOverride,
     previousClose: previous,
+    dataType: QUOTE_DATA_TYPES.CLOSE,
   };
 }
 
 function buildUnavailableQuote(lastKnown, sessionFallback = QUOTE_SESSIONS.CLOSED) {
   if (lastKnown) {
-    return { ...lastKnown, source: QUOTE_SOURCES.CACHED, unavailable: true };
+    return {
+      ...lastKnown,
+      source: QUOTE_SOURCES.CACHED,
+      unavailable: true,
+      fallbackReason: "cache",
+    };
   }
   return {
     price: null,
@@ -4273,6 +4833,7 @@ function buildUnavailableQuote(lastKnown, sessionFallback = QUOTE_SESSIONS.CLOSE
     previousClose: null,
     source: QUOTE_SOURCES.CACHED,
     unavailable: true,
+    fallbackReason: "unavailable",
   };
 }
 
@@ -4280,29 +4841,43 @@ async function getQuoteInternal(symbol, options = {}) {
   if (!isValidSymbol(symbol)) {
     throw new MarketDataError("invalid_symbol", "Invalid symbol format.");
   }
-  const cachedQuote = getCachedQuote(symbol);
+  const cachedEntry = getCachedQuoteEntry(symbol);
+  const cachedQuote = cachedEntry?.quote ?? null;
   if (cachedQuote && options.useCache !== false) {
+    const cacheTimestamp = cachedQuote.lastSuccessAt ?? cachedEntry?.storedAt ?? cachedQuote.asOfTimestamp ?? null;
+    const cacheAgeSeconds = computeCacheAgeSeconds(cacheTimestamp);
     const normalized = normalizeQuote(
       {
         ...cachedQuote,
         source: QUOTE_SOURCES.CACHED,
         lastKnownSession: cachedQuote.session ?? null,
+        lastSuccessAt: cacheTimestamp,
+        fallbackReason: "cache",
       },
       Date.now(),
     );
-    return normalized
+    const result = normalized
       ? {
           ...normalized,
           change: normalized.changeAbs,
           changePct: normalized.changePct,
           asOfTimestamp: normalized.asOfTs,
+          cacheAgeSeconds,
         }
       : { ...cachedQuote, source: QUOTE_SOURCES.CACHED };
+    logMarketDataEvent("warn", {
+      event: "market_data_quote_fallback",
+      provider: result.providerUsed ?? cachedQuote.providerUsed ?? "cache",
+      symbol,
+      reason: "cache",
+    });
+    return result;
   }
 
   let providerQuote = options.prefetchedQuote ?? null;
   let providerError = null;
-  const lastKnown = getLastKnownQuote(symbol);
+  const lastKnownEntry = getLastKnownEntry(symbol);
+  const lastKnown = lastKnownEntry?.quote ?? null;
   if (!providerQuote && options.allowFetch !== false) {
     try {
       const { quotes, errors } = await fetchYahooQuotes([symbol], options);
@@ -4339,12 +4914,29 @@ async function getQuoteInternal(symbol, options = {}) {
     return buildUnavailableQuote(lastKnown);
   }
 
+  if (!providerQuote && options.allowFetch !== false && options.allowSecondary !== false) {
+    try {
+      const { quotes, errors } = await fetchStooqQuotes([symbol], options);
+      providerQuote =
+        quotes.find((entry) => entry.symbol?.toUpperCase?.() === symbol) ??
+        quotes.find((entry) => entry.symbol === symbol) ??
+        null;
+      if (!providerQuote && errors?.length) {
+        providerError = providerError ?? errors[0];
+      }
+    } catch (error) {
+      providerError = providerError ?? error;
+    }
+  }
+
   if (providerQuote) {
     const wasUnavailable = providerQuote.unavailable === true;
+    const fetchSuccessAt = Date.now();
     const normalized = normalizeQuote(
       {
         ...providerQuote,
         lastKnownSession: lastKnown?.session ?? null,
+        lastSuccessAt: fetchSuccessAt,
       },
       Date.now(),
     );
@@ -4354,6 +4946,12 @@ async function getQuoteInternal(symbol, options = {}) {
         change: normalized.changeAbs,
         changePct: normalized.changePct,
         asOfTimestamp: normalized.asOfTs,
+        providerUsed: normalized.providerUsed ?? providerQuote.provider ?? PROVIDER,
+        lastSuccessAt: normalized.lastSuccessAt ?? fetchSuccessAt,
+        cacheAgeSeconds: 0,
+        dataType: normalized.dataType ?? QUOTE_DATA_TYPES.UNKNOWN,
+        fallbackReason:
+          providerQuote.provider === SECONDARY_PROVIDER ? "secondary_provider" : normalized.fallbackReason ?? null,
       };
       if (DEV_QUOTE_LOG_ENABLED && ["AAPL", "MSFT", "NVDA"].includes(String(symbol).toUpperCase())) {
         logDevQuote("normalized_quote", {
@@ -4373,9 +4971,19 @@ async function getQuoteInternal(symbol, options = {}) {
       if (wasUnavailable) {
         fullQuote.unavailable = true;
       }
-      logYahooQuoteDebug(providerQuote, fullQuote.session, fullQuote.source);
+      if (providerQuote.provider !== SECONDARY_PROVIDER) {
+        logYahooQuoteDebug(providerQuote, fullQuote.session, fullQuote.source);
+      }
       updateQuoteCache(symbol, fullQuote);
       setLastKnownQuote(symbol, fullQuote);
+      if (providerQuote.provider === SECONDARY_PROVIDER) {
+        logMarketDataEvent("warn", {
+          event: "market_data_quote_fallback",
+          provider: SECONDARY_PROVIDER,
+          symbol,
+          reason: "secondary_provider",
+        });
+      }
       return fullQuote;
     }
   }
@@ -4389,18 +4997,34 @@ async function getQuoteInternal(symbol, options = {}) {
   }
 
   if (lastKnown) {
+    const lastSuccessAt = parseEpoch(lastKnown.lastSuccessAt ?? lastKnownEntry?.savedAt ?? lastKnown.asOfTimestamp);
+    const cacheAgeSeconds = computeCacheAgeSeconds(lastSuccessAt ?? lastKnownEntry?.savedAt);
     const normalized = normalizeQuote(
-      { ...lastKnown, source: QUOTE_SOURCES.CACHED, lastKnownSession: lastKnown.session ?? null },
+      {
+        ...lastKnown,
+        source: QUOTE_SOURCES.CACHED,
+        lastKnownSession: lastKnown.session ?? null,
+        lastSuccessAt,
+        fallbackReason: "cache",
+      },
       Date.now(),
     );
-    return normalized
+    const result = normalized
       ? {
           ...normalized,
           change: normalized.changeAbs,
           changePct: normalized.changePct,
           asOfTimestamp: normalized.asOfTs,
+          cacheAgeSeconds,
         }
       : { ...lastKnown, source: QUOTE_SOURCES.CACHED };
+    logMarketDataEvent("warn", {
+      event: "market_data_quote_fallback",
+      provider: result.providerUsed ?? lastKnown.providerUsed ?? "cache",
+      symbol,
+      reason: "cache",
+    });
+    return result;
   }
 
   try {
@@ -4412,6 +5036,9 @@ async function getQuoteInternal(symbol, options = {}) {
           ...derived,
           source: QUOTE_SOURCES.LAST_CLOSE,
           lastKnownSession: lastKnown?.session ?? null,
+          dataType: QUOTE_DATA_TYPES.CLOSE,
+          lastSuccessAt: Date.now(),
+          fallbackReason: "last_close",
         },
         Date.now(),
       );
@@ -4421,15 +5048,31 @@ async function getQuoteInternal(symbol, options = {}) {
             change: normalized.changeAbs,
             changePct: normalized.changePct,
             asOfTimestamp: normalized.asOfTs,
+            providerUsed: normalized.providerUsed ?? PROVIDER,
+            lastSuccessAt: normalized.lastSuccessAt ?? Date.now(),
+            cacheAgeSeconds: 0,
+            dataType: normalized.dataType ?? QUOTE_DATA_TYPES.CLOSE,
+            fallbackReason: normalized.fallbackReason ?? "last_close",
           }
         : {
             ...derived,
             source: QUOTE_SOURCES.LAST_CLOSE,
+            dataType: QUOTE_DATA_TYPES.CLOSE,
+            providerUsed: PROVIDER,
+            lastSuccessAt: Date.now(),
+            cacheAgeSeconds: 0,
+            fallbackReason: "last_close",
           };
       if (providerError?.details?.reason === "empty_quote") {
         fullQuote.unavailable = true;
       }
       setLastKnownQuote(symbol, fullQuote);
+      logMarketDataEvent("warn", {
+        event: "market_data_quote_fallback",
+        provider: fullQuote.providerUsed ?? SECONDARY_PROVIDER,
+        symbol,
+        reason: "last_close",
+      });
       return fullQuote;
     }
   } catch (error) {
@@ -4976,9 +5619,36 @@ async function refreshVisibleQuotes(options = {}) {
     });
   }
 
-  const { quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbolsToFetch, quoteResults, {
+  let { quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbolsToFetch, quoteResults, {
     forceUnavailable,
   });
+  let secondaryQuotes = [];
+  if (missingSymbols.length) {
+    try {
+      const secondaryResult = await fetchStooqQuotes(missingSymbols, {
+        signal: options.signal,
+        timeoutMs: requestTimeoutMs,
+        fetchFn: options.fetchFn,
+      });
+      secondaryQuotes = secondaryResult.quotes;
+      if (secondaryResult.hadFailure) {
+        summary.errorTypes.push(
+          ...secondaryResult.errors.map((error) => error?.type ?? "unknown").filter(Boolean),
+        );
+      }
+    } catch (error) {
+      summary.errorTypes.push(error?.type ?? "unknown");
+    }
+  }
+  if (secondaryQuotes.length) {
+    if (forceUnavailable) {
+      forceUnavailable = false;
+    }
+    quoteResults = [...quoteResults, ...secondaryQuotes];
+    ({ quoteMap, unavailableMap, missingSymbols } = buildBatchPrefetch(symbolsToFetch, quoteResults, {
+      forceUnavailable,
+    }));
+  }
   if (missingSymbols.length) {
     hadQuoteFailure = true;
     summary.errorTypes.push("unavailable");
@@ -5032,6 +5702,7 @@ async function refreshVisibleQuotes(options = {}) {
   const providerMode = getProviderModeFromBadge(indicatorData?.sourceBadge?.label ?? null);
   summary.meta = {
     provider: PROVIDER,
+    secondaryProvider: SECONDARY_PROVIDER,
     providerMode,
     fallbackReason: getFallbackReason({ providerMode, indicatorData, errorTypes: summary.errorTypes }),
     fetchedAtMs: Date.now(),
@@ -5040,6 +5711,7 @@ async function refreshVisibleQuotes(options = {}) {
     realtimeOk: summary.realtimeOk,
     cachedCount: summary.cachedCount,
     failedCount: summary.failedCount,
+    secondaryCount: secondaryQuotes.length,
     lastUpdated: getLatestQuoteAsOf(marketState),
   };
   if (MARKET_DEBUG_ENABLED) {
@@ -5447,14 +6119,17 @@ function scheduleNextMarketRefresh(delayOverride) {
   }
   if (!isPageVisible()) {
     updateRefreshStatus();
+    updateMarketStreamState();
     return;
   }
   const symbols = getVisibleSymbols();
   const interval = delayOverride ?? getEffectiveRefreshInterval(symbols);
   updateRefreshStatus();
+  updateMarketStreamState();
   refreshTimerId = setTimeout(async () => {
     if (!isPageVisible()) {
       updateRefreshStatus();
+      updateMarketStreamState();
       return;
     }
     if (refreshInProgress) {
@@ -5477,8 +6152,10 @@ function handleVisibilityChange() {
       clearTimeout(refreshTimerId);
     }
     updateRefreshStatus();
+    updateMarketStreamState();
     return;
   }
+  updateMarketStreamState();
   scheduleNextMarketRefresh(0);
 }
 
@@ -5491,6 +6168,32 @@ function hasAnyMarketData(stock) {
         stock.quoteAsOf !== null ||
         stock.lastHistoricalTimestamp !== null),
   );
+}
+
+function buildProvenanceTooltip(stock, badges) {
+  if (!stock) {
+    return null;
+  }
+  const provider = stock.quoteProvider ?? "Unknown";
+  const sourceLabel = badges?.sourceBadge?.label ?? "UNAVAILABLE";
+  const sessionLabel = badges?.sessionBadge?.label ?? "UNKNOWN";
+  const asOfLabel = badges?.asOfTimestamp ? formatAsOf(badges.asOfTimestamp, { tz: "UTC" }) : "unknown time";
+  const lastSuccessAt = stock.quoteLastSuccessAt ?? null;
+  const lastSuccessLabel = lastSuccessAt ? formatAsOf(lastSuccessAt, { tz: "UTC" }) : "unknown";
+  const cacheAgeSeconds =
+    stock.quoteCacheAgeSeconds ?? (lastSuccessAt ? computeCacheAgeSeconds(lastSuccessAt) : null);
+  const cacheAgeLabel = formatCacheAge(cacheAgeSeconds);
+  const dataTypeLabel = formatDataTypeLabel(stock.quoteDataType);
+  const fallbackReason = stock.quoteFallbackReason ?? "none";
+  return [
+    `Source: ${sourceLabel} (${provider})`,
+    `Session: ${sessionLabel}`,
+    `As of: ${asOfLabel}`,
+    `Last success: ${lastSuccessLabel}`,
+    `Cache age: ${cacheAgeLabel}`,
+    `Data type: ${dataTypeLabel}`,
+    `Fallback: ${fallbackReason}`,
+  ].join("\n");
 }
 
 function getMarketRowDisplay(stock) {
@@ -5522,6 +6225,7 @@ function getMarketRowDisplay(stock) {
   const sessionBadge = badges.sessionBadge;
   const showWarning = badges.showWarning;
   const meta = badges.asOfLabel;
+  const metaTooltip = buildProvenanceTooltip(stock, badges);
   const changeDisplay =
     change !== null && changePercent !== null
       ? `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change >= 0 ? "+" : ""}${percentFormatter.format(
@@ -5544,6 +6248,7 @@ function getMarketRowDisplay(stock) {
     sessionBadge,
     showWarning,
     meta,
+    metaTooltip,
     changeDisplay,
     changeClass,
     dayDisplay,
@@ -5806,6 +6511,7 @@ function updateMarketRowCells(row, stock) {
     sessionBadge,
     showWarning,
     meta,
+    metaTooltip,
     changeDisplay,
     changeClass,
     dayDisplay,
@@ -5866,6 +6572,7 @@ function updateMarketRowCells(row, stock) {
     `;
   }
   if (priceCell) {
+    const metaTitle = metaTooltip ? ` title="${escapeAttribute(metaTooltip)}"` : "";
     priceCell.innerHTML = `
       <div class="price-cell">
         <div class="price-main">
@@ -5886,7 +6593,7 @@ function updateMarketRowCells(row, stock) {
               : ""
           }
         </div>
-        <div class="price-meta">${meta}</div>
+        <div class="price-meta"${metaTitle}>${meta}</div>
       </div>
     `;
   }
@@ -5969,6 +6676,7 @@ function renderOpportunityGroup(listEl, noteEl, entries) {
           : `<span class="opportunity-change ${changeClass}">${display.dayDisplay}</span>`;
       const scoreValue = score == null ? "n/a" : Math.round(score);
       const confidenceValue = confidence == null ? "n/a" : Math.round(confidence);
+      const metaTitle = display.metaTooltip ? ` title="${escapeAttribute(display.metaTooltip)}"` : "";
       return `
         <div class="opportunity-item">
           <div class="opportunity-main">
@@ -5991,7 +6699,7 @@ function renderOpportunityGroup(listEl, noteEl, entries) {
               ${changeMarkup}
               <span class="opportunity-score">${scoreValue} / ${confidenceValue}</span>
             </div>
-            <div class="price-meta">${display.meta}</div>
+            <div class="price-meta"${metaTitle}>${display.meta}</div>
           </div>
           <button type="button" class="analyze-button" data-action="analyze" data-symbol="${stock.symbol}">
             Analyze
@@ -6754,6 +7462,7 @@ const appCore = {
   getLatestQuoteAsOf,
   classifyQuoteQuality,
   getRefreshIntervalForSession,
+  getCacheTtl,
   getRefreshTimeoutForSession,
   getNextRefreshDelay,
   applyRateLimitBackoff,

@@ -26,6 +26,7 @@ const {
   setLastKnownQuote,
   hydrateMarketStateFromCache,
   getMarketRowDisplay,
+  getCacheTtl,
   getNextRefreshDelay,
   applyRateLimitBackoff,
   isRateLimitBackoffActive,
@@ -866,6 +867,26 @@ const tests = [
     },
   },
   {
+    name: "falls back to secondary provider when primary fails",
+    fn: async () => {
+      resetQuoteCache();
+      const fetchFn = async (url) => {
+        if (String(url).includes("stooq.com")) {
+          return createResponse({
+            ok: true,
+            status: 200,
+            text: "Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,2024-01-02,15:00:00,0,0,0,189.5,100",
+          });
+        }
+        return createResponse({ ok: false, status: 503, json: {} });
+      };
+      const quote = await getQuote("AAPL", { fetchFn, maxAttempts: 1 });
+      assert.strictEqual(quote.providerUsed, "Stooq");
+      assert.strictEqual(quote.price, 189.5);
+      assert.ok(["DELAYED", "LAST_CLOSE"].includes(quote.source));
+    },
+  },
+  {
     name: "returns quote for valid symbol",
     fn: async () => {
       resetQuoteCache();
@@ -1315,6 +1336,19 @@ const tests = [
       });
       assert.strictEqual(quality.badge, "DELAYED");
       assert.strictEqual(quality.isLive, false);
+    },
+  },
+  {
+    name: "downgrades stale realtime quotes during regular session",
+    fn: async () => {
+      const nowMs = Date.UTC(2024, 0, 2, 15, 0, 0);
+      const quality = classifyQuoteQuality({
+        quote: { lastPrice: 100, quoteAsOf: nowMs - 30 * 60 * 1000, dataSource: "REALTIME" },
+        nowMs,
+        session: "REGULAR",
+      });
+      assert.strictEqual(quality.badge, "CACHED");
+      assert.strictEqual(quality.showWarning, true);
     },
   },
   {
@@ -1907,6 +1941,15 @@ const tests = [
         backoffActive: true,
       });
       assert.strictEqual(backedOff, 10000);
+    },
+  },
+  {
+    name: "uses longer cache ttl when market is closed",
+    fn: async () => {
+      const regularTtl = getCacheTtl("REGULAR");
+      const closedTtl = getCacheTtl("CLOSED");
+      assert.strictEqual(regularTtl, 5000);
+      assert.ok(closedTtl > regularTtl);
     },
   },
   {
