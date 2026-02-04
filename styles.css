@@ -812,6 +812,7 @@ button.is-loading .button-progress {
 
 table {
   width: 100%;
+  min-width: 1600px;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
@@ -824,6 +825,7 @@ td {
   border-bottom: 1px solid #eef1ff;
   font-size: 0.98rem;
   white-space: normal;
+  line-height: 1.4;
 }
 
 .terminal-ui th,
@@ -844,6 +846,12 @@ th {
   text-overflow: unset;
 }
 
+.terminal-ui th {
+  background: rgba(18, 23, 33, 0.98);
+  color: #d5dced;
+  border-bottom: 1px solid rgba(88, 110, 148, 0.35);
+}
+
 td {
   overflow: hidden;
 }
@@ -854,6 +862,10 @@ tbody tr:hover {
 
 .terminal-ui tbody tr:hover {
   background: rgba(22, 30, 42, 0.8);
+}
+
+tbody tr {
+  height: 72px;
 }
 
 .market-row.is-active {
@@ -883,16 +895,27 @@ td[data-col="actions"] {
 }
 
 td[data-col="actions"] {
-  background: #ffffff !important;
-  background-image: none !important;
+  background-image: none;
 }
 
 td[data-col="actions"]::before {
-  display: none !important;
+  display: none;
 }
 
 tbody tr:hover td[data-col="actions"] {
   background: #fafbff;
+}
+
+.terminal-ui tbody tr:hover td[data-col="actions"] {
+  background: rgba(22, 30, 42, 0.8);
+}
+
+.terminal-ui tbody tr:nth-child(even) {
+  background: rgba(17, 24, 35, 0.6);
+}
+
+.terminal-ui tbody tr:nth-child(even) td[data-col="actions"] {
+  background: rgba(17, 24, 35, 0.6);
 }
 
 .company-cell {
@@ -985,6 +1008,7 @@ tbody tr:hover td[data-col="actions"] {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 .symbol-cell {
@@ -1259,6 +1283,7 @@ tbody tr:hover td[data-col="actions"] {
 
 .num-cell {
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 td.num-cell {
@@ -1272,22 +1297,28 @@ th.num-cell {
 
 th[data-col="symbol"],
 td[data-col="symbol"] {
-  width: 80px;
-  min-width: 80px;
+  width: 90px;
+  min-width: 90px;
+}
+
+th[data-col="favorite"],
+td[data-col="favorite"] {
+  width: 56px;
+  min-width: 56px;
 }
 
 th[data-col="company"],
 td[data-col="company"] {
-  width: 160px;
-  min-width: 160px;
-  max-width: 170px;
+  width: 180px;
+  min-width: 180px;
+  max-width: 200px;
 }
 
 th[data-col="sector"],
 td[data-col="sector"] {
-  width: 110px;
-  min-width: 110px;
-  max-width: 120px;
+  width: 120px;
+  min-width: 120px;
+  max-width: 140px;
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
@@ -1295,45 +1326,45 @@ td[data-col="sector"] {
 
 th[data-col="cap"],
 td[data-col="cap"] {
-  width: 85px;
-  min-width: 85px;
+  width: 90px;
+  min-width: 90px;
 }
 
 th[data-col="signal"],
 td[data-col="signal"] {
-  width: 80px;
-  min-width: 80px;
+  width: 90px;
+  min-width: 90px;
 }
 
 th[data-col="horizon"],
 td[data-col="horizon"] {
-  width: 100px;
-  min-width: 100px;
+  width: 110px;
+  min-width: 110px;
 }
 
 th[data-col="price"],
 td[data-col="price"] {
-  width: 150px;
-  min-width: 150px;
+  width: 190px;
+  min-width: 190px;
 }
 
 th[data-col="sparkline"],
 td[data-col="sparkline"] {
-  width: 140px;
-  min-width: 140px;
+  width: 150px;
+  min-width: 150px;
 }
 
 th[data-col="perf"],
 td[data-col="perf"] {
-  width: 260px;
-  min-width: 260px;
+  width: 300px;
+  min-width: 300px;
   text-align: left;
 }
 
 th[data-col="actions"],
 td[data-col="actions"] {
-  width: 160px;
-  min-width: 160px;
+  width: 190px;
+  min-width: 190px;
   text-align: right;
 }
 
@@ -1388,6 +1419,7 @@ td[data-col="actions"] {
 
 .performance-value {
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .performance-value.positive {
