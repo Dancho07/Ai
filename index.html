@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Stock Trader Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">AI Automated Trader</p>
+          <h1>Stock Signal Studio</h1>
+          <p class="subtitle">
+            Generate a trade recommendation powered by a lightweight AI-style strategy
+            engine using live market data.
+          </p>
+          <p class="meta">
+            Live pricing refreshes every 5s during market hours, every 12s in pre/post sessions, and every
+            5m when closed (with cached fallbacks as needed).
+          </p>
+          <a class="hero-link" href="./live.html">Open Market Pulse Dashboard</a>
+        </div>
+        <div class="hero-card">
+          <h2>How it works</h2>
+          <ul>
+            <li>Analyzes a recent 30-day price history.</li>
+            <li>Matches signals to your risk tolerance.</li>
+            <li>Summarizes buy/sell/hold guidance.</li>
+          </ul>
+        </div>
+      </header>
+
+      <section class="form-card">
+        <h2>Run a trade analysis</h2>
+        <div id="errors" class="alert hidden" role="alert"></div>
+        <div id="status" class="alert info hidden" role="status"></div>
+        <form id="trade-form">
+          <label>
+            Stock symbol
+            <input
+              type="text"
+              id="symbol-input"
+              name="symbol"
+              placeholder="e.g. AAPL"
+              autocomplete="off"
+              aria-describedby="symbol-error"
+              required
+            />
+            <div class="symbol-chips" id="symbol-chips" aria-label="Popular symbols">
+              <button type="button" class="symbol-chip" data-symbol="AAPL">AAPL</button>
+              <button type="button" class="symbol-chip" data-symbol="MSFT">MSFT</button>
+              <button type="button" class="symbol-chip" data-symbol="NVDA">NVDA</button>
+              <button type="button" class="symbol-chip" data-symbol="TSLA">TSLA</button>
+              <button type="button" class="symbol-chip" data-symbol="AMZN">AMZN</button>
+            </div>
+            <p class="field-error hidden" id="symbol-error" role="status" aria-live="polite"></p>
+          </label>
+          <label>
+            Available cash ($)
+            <input type="number" name="cash" min="0" step="0.01" placeholder="10000" required />
+          </label>
+          <label>
+            Risk tolerance
+            <select name="risk" required>
+              <option value="low">Low</option>
+              <option value="moderate" selected>Moderate</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label>
+            Position sizing mode
+            <select name="positionSizing" id="position-sizing" required>
+              <option value="cash" selected>Default (risk by tolerance)</option>
+              <option value="risk_auto">Risk % of account (auto)</option>
+              <option value="atr_stop">ATR stop sizing</option>
+              <option value="max_position_cap">Max position cap (% of account)</option>
+              <option value="risk_percent">Risk per trade (%)</option>
+            </select>
+          </label>
+          <label id="risk-percent-field" class="hidden">
+            Risk per trade (%) - manual
+            <input
+              type="number"
+              id="risk-percent"
+              name="riskPercent"
+              min="0.1"
+              max="5"
+              step="0.1"
+              placeholder="e.g. 1"
+            />
+            <p class="field-error hidden" id="risk-percent-error" role="status" aria-live="polite"></p>
+          </label>
+          <button type="submit">
+            <span class="button-label">Generate AI Signal</span>
+            <span class="button-spinner" aria-hidden="true"></span>
+            <span class="button-progress">Analyzing…</span>
+          </button>
+        </form>
+      </section>
+
+      <section id="signalResult" class="result-card hidden">
+        <div class="result-header">
+          <div>
+            <p class="eyebrow">Signal for <span id="result-symbol"></span></p>
+            <h2 id="result-action" class="signal"></h2>
+          </div>
+          <div class="result-badges">
+            <div class="badge" id="result-confidence"></div>
+            <div class="badge horizon-badge" id="result-time-horizon"></div>
+          </div>
+        </div>
+        <div class="grid">
+          <div>
+            <h3>Recommended position</h3>
+            <p class="stat" id="result-shares"></p>
+            <p class="live-price" id="result-live-price"></p>
+            <p class="muted" id="result-price"></p>
+          </div>
+          <div>
+            <h3>AI thesis</h3>
+            <ul id="result-thesis"></ul>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="plan-card">
+            <h3>Trade plan</h3>
+            <dl class="plan-list">
+              <div>
+                <dt>Entry</dt>
+                <dd id="plan-entry"></dd>
+                <span class="plan-meta" id="plan-entry-meta"></span>
+              </div>
+              <div id="plan-stop-loss-row">
+                <dt>Stop-loss</dt>
+                <dd id="plan-stop-loss"></dd>
+              </div>
+              <div id="plan-take-profit-row">
+                <dt>Take-profit</dt>
+                <dd id="plan-take-profit"></dd>
+              </div>
+              <div>
+                <dt>Position size</dt>
+                <dd id="plan-position"></dd>
+              </div>
+              <div>
+                <dt>Notional</dt>
+                <dd id="plan-notional"></dd>
+              </div>
+              <div>
+                <dt>Estimated risk at stop</dt>
+                <dd id="plan-risk-amount"></dd>
+              </div>
+              <div>
+                <dt>Stop distance</dt>
+                <dd id="plan-stop-distance"></dd>
+              </div>
+              <div id="plan-risk-reward-row">
+                <dt>Risk/Reward</dt>
+                <dd id="plan-risk-reward"></dd>
+              </div>
+            </dl>
+            <div class="plan-notes">
+              <h4>Sizing rationale</h4>
+              <ul id="plan-sizing-reasons"></ul>
+              <ul id="plan-sizing-warnings" class="plan-warnings hidden"></ul>
+            </div>
+            <div class="hold-levels hidden" id="plan-hold-levels">
+              <p class="hold-note" id="plan-hold-note"></p>
+              <h4>Levels to watch</h4>
+              <ul class="hold-levels-list">
+                <li><strong>Breakout level:</strong> <span id="plan-hold-breakout"></span></li>
+                <li class="hold-trigger" id="plan-hold-breakout-trigger"></li>
+                <li><strong>Breakdown level:</strong> <span id="plan-hold-breakdown"></span></li>
+                <li class="hold-trigger" id="plan-hold-breakdown-trigger"></li>
+              </ul>
+            </div>
+          </div>
+          <div class="plan-card signal-score-card">
+            <h3>Signal score</h3>
+            <div class="signal-score-value">
+              <span id="result-signal-score" class="signal-score-number">--</span>
+              <span id="result-signal-label" class="signal-score-label"></span>
+            </div>
+            <ul id="result-signal-breakdown" class="score-breakdown"></ul>
+          </div>
+          <div class="plan-card backtest-card">
+            <h3>Backtest (30D)</h3>
+            <p class="muted" id="result-backtest-status"></p>
+            <dl class="plan-list" id="result-backtest-list">
+              <div>
+                <dt>Trades</dt>
+                <dd id="result-backtest-trades"></dd>
+              </div>
+              <div>
+                <dt>Win rate</dt>
+                <dd id="result-backtest-win-rate"></dd>
+              </div>
+              <div>
+                <dt>Avg return</dt>
+                <dd id="result-backtest-avg-return"></dd>
+              </div>
+              <div>
+                <dt>Max drawdown</dt>
+                <dd id="result-backtest-drawdown"></dd>
+              </div>
+              <div>
+                <dt>Buy &amp; hold</dt>
+                <dd id="result-backtest-buy-hold"></dd>
+              </div>
+            </dl>
+            <p class="disclaimer" id="result-backtest-disclaimer"></p>
+          </div>
+          <div class="plan-card">
+            <h3>AI Confidence</h3>
+            <div class="confidence-row">
+              <span id="result-confidence-badge" class="badge confidence-badge"></span>
+              <span id="result-confidence-score" class="confidence-score"></span>
+            </div>
+            <p class="confidence-caution" id="result-confidence-caution"></p>
+          </div>
+          <div class="plan-card">
+            <h3>Reasoning</h3>
+            <ul id="result-reasoning"></ul>
+            <div class="invalidation-card">
+              <h4>Invalidation / What would change this signal</h4>
+              <ul id="result-invalidation"></ul>
+            </div>
+          </div>
+        </div>
+        <p class="muted" id="result-generated"></p>
+        <p class="disclaimer" id="result-disclaimer"></p>
+      </section>
+    </main>
+    <script src="signalConfig.js"></script>
+    <script src="strategy.js"></script>
+    <script src="quoteQuality.js"></script>
+    <script src="core.js"></script>
+    <script src="trade.js"></script>
+  </body>
+</html>

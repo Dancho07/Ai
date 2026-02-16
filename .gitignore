@@ -1,6 +1,0 @@
-node_modules
-.next
-.env
-coverage
-public/*.mp4
-prisma/dev.db*

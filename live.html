@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Market Pulse Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="terminal-ui">
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Live markets</p>
+          <h1>Market Pulse Dashboard</h1>
+          <p class="subtitle">
+            Monitor the live watchlist, filter by sector and signal strength, and jump straight into
+            a fresh trade analysis.
+          </p>
+          <p class="meta">
+            Quotes refresh automatically based on market session and fall back to cached or historical
+            data when live feeds are unavailable.
+          </p>
+          <a class="hero-link" href="./index.html">Back to Trade Analysis</a>
+        </div>
+        <div class="hero-card">
+          <h2>Quick actions</h2>
+          <ul>
+            <li>Filter by sector, cap size, and signal.</li>
+            <li>Sort by momentum and signal score.</li>
+            <li>Analyze any symbol in one click.</li>
+          </ul>
+        </div>
+      </header>
+
+      <div class="market-shell">
+        <section class="market-card">
+        <div class="market-header">
+          <div>
+            <p class="eyebrow">Live prices</p>
+            <h2>Market pulse board</h2>
+            <p class="subtitle">
+              Track live prices across the watchlist and refine results with detailed filters.
+            </p>
+            <label class="auto-run-toggle">
+              <input type="checkbox" id="auto-run-toggle" checked />
+              Auto-run analysis on click
+            </label>
+          </div>
+          <div class="refresh-panel">
+            <button type="button" class="refresh-pill" id="refresh-pill">
+              <span class="dot"></span>
+              <span id="refresh-status">Updating…</span>
+            </button>
+            <div class="refresh-meta">
+              <span id="refresh-count">Quotes loaded 0/0</span>
+              <span id="refresh-time">Last refresh —</span>
+            </div>
+          </div>
+        </div>
+        <div class="market-indicator" id="market-indicator">
+          <div class="market-indicator-group">
+            <span class="market-indicator-label">Market Status</span>
+            <span id="market-open-text">Closed</span>
+            <span id="market-session-badge" class="session-badge closed">CLOSED</span>
+          </div>
+          <div class="market-indicator-group">
+            <span class="market-indicator-label">Data Freshness</span>
+            <span id="market-as-of">As of unknown UTC</span>
+            <span id="market-source-badge" class="session-badge closed">HISTORICAL</span>
+          </div>
+          <span id="market-cache-note" class="market-indicator-note hidden">Using cached data</span>
+        </div>
+        <p class="market-debug hidden" id="market-debug"></p>
+        <div class="degraded-banner hidden" id="degraded-banner" role="status" aria-live="polite">
+          <span id="degraded-message">Degraded mode enabled.</span>
+          <button type="button" id="degraded-refresh" class="secondary-button">Refresh now</button>
+        </div>
+        <div class="quote-status-banner hidden" id="quote-status-banner" role="status" aria-live="polite">
+          <span id="quote-status-message">Live quotes unavailable.</span>
+          <button type="button" id="quote-status-retry" class="secondary-button">Retry now</button>
+        </div>
+
+        <div class="watchlist-controls">
+          <label class="watchlist-select">
+            Watchlist
+            <div class="watchlist-select-row">
+              <select id="watchlist-select"></select>
+              <button type="button" id="watchlist-delete" class="secondary-button">Delete</button>
+            </div>
+          </label>
+          <label class="watchlist-create">
+            New watchlist
+            <div class="watchlist-input-row">
+              <input type="text" id="watchlist-name" placeholder="e.g. Momentum" />
+              <button type="button" id="watchlist-create" class="primary-button">Create</button>
+            </div>
+          </label>
+          <label class="watchlist-input">
+            Add symbol
+            <div class="watchlist-input-row">
+              <input type="text" id="watchlist-input" placeholder="e.g. TSLA" />
+              <button type="button" id="watchlist-add-button" class="primary-button">Add</button>
+            </div>
+            <p class="field-error hidden" id="watchlist-error" role="status" aria-live="polite"></p>
+          </label>
+          <label class="favorites-toggle">
+            <input type="checkbox" id="filter-favorites" />
+            Show favorites only
+          </label>
+        </div>
+
+        <div class="view-controls">
+          <label class="view-select">
+            Saved view
+            <div class="view-select-row">
+              <select id="saved-view-select"></select>
+              <button type="button" id="saved-view-delete" class="secondary-button">Delete</button>
+            </div>
+          </label>
+          <label class="view-save">
+            Save current view
+            <div class="view-save-row">
+              <input type="text" id="saved-view-name" placeholder="e.g. High momentum" />
+              <button type="button" id="saved-view-save" class="primary-button">Save view</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="filters">
+          <label>
+            Search symbol
+            <input type="text" id="filter-search" placeholder="e.g. TSLA" />
+          </label>
+          <label>
+            Sector
+            <select id="filter-sector">
+              <option value="all" selected>All sectors</option>
+              <option value="Technology">Technology</option>
+              <option value="Finance">Finance</option>
+              <option value="Healthcare">Healthcare</option>
+              <option value="Consumer">Consumer</option>
+              <option value="Energy">Energy</option>
+            </select>
+          </label>
+          <label>
+            Market cap
+            <select id="filter-cap">
+              <option value="all" selected>All caps</option>
+              <option value="Large">Large</option>
+              <option value="Mid">Mid</option>
+              <option value="Small">Small</option>
+            </select>
+          </label>
+          <label>
+            Signal
+            <select id="filter-signal">
+              <option value="all" selected>All signals</option>
+              <option value="buy">Buy</option>
+              <option value="hold">Hold</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+          <label>
+            Min price
+            <input type="number" id="filter-min" min="0" step="0.01" placeholder="0" />
+          </label>
+          <label>
+            Max price
+            <input type="number" id="filter-max" min="0" step="0.01" placeholder="500" />
+          </label>
+          <label>
+            Min 1M change %
+            <input type="number" id="filter-month" step="0.1" placeholder="0" />
+          </label>
+        </div>
+
+        <section class="opportunities-card" id="top-opportunities">
+          <div class="opportunities-header">
+            <div>
+              <p class="eyebrow">Top opportunities today</p>
+              <h3>Top opportunities today</h3>
+            </div>
+            <label class="opportunities-toggle">
+              <input type="checkbox" id="opportunities-toggle" checked />
+              Show Top opportunities
+            </label>
+          </div>
+          <div class="opportunities-content" id="opportunities-content">
+            <div class="opportunities-grid">
+              <article class="opportunity-card" data-group="buy">
+                <div class="opportunity-card-header">
+                  <div class="opportunity-title">
+                    <span>Top BUY</span>
+                    <span class="signal-pill buy">BUY</span>
+                  </div>
+                </div>
+                <div class="opportunity-list" id="opportunity-buy-list"></div>
+                <p class="opportunity-note hidden" id="opportunity-buy-note">Not enough matches.</p>
+              </article>
+              <article class="opportunity-card" data-group="sell">
+                <div class="opportunity-card-header">
+                  <div class="opportunity-title">
+                    <span>Top SELL</span>
+                    <span class="signal-pill sell">SELL</span>
+                  </div>
+                </div>
+                <div class="opportunity-list" id="opportunity-sell-list"></div>
+                <p class="opportunity-note hidden" id="opportunity-sell-note">Not enough matches.</p>
+              </article>
+              <article class="opportunity-card" data-group="movers">
+                <div class="opportunity-card-header">
+                  <div class="opportunity-title">
+                    <span>Top Movers 1D</span>
+                    <span class="badge">1D</span>
+                  </div>
+                </div>
+                <div class="opportunity-list" id="opportunity-movers-list"></div>
+                <p class="opportunity-note hidden" id="opportunity-movers-note">Not enough matches.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <div class="market-empty-state hidden" id="market-empty-state" role="status" aria-live="polite">
+          <p id="market-empty-message">No matches for current filters.</p>
+          <button type="button" id="clear-filters" class="secondary-button">Clear filters</button>
+        </div>
+
+        <div class="market-table">
+          <table>
+            <colgroup>
+            <col data-col="favorite" />
+            <col data-col="symbol" />
+            <col data-col="company" />
+            <col data-col="sector" />
+            <col data-col="cap" />
+            <col data-col="signal" />
+            <col data-col="horizon" />
+            <col data-col="price" />
+            <col data-col="sparkline" />
+            <col data-col="perf" />
+            <col data-col="actions" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th data-col="favorite">Fav</th>
+              <th data-col="symbol">Symbol</th>
+              <th data-col="company">Company</th>
+              <th data-col="sector">Sector</th>
+              <th data-col="cap">Market cap</th>
+              <th data-col="signal">Signal</th>
+              <th data-col="horizon">Time horizon</th>
+              <th data-col="price" class="num-cell">Live price</th>
+              <th data-col="sparkline">30D trend</th>
+              <th data-col="perf">Performance</th>
+              <th data-col="actions">Actions</th>
+            </tr>
+          </thead>
+            <tbody id="market-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="analysis-panel" id="analysis-panel" aria-live="polite">
+        <div class="analysis-panel-header">
+          <div>
+            <p class="eyebrow">Analysis panel</p>
+            <h3 id="analysis-symbol">Select a row</h3>
+            <p class="muted" id="analysis-company">Click a symbol to see the trade plan.</p>
+          </div>
+          <button type="button" id="analysis-close" class="icon-button" aria-label="Close analysis panel">
+            ✕
+          </button>
+        </div>
+        <div class="analysis-panel-body">
+          <div class="analysis-chart" id="analysis-chart">
+            <p class="muted">Sparkline will appear here.</p>
+          </div>
+          <div class="analysis-section">
+            <h4>Trade plan</h4>
+            <dl class="analysis-list" id="analysis-plan">
+              <div>
+                <dt>Entry</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Stop</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Target</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Invalidation</dt>
+                <dd>—</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="analysis-section">
+            <h4>Provenance &amp; freshness</h4>
+            <ul class="analysis-meta" id="analysis-provenance"></ul>
+          </div>
+          <div class="analysis-section">
+            <h4>Recent performance</h4>
+            <ul class="analysis-meta" id="analysis-performance"></ul>
+          </div>
+        </div>
+      </aside>
+    </div>
+    </main>
+    <script src="signalConfig.js"></script>
+    <script src="strategy.js"></script>
+    <script src="quoteQuality.js"></script>
+    <script src="core.js"></script>
+    <script src="live.js"></script>
+  </body>
+</html>
